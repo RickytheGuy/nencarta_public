@@ -3,8 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
-  - beautifulsoup4
+  - python
   - cython
   - dask
   - dataretrieval
@@ -17,7 +16,6 @@ dependencies:
   - numba
   - numpy
   - pandas
-  - pillow=9.0.1
   - progress
   - pyproj
   - pyqt>=5.15
