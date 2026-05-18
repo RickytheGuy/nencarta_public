@@ -396,26 +396,49 @@ def _write_arc_input_section(
     maybe_use_clean_dem: bool,
     include_flow_file_bf: bool = True
 ):
-    bathy_args: dict = watershed_dict['bathy_args']
-    out_file.write('#ARC_Inputs')
-    out_file.write(f'\nDEM_File\t{folder.DEM_File_Clean if maybe_use_clean_dem else folder.DEM_File}') # use_clean_dem will auto pick the cleaned DEM if it was created, else we force using the original DEM
-    out_file.write(f'\nStream_File\t{folder.STRM_File_Clean}')
-    out_file.write(f'\nLU_Raster_SameRes\t{folder.LAND_File}')
-    out_file.write(f'\nLU_Manning_n\t{folder.mannings_n_text_file}')
-    out_file.write(f'\nFlow_File\t{folder.DEM_Reanalsyis_FlowFile}')
-    out_file.write(f'\nFlow_File_ID\t{COMID_Param}')
+    bathy_args = watershed_dict.get("bathy_args", {})
+
+    params = {
+        "DEM_File": (
+            folder.DEM_File_Clean
+            if maybe_use_clean_dem
+            else folder.DEM_File
+        ),
+        "Stream_File": folder.STRM_File_Clean,
+        "LU_Raster_SameRes": folder.LAND_File,
+        "LU_Manning_n": folder.mannings_n_text_file,
+        "Flow_File": folder.DEM_Reanalsyis_FlowFile,
+        "Flow_File_ID": COMID_Param,
+        "Flow_File_QMax": watershed_dict["specified_highflow_field"],
+        "Spatial_Units": "deg",
+    }
+
     if include_flow_file_bf:
-        out_file.write(f"\nFlow_File_BF\t{watershed_dict['specified_bathyflow_field']}")
-    out_file.write(f'\nFlow_File_QMax\t{watershed_dict["specified_highflow_field"]}')
-    out_file.write(f'\nSpatial_Units\tdeg')
-    out_file.write(f'\nX_Section_Dist\t{bathy_args["X_Section_Dist"]}')
-    out_file.write(f'\nDegree_Manip\t{bathy_args["Degree_Manip"]}')
-    out_file.write(f'\nDegree_Interval\t{bathy_args["Degree_Interval"]}')
-    out_file.write(f'\nLow_Spot_Range\t{bathy_args["Low_Spot_Range"]}')
-    out_file.write(f'\nStr_Limit_Val\t{bathy_args["Str_Limit_Val"]}')
-    out_file.write(f'\nGen_Dir_Dist\t{bathy_args["Gen_Dir_Dist"]}')
-    out_file.write(f'\nGen_Slope_Dist\t{bathy_args["Gen_Slope_Dist"]}')
-    out_file.write(f'\nStream_Slope_Method\t{bathy_args["Stream_Slope_Method"]}')
+        params["Flow_File_BF"] = watershed_dict[
+            "specified_bathyflow_field"
+        ]
+
+    optional_bathy_keys = [
+        "X_Section_Dist",
+        "Degree_Manip",
+        "Degree_Interval",
+        "Low_Spot_Range",
+        "Str_Limit_Val",
+        "Gen_Dir_Dist",
+        "Gen_Slope_Dist",
+        "Stream_Slope_Method",
+    ]
+
+    params.update({
+        key: bathy_args[key]
+        for key in optional_bathy_keys
+        if key in bathy_args
+    })
+
+    out_file.write("#ARC_Inputs")
+
+    for key, value in params.items():
+        out_file.write(f"\n{key}\t{value}")
 
 def _write_fldpln_section(out_file: TextIO, folder: FloodFolder, watershed_dict: dict, use_bathy_flow_dir: bool = False):
     out_file.write('\n\n#FLDPLN_Specific_Inputs')
@@ -1486,8 +1509,8 @@ def validate_specified_depths(use_specified_depth_for_bathy_mask: bool,
                               clean_dem: bool, 
                               watershed_name: str):
     if use_specified_depth_for_bathy_mask:
-        if not specify_depths_for_bathy_mask or not isinstance(specify_depths_for_bathy_mask, list) or len(specify_depths_for_bathy_mask) < 1:
-            raise ValueError(f"Watershed '{watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of two floats when 'use_specified_depth_for_bathy_mask' is True.")
+        if not specify_depths_for_bathy_mask or not isinstance(specify_depths_for_bathy_mask, list) or len(specify_depths_for_bathy_mask) not in [1, 2]:
+            raise ValueError(f"Watershed '{watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of 1-2 floats when 'use_specified_depth_for_bathy_mask' is True.")
         elif len(specify_depths_for_bathy_mask) < 2 and clean_dem:
             raise ValueError(f"Watershed '{watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of two floats when 'clean_dem' is True.")
         elif len(specify_depths_for_bathy_mask) > 1 and not clean_dem:
@@ -1531,8 +1554,10 @@ def validate_user_floodmaps(watershed_dict: dict):
     if floodmap_mode == "user" and (not user_flow_files or not isinstance(user_flow_files, list) or len(user_flow_files) < 1):
         raise ValueError(f"Watershed '{watershed_dict.get('name', 'unknown')}' requires 'user_flow_files' as either a filepath string or a list of file paths when 'floodmap_mode' is 'user'.")
     
+    if user_flow_files:
+        user_flow_files = [os.path.normpath(f) for f in user_flow_files]
 
-    return floodmap_mode, [os.path.normpath(f) for f in user_flow_files]
+    return floodmap_mode, user_flow_files
 
 def norm_or_none(path: str):
     return os.path.normpath(path) if path else None
@@ -1640,6 +1665,7 @@ def process_watershed(input_dict: dict, timer: Timer = None):
     process_dem(watershed_dict, timer)
 
     LOG.info(f"Finished processing {watershed_name}")
+
 
 def process_json_input(json_file, parallel=None, num_workers=None):
     """
