@@ -2,22 +2,21 @@
 import os
 import math
 import logging
+import warnings
 
 # third-party imports
 from osgeo import gdal, osr, ogr
 from whitebox import WhiteboxTools
 import geopandas as gpd
-from shapely.ops import unary_union, linemerge
 import numpy as np
 import pandas as pd
 
 from . import LOG
 
-def create_flow_direction_and_flow_accumulation_raster(dem: str, filled_dem: str, out_dir: str, flowdir: str, flowacc: str = None):
+def create_flow_direction_and_flow_accumulation_raster(dem: str, filled_dem: str, flowdir: str, flowacc: str = None):
     wbt = WhiteboxTools()
     wbt.set_verbose_mode(LOG.level <= logging.INFO)
     wbt.set_compress_rasters(True)
-    wbt.work_dir = out_dir
 
     # remove all the old files before proceeding
     if os.path.exists(filled_dem):
@@ -70,7 +69,6 @@ def create_catchments_and_flowlines_with_flow_direction_and_accumulation(
 
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
-    wbt.work_dir = out_dir
 
     stream_mask = os.path.join(out_dir, "stream_mask_thresholded.tif")
     stream_lines_shp = os.path.join(out_dir, "stream_lines_thresholded.shp")
@@ -348,8 +346,10 @@ def match_new_streams_to_old_streams(
 
     # Precompute old stream centroids and buffers for fast candidate lookup.
     old_streams["_oidx"] = np.arange(len(old_streams), dtype=np.int64)
-    old_streams["_centroid"] = old_streams.geometry.centroid
-    old_streams["_buffer_geom"] = old_streams.geometry.buffer(buffer_distance_m)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "Geometry is in a geographic CRS", UserWarning)
+        old_streams["_centroid"] = old_streams.geometry.centroid
+        old_streams["_buffer_geom"] = old_streams.geometry.buffer(buffer_distance_m)
     old_buffer_sindex = gpd.GeoSeries(old_streams["_buffer_geom"], crs=old_streams.crs).sindex
 
     # Precompute new stream centroids for diagnostics and keep a stable source-row id

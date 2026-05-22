@@ -6,8 +6,9 @@ from typing import Any
 from propcache import cached_property
 
 import geopandas as gpd
-from shapely.geometry import box
+import numpy as np
 from osgeo import gdal, osr
+from shapely.geometry import box
 
 from .abc_geo import GISDataSource
 from .geo_cache import LMDBCache
@@ -35,19 +36,29 @@ class Raster(GISDataSource, LMDBCache):
         return self._metadata["projection"]
 
     @property
-    def shape(self) -> tuple:
+    def shape(self) -> tuple[int, int]:
+        """Returns (nrows, ncols)"""
         return tuple(self._metadata["shape"])
+    
+    @property
+    def nrows(self) -> int:
+        return self.shape[0]
+    
+    @property
+    def ncols(self) -> int:
+        return self.shape[1]
 
     @property
-    def resolution(self) -> tuple:
+    def resolution(self) -> tuple[float, float]:
+        """Returns (x_resolution, y_resolution)"""
         return tuple(self._metadata["resolution"])
 
     @property
-    def bbox(self) -> tuple:
+    def bbox(self) -> tuple[float, float, float, float]:
         return tuple(self._metadata["bbox"])
 
     @property
-    def epsg_4326_bbox(self) -> tuple:
+    def epsg_4326_bbox(self) -> tuple[float, float, float, float]:
         return tuple(self._metadata["epsg_4326_bbox"])
 
     def _load_or_compute_metadata(self) -> dict[str, Any]:
@@ -92,16 +103,17 @@ class Raster(GISDataSource, LMDBCache):
         projection = ds.GetProjection()
 
         shape = (
-            ds.RasterXSize,
             ds.RasterYSize,
+            ds.RasterXSize,
         )
 
+        # This takes into account potential rotation terms in the geotransform, but assumes no shearing (i.e. geotransform[2] and geotransform[4] are 0).
         resolution = (
             abs(geotransform[1]),
             abs(geotransform[5]),
         )
 
-        width, height = shape
+        height, width = shape
 
         minx = geotransform[0]
         maxx = geotransform[0] + width * geotransform[1]
@@ -151,3 +163,44 @@ class Raster(GISDataSource, LMDBCache):
                 output.add(raster)
 
         return list(output)
+    
+    def read_array(self) -> np.ndarray:
+        return self.ds.ReadAsArray()
+    
+    @classmethod
+    def write_array_using_reference(cls, 
+                          array: np.ndarray, 
+                          reference_raster: Raster, 
+                          output_path: str,
+                          output_dtype: int = gdal.GDT_Float32):
+        o_driver: gdal.Driver = gdal.GetDriverByName("GTiff")
+    
+        # Construct the file with the appropriate data shape
+        o_output_file: gdal.Dataset = o_driver.Create(
+            output_path, 
+            xsize=array.shape[0], 
+            ysize=array.shape[1], 
+            bands=1, 
+            eType=output_dtype, 
+            options=['COMPRESS=DEFLATE'])
+
+        # Get the first band (assuming a single-band raster)
+        band: gdal.Band = o_output_file.GetRasterBand(1)
+
+        # Initialize the band with zeros
+        band.Fill(0)
+
+        # Set the geotransform
+        o_output_file.SetGeoTransform(reference_raster.geotransform)
+        
+        # Set the spatial reference
+        o_output_file.SetProjection(reference_raster.projection)
+        
+        # Write the data to the file
+        band.WriteArray(array)
+
+        # Write to disk
+        band.FlushCache()
+        
+        # Once we're done, close properly the dataset
+        o_output_file = None

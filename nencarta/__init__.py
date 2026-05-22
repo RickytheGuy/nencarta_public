@@ -6,4 +6,4 @@ from .esa_download_processing import *
 from .streamflow_processing import *
 from .Download_USGS_DEM import *
 from .Hydroterrain_Processing import *
-
+from .flood_folder import FolderStructure, DefaultNencartaFolderStructure

@@ -28,6 +28,7 @@ from pyproj import CRS
 from shapely.geometry import box
 from curve2flood import Curve2Flood_MainFunction
 from arc.Create_GeoJSON import Run_Main_VDT_to_GEOJSON_Program_Stream_Vector
+from nencarta.api import configs
 
 # local imports
 from . import LOG
@@ -39,31 +40,11 @@ from . import Hydroterrain_Processing
 from . import esa_download_processing as ESA
 from . import streamflow_processing as HistFlows
 from . import Download_Process_ForecastData as ForecastFlows
-
-CURVE2FLOOD_MAPPERS = [
-    "Curve2Flood-Kernel Weighted",
-    "Curve2Flood-FLDPLNpy",
-    "Curve2Flood-Multi-Point Interpolation",
-]
-ALL_MAPPERS = ["FloodSpreader"] + CURVE2FLOOD_MAPPERS
-
-
-def normalize_mapper_name(mapper: str | None) -> str:
-    if mapper is None:
-        return "Curve2Flood-Kernel Weighted"
-    mapper = str(mapper).strip()
-    if mapper == "":
-        return "Curve2Flood-Kernel Weighted"
-    return mapper
-
-
-def is_curve2flood_mapper(mapper: str | None) -> bool:
-    return normalize_mapper_name(mapper) in CURVE2FLOOD_MAPPERS
-
-
-def is_curve2flood_fldpln_mapper(mapper: str | None) -> bool:
-    return normalize_mapper_name(mapper) == "Curve2Flood-FLDPLNpy"
-
+from .api import Domain
+from .api import NencartaConfig
+from nencarta.flood_folder import FolderStructure, DefaultNencartaFolderStructure
+from nencarta.api.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.api.model_manager import ModelManager
 
 def is_bathymetry_disabled(watershed_dict: dict | None) -> bool:
     return bool(watershed_dict and watershed_dict.get("disable_bathymetry", False))
@@ -654,7 +635,8 @@ def Create_ARC_Model_Input_File_FloodForecast(ForecastFlowFile: str, folder: Flo
 
     return (Forecast_Flood_Map_Raster, Forecast_Flood_Depth_Raster)
     
-def Create_BaseLine_Manning_n_File_ESA(ManningN):
+def Create_BaseLine_Manning_n_File_ESA(ManningN: str):
+    os.makedirs(os.path.dirname(ManningN), exist_ok=True)
     LOG.info('Creating Manning n file: ' + ManningN)
     with open(ManningN,'w') as out_file:
         out_file.write('LC_ID	Description	Manning_n')
@@ -1036,16 +1018,11 @@ def create_fist_inputs(folder: FloodFolder, watershed_dict: dict, timer: Timer):
             with timer('geojson_fist'):
                 Run_Main_VDT_to_GEOJSON_Program_Stream_Vector(folder.VDT_File_Bathy, folder.STRM_File_Clean, GeoJSON_File, OutProjection, folder.DEM_StrmShp, stream_id_field, ds_stream_id_field, SEED_File, Thin_Output=True, comid_q_df=streamflow_forecast_filtered_df)
 
-def remove_old_forecast_files(folder: FloodFolder, watershed_dict: dict):
-    if not watershed_dict['remove_old_forecast_files']:
-        return
-    
+def remove_old_forecast_files(forecast_dir: str, forecast_floodmap_basename: str, age_of_forecast_days: int):
     # check and see if forecasts past a specified date exist and if so, delete them
-    forecast_dir = os.path.dirname(folder.Forecast_Flood_Map)
-    forecast_file = os.path.basename(folder.Forecast_Flood_Map)
     files_in_forecast_dir = os.listdir(forecast_dir)
     for filename in files_in_forecast_dir:
-        if not filename.startswith(forecast_file[:-12]):
+        if not filename.startswith(forecast_floodmap_basename[:-12]):
             continue
 
         # Regular expression to extract the date
@@ -1062,12 +1039,12 @@ def remove_old_forecast_files(folder: FloodFolder, watershed_dict: dict):
         # Convert to datetime object
         file_date = datetime.strptime(date_str, '%Y%m%d')
         
-        # Calculate the date 7 days ago
-        seven_days_ago = datetime.now() - timedelta(days=watershed_dict['age_of_forecast_days'])
+        # Calculate the date
+        date_threshold = datetime.now() - timedelta(days=age_of_forecast_days)
         
-        # Check if the file is older than 7 days
-        if file_date <= seven_days_ago:
-            # If the file is 7 days old or older, delete the file
+        # Check if the file is older than the specified number of days
+        if file_date <= date_threshold:
+            # If the file is as old or older than the specified number of days, delete the file
             os.remove(os.path.join(forecast_dir,filename))
             LOG.info(f"File {filename} has been deleted.")
         else:
@@ -1572,99 +1549,396 @@ def float_or_none(value):
 
 def process_watershed(input_dict: dict, timer: Timer = None):
     """The core logic for processing a watershed."""
-    verify_required_keys(input_dict)
-    watershed_name = input_dict.get("name")
+    # verify_required_keys(input_dict)
+    # watershed_name = input_dict.get("name")
     
-    streamflow_source = input_dict.get("streamflow_source", "GEOGLOWS")
-    forensic_forecast_hour = validate_forecast_hour(input_dict.get("forensic_forecast_hour"))
-    validate_forecast_hours(streamflow_source, forensic_forecast_hour, watershed_name)
+    # streamflow_source = input_dict.get("streamflow_source", "GEOGLOWS")
+    # forensic_forecast_hour = validate_forecast_hour(input_dict.get("forensic_forecast_hour"))
+    # validate_forecast_hours(streamflow_source, forensic_forecast_hour, watershed_name)
 
-    nwm_api_key = input_dict.get("nwm_api_key")
-    validate_nwm_api_key(nwm_api_key, watershed_name, streamflow_source)
+    # nwm_api_key = input_dict.get("nwm_api_key")
+    # validate_nwm_api_key(nwm_api_key, watershed_name, streamflow_source)
 
-    use_specified_depth_for_bathy_mask = input_dict.get("use_specified_depth_for_bathy_mask", True)
-    specify_depths_for_bathy_mask = input_dict.get("specify_depths_for_bathy_mask")
-    clean_dem = input_dict.get("clean_dem", False)
-    validate_specified_depths(use_specified_depth_for_bathy_mask, specify_depths_for_bathy_mask, clean_dem, watershed_name)
+    # use_specified_depth_for_bathy_mask = input_dict.get("use_specified_depth_for_bathy_mask", True)
+    # specify_depths_for_bathy_mask = input_dict.get("specify_depths_for_bathy_mask")
+    # clean_dem = input_dict.get("clean_dem", False)
+    # validate_specified_depths(use_specified_depth_for_bathy_mask, specify_depths_for_bathy_mask, clean_dem, watershed_name)
 
-    floodmap_mode, user_flow_files = validate_user_floodmaps(input_dict)
+    # floodmap_mode, user_flow_files = validate_user_floodmaps(input_dict)
 
-    if not input_dict.get("make_depth_maps", True) and input_dict.get('estimate_consequences', False):
-        LOG.warning(f"Watershed '{watershed_name}': 'make_depth_maps' is False but 'estimate_consequences' is True. Setting 'make_depth_maps' to True.")
-        input_dict['make_depth_maps'] = True
+    # if not input_dict.get("make_depth_maps", True) and input_dict.get('estimate_consequences', False):
+    #     LOG.warning(f"Watershed '{watershed_name}': 'make_depth_maps' is False but 'estimate_consequences' is True. Setting 'make_depth_maps' to True.")
+    #     input_dict['make_depth_maps'] = True
 
-    dem_filter = input_dict.get("dem_filter", "*")
-    if not dem_filter:
-        dem_filter = "*"
+    # dem_filter = input_dict.get("dem_filter", "*")
+    # if not dem_filter:
+    #     dem_filter = "*"
 
-    move_stream_network_to_new_locations = input_dict.get("move_stream_network_to_new_locations", False)
-    stream_order_threshold = float_or_none(input_dict.get("new_strm_threshold_km2"))
-    if move_stream_network_to_new_locations is True and stream_order_threshold is None:
-        raise ValueError(f"Watershed '{watershed_name}': 'stream_order_threshold' must be specified when moving stream network.")
+    # move_stream_network_to_new_locations = input_dict.get("move_stream_network_to_new_locations", False)
+    # stream_order_threshold = float_or_none(input_dict.get("new_strm_threshold_km2"))
+    # if move_stream_network_to_new_locations is True and stream_order_threshold is None:
+    #     raise ValueError(f"Watershed '{watershed_name}': 'stream_order_threshold' must be specified when moving stream network.")
 
-    watershed_dict = {
-        "name": watershed_name,
-        "flowline": os.path.normpath(input_dict["flowline"]),
-        "dem_dir": os.path.normpath(input_dict["dem_dir"]),
-        "output_dir": os.path.normpath(input_dict["output_dir"]),
-        "disable_bathymetry": input_dict.get("disable_bathymetry", False),
-        "bathy_use_banks": input_dict.get("bathy_use_banks", False),
-        "flood_waterlc_and_strm_cells": input_dict.get("flood_waterlc_and_strm_cells", False),
-        "land_watervalue": input_dict.get("land_watervalue", 80),
-        "clean_dem": clean_dem,
-        "mapper": normalize_mapper_name(input_dict.get("mapper", "FloodSpreader")),
-        "process_stream_network": input_dict.get("process_stream_network", False),
-        "use_specified_depth_for_bathy_mask": use_specified_depth_for_bathy_mask,
-        "age_of_forecast_days": input_dict.get("age_of_forecast_days", 7),
-        "find_banks_based_on_landcover": input_dict.get("find_banks_based_on_landcover", True),
-        "specify_depths_for_bathy_mask": specify_depths_for_bathy_mask,
-        "create_reach_average_curve_file": input_dict.get("create_reach_average_curve_file", False),
-        "use_warning_flags_to_download_dem": input_dict.get("use_warning_flags_to_download_dem", False),
-        "geoglows_vpu": input_dict.get("geoglows_vpu"),
-        "forensic_forecast_date": validate_forecast_date(input_dict.get("forensic_forecast_date"), streamflow_source),
-        "forensic_forecast_hour": forensic_forecast_hour,
-        "specified_bathyflow_field":input_dict.get("specified_bathyflow_field", "p_exceed_50"),
-        "specified_highflow_field":input_dict.get("specified_highflow_field", "rp100_premium"),
-        "StrmOrder_Field": input_dict.get("StrmOrder_Field"),
-        "StrmOrder_Lower": input_dict.get("StrmOrder_Lower"),
-        "StrmOrder_Upper": input_dict.get("StrmOrder_Upper"),
-        "q_baseflow_threshold": float_or_none(input_dict.get("q_baseflow_threshold")),
-        "lake_filter_json": norm_or_none(input_dict.get("lake_filter_json")),
-        "estimate_consequences": input_dict.get("estimate_consequences", False),
-        "streamflow_source": streamflow_source,
-        "nwm_api_key": nwm_api_key,
-        "overwrite_floodmaps": input_dict.get("overwrite_floodmaps", True),
-        "remove_old_forecast_files": input_dict.get("remove_old_forecast_files", False),
-        "make_fist_inputs": input_dict.get("make_fist_inputs", True),
-        "dem_filter": dem_filter,
-        "floodmap_mode": floodmap_mode,
-        "user_flow_files": user_flow_files,
-        "make_curvefile": input_dict.get("make_curvefile", True),
-        "make_ap_database": input_dict.get("make_ap_database", True),
-        "vdt_file_extension": input_dict.get("vdt_file_extension", 'txt'),
-        "mannings_text_file": norm_or_none(input_dict.get("mannings_text_file")),
-        "bathy_args": input_dict.get("bathy_args", {}),
-        "floodmap_args": input_dict.get("floodmap_args", {}),
-        "make_depth_maps": input_dict.get("make_depth_maps", True),
-        "make_velocity_maps": input_dict.get("make_velocity_maps", True),
-        "make_wse_maps": input_dict.get("make_wse_maps", True),
-        "floodmap_identifier": input_dict.get("floodmap_identifier", ""),
-        "move_stream_network_to_new_locations": input_dict.get("move_stream_network_to_new_locations", False),
-        "new_strm_threshold_km2": float_or_none(input_dict.get("new_strm_threshold_km2")),
-        "min_match_score": float_or_none(input_dict.get("min_match_score")),
-        "quiet": input_dict.get("quiet", False),
-    }
+    # # Validate data
+    # mapper = input_dict.get('mapper', 'Curve2Flood-Kernel Weighted')
+    # if mapper not in ALL_MAPPERS:
+    #     raise ValueError(
+    #         "Invalid mapper specified. Choose 'FloodSpreader', "
+    #         "'Curve2Flood-Kernel Weighted', 'Curve2Flood-FLDPLNpy', or "
+    #         "'Curve2Flood-Multi-Point Interpolation'."
+    #     )
+    
+    # if is_curve2flood_fldpln_mapper(mapper):
+    #     if not move_stream_network_to_new_locations:
+    #         raise ValueError("The stream network needs to be moved to use the Curve2Flood-FLDPLNpy mapper. " \
+    #         "Please set move_stream_network_to_new_locations to true in order to proceed...")
 
-    os.makedirs(watershed_dict["output_dir"], exist_ok=True)
+    # watershed_dict = {
+    #     "name": watershed_name,
+    #     "flowline": os.path.normpath(input_dict["flowline"]),
+    #     "dem_dir": os.path.normpath(input_dict["dem_dir"]),
+    #     "output_dir": os.path.normpath(input_dict["output_dir"]),
+    #     "disable_bathymetry": input_dict.get("disable_bathymetry", False),
+    #     "bathy_use_banks": input_dict.get("bathy_use_banks", False),
+    #     "flood_waterlc_and_strm_cells": input_dict.get("flood_waterlc_and_strm_cells", False),
+    #     "land_watervalue": input_dict.get("land_watervalue", 80),
+    #     "clean_dem": clean_dem,
+    #     "mapper": normalize_mapper_name(input_dict.get("mapper", "FloodSpreader")),
+    #     "process_stream_network": input_dict.get("process_stream_network", False),
+    #     "use_specified_depth_for_bathy_mask": use_specified_depth_for_bathy_mask,
+    #     "age_of_forecast_days": input_dict.get("age_of_forecast_days", 7),
+    #     "find_banks_based_on_landcover": input_dict.get("find_banks_based_on_landcover", True),
+    #     "specify_depths_for_bathy_mask": specify_depths_for_bathy_mask,
+    #     "create_reach_average_curve_file": input_dict.get("create_reach_average_curve_file", False),
+    #     "use_warning_flags_to_download_dem": input_dict.get("use_warning_flags_to_download_dem", False),
+    #     "geoglows_vpu": input_dict.get("geoglows_vpu"),
+    #     "forensic_forecast_date": validate_forecast_date(input_dict.get("forensic_forecast_date"), streamflow_source),
+    #     "forensic_forecast_hour": forensic_forecast_hour,
+    #     "specified_bathyflow_field":input_dict.get("specified_bathyflow_field", "p_exceed_50"),
+    #     "specified_highflow_field":input_dict.get("specified_highflow_field", "rp100_premium"),
+    #     "StrmOrder_Field": input_dict.get("StrmOrder_Field"),
+    #     "StrmOrder_Lower": input_dict.get("StrmOrder_Lower"),
+    #     "StrmOrder_Upper": input_dict.get("StrmOrder_Upper"),
+    #     "q_baseflow_threshold": float_or_none(input_dict.get("q_baseflow_threshold")),
+    #     "lake_filter_json": norm_or_none(input_dict.get("lake_filter_json")),
+    #     "estimate_consequences": input_dict.get("estimate_consequences", False),
+    #     "streamflow_source": streamflow_source,
+    #     "nwm_api_key": nwm_api_key,
+    #     "overwrite_floodmaps": input_dict.get("overwrite_floodmaps", True),
+    #     "remove_old_forecast_files": input_dict.get("remove_old_forecast_files", False),
+    #     "make_fist_inputs": input_dict.get("make_fist_inputs", True),
+    #     "dem_filter": dem_filter,
+    #     "floodmap_mode": floodmap_mode,
+    #     "user_flow_files": user_flow_files,
+    #     "make_curvefile": input_dict.get("make_curvefile", True),
+    #     "make_ap_database": input_dict.get("make_ap_database", True),
+    #     "vdt_file_extension": input_dict.get("vdt_file_extension", 'txt'),
+    #     "mannings_text_file": norm_or_none(input_dict.get("mannings_text_file")),
+    #     "bathy_args": input_dict.get("bathy_args", {}),
+    #     "floodmap_args": input_dict.get("floodmap_args", {}),
+    #     "make_depth_maps": input_dict.get("make_depth_maps", True),
+    #     "make_velocity_maps": input_dict.get("make_velocity_maps", True),
+    #     "make_wse_maps": input_dict.get("make_wse_maps", True),
+    #     "floodmap_identifier": input_dict.get("floodmap_identifier", ""),
+    #     "move_stream_network_to_new_locations": input_dict.get("move_stream_network_to_new_locations", False),
+    #     "new_strm_threshold_km2": float_or_none(input_dict.get("new_strm_threshold_km2")),
+    #     "min_match_score": float_or_none(input_dict.get("min_match_score")),
+    #     "quiet": input_dict.get("quiet", False),
+    #     "mapper": mapper,
+    #     "source_dems": input_dict.get("source_dems", []),
+    #     "buffer": input_dict.get("buffer", False),
+    #     "buffer_distance_degrees": input_dict.get("buffer_distance_degrees", 0.05),
+    # }
 
-    LOG.info(f"Started processing watershed: {watershed_name}")
-    LOG.info(f"Parameters: {pprint.pformat(watershed_dict)}")
+    # os.makedirs(watershed_dict["output_dir"], exist_ok=True)
+
+    # LOG.info(f"Started processing watershed: {watershed_name}")
+    # LOG.info(f"Parameters: {pprint.pformat(watershed_dict)}")
 
     if timer is None:
         timer = Timer()
-    process_dem(watershed_dict, timer)
+    # process_dem(watershed_dict, timer)
+    _process_watershed(input_dict, timer)
 
-    LOG.info(f"Finished processing {watershed_name}")
+    # LOG.info(f"Finished processing {watershed_name}")
+
+def _process_watershed(watershed_dict: dict, timer: Timer):
+    configs = NencartaConfig(watershed_dict)
+
+    # If you are using the warning flags to download the DEM data, do it now
+    if configs.dem_dir:
+        if configs.use_warning_flags_to_download_dem:
+            if configs.forensic_forecast_date:
+                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
+                DEM_List = ForecastFlows.Download_USGS_DEM_Data_Using_WarningFlag_Data(
+                    configs.geoglows_vpu, configs.dem_dir, configs.forensic_forecast_date)
+            else:
+                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
+                DEM_List = []
+        else:
+            #This is the list of all the DEM files we will go through
+            filter = watershed_dict.get('dem_filter', '*')
+            DEM_List = glob.glob(os.path.join(configs.dem_dir, filter))
+    
+    if not DEM_List:
+        if configs.source_dems and configs.bbox:
+            DEM_List = [None] # This will trigger the domain setup to attempt to use the source DEMs and bbox to set up the domain
+        else:
+            LOG.warning("No DEMs found in the specified folder and no source DEMs provided; cannot set up domain.")
+            return
+
+    domains = [get_preprocessed_domains_for_dem(dem, configs) for dem in DEM_List]
+    manager = ModelManager(domains, timer)
+    
+    with manager:
+        if configs.disable_bathymetry or not configs.use_specified_depth_for_bathy_mask or configs.clean_dem:
+            manager.make_bathymetry(
+                mapper=configs.mapper,
+                disable_bathymetry=configs.disable_bathymetry,
+                overwrite=configs.process_stream_network,
+                quiet=configs.quiet,
+            )
+
+        manager.make_floodmaps(
+            mapper=configs.mapper,
+            overwrite=configs.overwrite_floodmaps,
+            quiet=configs.quiet,
+        )
+
+        if configs.make_fist_inputs:
+            manager.make_FIST_inputs(
+                floodmap_mode=configs.floodmap_mode,
+                streamflow_source=configs.streamflow_source,
+                stream_id_field='stream_id' if configs.move_stream_network_to_new_locations else configs.streamflow_source.upstream_id,
+                downstream_id_field='downstream_id' if configs.move_stream_network_to_new_locations else configs.streamflow_source.downstream_id,
+                forensic_forecast_date=configs.forensic_forecast_date,
+                forensic_forecast_hour=configs.forensic_forecast_hour,
+                forecastdate=configs.forecastdate,
+                forecasthour=configs.forecasthour,
+                overwrite=True
+            )
+
+        if configs.estimate_consequences:
+            manager.run_go_consequences(
+                quiet=configs.quiet,
+            )
+
+    print_simulation_times(configs.watershed_name, timer)
+
+
+
+def get_preprocessed_domains_for_dem(dem: str | None, configs: NencartaConfig):
+    if dem and not dem.endswith((".tif", ".tiff", ".tff", ".gtiff", ".img", '.vrt')):
+        LOG.warning(f"Skipping file {dem} because it does not have a supported DEM file extension.")
+        return None
+
+    folder_structure = configs.folder_structure
+    mannings_n_file = configs.mannings_text_file
+    write_new_mannings_file = False
+    if not folder_structure:
+        if not mannings_n_file:
+            mannings_n_file = os.path.join(configs.output_dir, configs.watershed_name, "LAND", "AR_Manning_n_MED.txt")
+            write_new_mannings_file = True
+
+        folder_structure = DefaultNencartaFolderStructure(
+            watershed_output_dir=os.path.join(configs.output_dir, configs.watershed_name),
+            mannings_text_file=mannings_n_file
+        )
+    else:
+        mannings_n_file = folder_structure.mannings_text_file
+
+    # Update configs to match folder structure
+    if write_new_mannings_file or not mannings_n_file:
+        folder_structure.mannings_text_file = mannings_n_file
+        if not os.path.exists(mannings_n_file):
+            Create_BaseLine_Manning_n_File_ESA(folder_structure.mannings_text_file)
+
+    configs.mannings_text_file = folder_structure.mannings_text_file
+
+    domain = Domain(folder_structure)
+    domain.assign_source_dem(configs.source_dems)
+    domain.assign_dem(
+        dem=dem,
+        bbox=configs.bbox, 
+        buffer=configs.buffer, 
+        vrt=configs.use_vrt, 
+        buffer_distance=configs.buffer_distance_degrees,
+        raise_error_if_no_dems=configs.raise_errors_if_nothing_in_domain,
+        overwrite=configs.process_stream_network, 
+        )
+    if not domain.validate_dem_coordinate_system():
+        return
+        
+    domain.make_land_cover(
+        name=f"{domain.dem_basename}_LAND_Raster.{'vrt' if configs.use_vrt else 'tif'}",
+        land_cover_cache=configs.land_cover_cache,
+        overwrite=configs.process_stream_network,
+        )
+    domain.make_stream_geometry(
+        name=f"{configs.streamflow_source}_{domain.dem_basename}_StrmShp.{'parquet' if configs.streams_as_parquet else 'gpkg'}",
+        stream_geometry=configs.flowline,
+        overwrite=configs.process_stream_network,
+    )
+
+    if (configs.move_stream_network_to_new_locations or configs.mapper.is_curve2flood_fldpln_mapper()):
+        if configs.new_strm_threshold_km2 is None:
+            LOG.error("The argument new_strm_threshold_km2 is required for both moving the stream network using the DEM and using Curve2Flood-FLDPLNpy. Please provide new_strm_threshold_km2.")
+            raise ValueError("The argument new_strm_threshold_km2 is required for both moving the stream network using the DEM and using Curve2Flood-FLDPLNpy. Please provide new_strm_threshold_km2.")
+        domain.make_fldpln_inputs(
+            new_strm_threshold_km2=configs.new_strm_threshold_km2,
+            stream_id_field=configs.stream_id_field,
+            ds_stream_id_field=configs.downstream_id_field,
+            strm_order_field=configs.StrmOrder_Field,
+            min_match_score=configs.min_match_score,
+            overwrite=configs.process_stream_network
+            )
+
+    domain.make_base_max_flows(
+        rivid_field=configs.stream_id_field,
+        filename=f"{configs.streamflow_source}_{domain.dem_basename}_Reanalysis.{'parquet' if configs.use_parquet else 'csv'}",
+        flow_source=configs.streamflow_source,
+        strm_order_field=configs.StrmOrder_Field,
+        strm_order_low=configs.StrmOrder_Lower,
+        strm_order_high=configs.StrmOrder_Upper,
+        baseflow_field=configs.specified_bathyflow_field,
+        baseflow_threshold=configs.q_baseflow_threshold,
+        lake_filter_json=configs.lake_filter_json,
+        nwm_api_key=configs.nwm_api_key,
+        overwrite=configs.process_stream_network
+        )
+    
+    domain.make_stream_raster(
+        name=f"{configs.streamflow_source}_{domain.dem_basename}_STRM_Raster.tif",
+        river_id=configs.stream_id_field,
+        overwrite=configs.process_stream_network,
+        )
+    
+
+    rp2_flow_file_name = f"{configs.streamflow_source}_{domain.dem_basename}_2yr_flow.{'parquet' if configs.use_parquet else 'csv'}"
+    domain.make_baseflow_file_from_base_max_file(
+        name=rp2_flow_file_name,
+        columns=['COMID', 'rp2'],
+        overwrite=configs.process_stream_network
+    )
+    
+    if configs.clean_dem:
+        domain.define_configs_for_dem_cleaning(
+            config_name=f"{configs.streamflow_source}_ARC_Input_{domain.dem_basename}_InitialFlood.{'yaml' if configs.use_yaml else 'txt'}",
+            vdt_name=f"{configs.streamflow_source}_{domain.dem_basename}_VDT_Database_Initial.{configs.vdt_file_extension}",
+            curve_name=f"{configs.streamflow_source}_{domain.dem_basename}_CurveFile_Initial.csv",
+            flow_file_name=rp2_flow_file_name,
+            floodmap_name=f"{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}_Initial.tif",
+            floodmap_vector_name=f"{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}_Initial.gpkg",
+            cleaned_dem_name=f"{domain.dem_basename}_Clean.tif",
+            mapper=configs.mapper,
+            baseflow=configs.specified_bathyflow_field,
+            maxflow=configs.specified_highflow_field,
+            reach_average_curve_file=configs.create_reach_average_curve_file,
+            bathy_use_banks=configs.bathy_use_banks,
+            find_banks_from_land_cover=configs.find_banks_based_on_landcover,
+            flood_waterlc_and_strm_cells=configs.flood_waterlc_and_strm_cells,
+            land_cover_water_value=configs.land_watervalue,
+            bathy_args=configs.bathy_args,
+            use_specified_depths=configs.use_specified_depth_for_bathy_mask,
+            specified_depth=configs.specify_depths_for_bathy_mask[0],
+            overwrite=True,
+        )
+
+    domain.define_arc_configs(
+        config_name=f"{configs.streamflow_source}_ARC_Input_{domain.dem_basename}_Bathy.txt",
+        vdt_name=f"{configs.streamflow_source}_{domain.dem_basename}_VDT_Database_Bathy.{configs.vdt_file_extension}",
+        floodmap_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Flood{configs.floodmap_id}_Bathy.tif",
+        floodmap_vector_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Flood{configs.floodmap_id}_Bathy.gpkg",
+        curve_file_name=f"{configs.streamflow_source}_{domain.dem_basename}_CurveFile_Bathy.csv" if configs.make_curvefile else None,
+        ap_file_name=f"{configs.streamflow_source}_{domain.dem_basename}_AP_Database_Bathy.{'parquet' if configs.use_parquet else 'csv'}" if configs.make_ap_database else None,
+        baseflow=configs.specified_bathyflow_field,
+        maxflow=configs.specified_highflow_field,
+        reach_average_curve_file=configs.create_reach_average_curve_file,
+        mapper=configs.mapper,
+        flood_waterlc_and_strm_cells=configs.flood_waterlc_and_strm_cells,
+        land_cover_water_value=configs.land_watervalue,
+        find_banks_from_land_cover=configs.find_banks_based_on_landcover,
+        use_specified_depths=configs.use_specified_depth_for_bathy_mask,
+        specified_depth=configs.specify_depths_for_bathy_mask[-1] if configs.use_specified_depth_for_bathy_mask else None,
+        bathy_use_banks=configs.bathy_use_banks,
+        disable_bathymetry=configs.disable_bathymetry,
+        bathy_args=configs.bathy_args,
+        arc_bathymetry_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Bathy.tif",
+        dem_with_bathymetry_name=f"{configs.streamflow_source}_{domain.dem_basename}_FS_Bathy.tif",
+        overwrite=True,
+    )
+
+    
+    if configs.floodmap_mode == FloodMapMode.FORECAST:
+        domain.make_flow_files_from_forecast(
+            flow_file_prefix=domain.dem_basename,
+            streamflow_source=configs.streamflow_source,
+            river_id_field=configs.stream_id_field,
+            forecastdate=configs.forensic_forecast_date,
+            forecasthour=configs.forensic_forecast_hour,
+            nwm_api_key=configs.nwm_api_key,
+            configs=configs
+        )
+        if configs.streamflow_source.is_nwm():
+            # create the end of the file name that describes the forecast
+            if configs.forensic_forecast_date != None:
+                ending_of_forecast_file = f'_Forecast_{configs.forensic_forecast_date}_{configs.forensic_forecast_hour}.tif'
+            elif configs.forecastdate != None:
+                ending_of_forecast_file = f'_Forecast_{configs.forecastdate}_{configs.forecasthour}.tif'
+            # rename the forecast of the extent raster based upon the type of NWM forecast we are using
+            postfixes = [f"{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}{ending_of_forecast_file}"]
+        elif configs.streamflow_source == StreamflowSource.GEOGLOWS:
+            # create the end of the file name that describes the forecast
+            if configs.forensic_forecast_date != None:
+                ending_of_forecast_file = f'_Forecast_{configs.forensic_forecast_date}.tif'
+            elif configs.forecastdate != None:
+                ending_of_forecast_file = f'_Forecast_{configs.forecastdate}.tif'
+            postfixes = [ending_of_forecast_file]
+
+    elif configs.floodmap_mode == FloodMapMode.USER:
+        postfixes = []
+        for flow_file in configs.user_flow_files:
+            postfixes.append(f"{os.path.splitext(os.path.basename(flow_file))[0]}")
+            if not os.path.isfile(flow_file):
+                LOG.error(f"User provided flow file does not exist: {flow_file}")
+                raise FileNotFoundError(f"User provided flow file does not exist: {flow_file}")
+            
+        domain.assign_flood_flow_files(configs.user_flow_files)
+    else:
+        LOG.error(f"Invalid floodmap_mode: {configs.floodmap_mode}")
+        raise ValueError(f"Invalid floodmap_mode: {configs.floodmap_mode}")
+
+    for flow_file, postfix in zip(domain.flood_flow_files, postfixes):
+        domain.define_c2f_configs(
+            config_name=f"{configs.streamflow_source}_ARC_Input_{domain.dem_basename}_FloodForecast.txt",
+            flow_file=flow_file,
+            floodmap_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Flood{configs.floodmap_id}_{postfix}.tif",
+            flood_lc_and_streams=configs.flood_waterlc_and_strm_cells,
+            mapper=configs.mapper,
+            floodmap_args=configs.floodmap_args,
+            disable_bathymetry=configs.disable_bathymetry,
+            clean_dem=configs.clean_dem,
+            floodmap_vector_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Flood{configs.floodmap_id}_{postfix}.gpkg" if configs.floodmap_args.get("Make_Output_GPKG", True) else None,
+            velocity_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_FloodVEL{configs.floodmap_id}_{postfix}.tif" if configs.make_velocity_maps else None,
+            wse_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_FloodWSE{configs.floodmap_id}_{postfix}.tif" if configs.make_wse_maps else None,
+            depth_name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_FloodDepth{configs.floodmap_id}_{postfix}.tif" if configs.make_depth_maps else None,
+            land_watervalue=configs.land_watervalue,
+            overwrite=True
+        )
+
+    if configs.floodmap_mode == FloodMapMode.FORECAST and configs.remove_old_forecast_files:
+        remove_old_forecast_files(folder_structure.flood_folder, domain.flood_maps[0], configs.age_of_forecast_days)
+
+    if configs.clean_dem or (configs.disable_bathymetry and not configs.use_specified_depth_for_bathy_mask):
+        domain.make_water_mask_for_dem_cleaner(
+            name=f"{configs.streamflow_source}_{domain.dem_basename}_ARC_Flood_Initial.tif"
+        )
+        domain.make_clean_dem(
+            flow_file_name=f"{domain.dem_basename}_Flow_COMID_Q.txt",
+            overwrite=(configs.clean_dem and configs.process_stream_network)
+        )
+
+    return domain
 
 
 def process_json_input(json_file, parallel=None, num_workers=None):

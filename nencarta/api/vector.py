@@ -5,7 +5,6 @@ import json
 import warnings
 from typing import Any
 
-
 import pyogrio
 import geopandas as gpd
 from shapely.geometry import box
@@ -118,8 +117,14 @@ class Vector(GISDataSource, LMDBCache):
                     gdf = gdf.cx[minx:maxx, miny:maxy]
                     return gdf
                 raise e
+            
+        if self.filepath.endswith(".gdb"):
+            # Specify the layer you want to access
+            layer = "geoglowsv2"
+        else:
+            layer = None
         
-        return gpd.read_file(self.filepath, use_arrow=True, bbox=bbox_epsg_4326, columns=columns)
+        return gpd.read_file(self.filepath, use_arrow=True, bbox=bbox_epsg_4326, columns=columns, layer=layer)
     
     @classmethod
     def save_any_geom(cls, gdf: gpd.GeoDataFrame, path: str, **kwargs) -> None:
@@ -136,7 +141,7 @@ class Vector(GISDataSource, LMDBCache):
 
     @classmethod
     def get_streamlines_in_extent(cls, bounds: tuple[float, float, float, float], streamlines: list[str]) -> list[str]:
-        """Return the stream parquet files whose stored bounds intersect a DEM tile."""
+        """Return the stream parquet files whose stored bounds intersect a DEM tile. Bounds should be in EPSG:4326."""
         streamlines_to_clip = []
         for stream in streamlines:
             if cls._streamline_is_in_dem_bounds(stream, bounds):

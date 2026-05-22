@@ -130,3 +130,64 @@ class FloodFolder:
             return self.User_Depth_Maps
         else:
             raise NotImplementedError(f"Floodmap mode '{self.floodmap_mode}' is not implemented.")
+
+class FolderStructure:
+    def __init__(self, 
+                 top_level_folder: str,
+                 ARC_Folder: str,
+                 flood_folder: str,
+                 bathy_file_folder: str,
+                 dem_updated_folder: str,
+                 strm_folder: str,
+                 land_folder: str,
+                 FLOW_Folder: str,
+                 VDT_Folder: str,
+                 ESA_LC_Folder: str,
+                 FIST_Folder: str,
+                 Consequences_Folder: str,
+                 Flow_Direction_Folder: str,
+                 mannings_text_file: str = "",
+                 ):
+        """
+        Absolute paths, where files will be saved.
+        """
+        self.top_level_folder = top_level_folder
+        self.ARC_Folder = ARC_Folder
+        self.flood_folder = flood_folder
+        self.bathy_file_folder = bathy_file_folder
+        self.dem_updated_folder = dem_updated_folder
+        self.strm_folder = strm_folder
+        self.land_folder = land_folder
+        self.FLOW_Folder = FLOW_Folder
+        self.VDT_Folder = VDT_Folder
+        self.ESA_LC_Folder = ESA_LC_Folder
+        self.FIST_Folder = FIST_Folder
+        self.Consequences_Folder = Consequences_Folder
+        self.Flow_Direction_Folder = Flow_Direction_Folder
+        self.mannings_text_file = mannings_text_file
+
+        self._dem_dir = None
+
+    @property
+    def dem_dir(self) -> str:
+        self._dem_dir = self._dem_dir or os.path.join(self.top_level_folder, "DEMs")
+        return self._dem_dir
+
+class DefaultNencartaFolderStructure(FolderStructure):
+    def __init__(self, watershed_output_dir: str, mannings_text_file: str):
+        super().__init__(
+            top_level_folder=watershed_output_dir,
+            ARC_Folder=os.path.join(watershed_output_dir, 'ARC_InputFiles'),
+            flood_folder=os.path.join(watershed_output_dir, 'FloodMap'),
+            bathy_file_folder=os.path.join(watershed_output_dir, 'Bathymetry'),
+            dem_updated_folder=os.path.join(watershed_output_dir, 'DEM_Updated'),
+            strm_folder=os.path.join(watershed_output_dir, 'STRM'),
+            land_folder=os.path.join(watershed_output_dir, 'LAND'),
+            FLOW_Folder=os.path.join(watershed_output_dir, 'FLOW'),
+            VDT_Folder=os.path.join(watershed_output_dir, 'VDT'),
+            ESA_LC_Folder=os.path.join(watershed_output_dir, 'ESA_LC'),
+            FIST_Folder=os.path.join(watershed_output_dir, 'FIST'),
+            Consequences_Folder=os.path.join(watershed_output_dir, 'Consequences'),
+            Flow_Direction_Folder=os.path.join(watershed_output_dir, 'FlowDirection'),
+            mannings_text_file=mannings_text_file
+        )

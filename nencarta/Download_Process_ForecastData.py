@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, datetime, timezone
 import os
 import sys
 
+from nencarta.api.enumerations import StreamflowSource
+
 #from osgeo import gdal, ogr, osr # For GDAL functions
 #conda install conda-forge::gdal
 '''
@@ -161,10 +163,10 @@ def _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids):
         column_order=["rivid", "min", "max", "median"],
     )
 
-def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source, nwm_api_key=None):
+def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source: StreamflowSource, nwm_api_key=None):
 
     try:
-        if streamflow_source == 'GEOGLOWS':
+        if streamflow_source == StreamflowSource.GEOGLOWS:
             ODP_FORECAST_S3_BUCKET_URI = 's3://geoglows-v2-forecasts'
             
             ODP_S3_BUCKET_REGION = 'us-west-2'
@@ -213,17 +215,17 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
             df_max.columns = ['median', 'min', 'max']
             df_max = df_max.reset_index()
         
-        elif streamflow_source.startswith('NWM'):
+        elif streamflow_source.is_nwm():
             rp_url = 'https://nwm-api.ciroh.org/forecast'
 
 
-            if streamflow_source == 'NWM_short_range':
+            if streamflow_source == StreamflowSource.NWM_SHORT_RANGE:
                 forecast_type = 'short_range'
                 number_of_ensembles = 0
-            elif streamflow_source == 'NWM_medium_range':
+            elif streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE:
                 forecast_type = 'medium_range'
                 number_of_ensembles = 5
-            elif streamflow_source == 'NWM_long_range':
+            elif streamflow_source == StreamflowSource.NWM_LONG_RANGE:
                 forecast_type = 'long_range'
                 number_of_ensembles = 3
 
@@ -285,9 +287,9 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
         )
 
         try:
-            if streamflow_source == 'GEOGLOWS':
+            if streamflow_source == StreamflowSource.GEOGLOWS:
                 df_max = _read_geoglows_retrospective_flow(forecastdate, rivids)
-            elif streamflow_source.startswith('NWM'):
+            elif streamflow_source.is_nwm():
                 df_max = _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids)
             else:
                 raise ValueError(f"streamflow_source {streamflow_source} not recognized.")
@@ -436,7 +438,7 @@ def Get_RIVID_Values(Riv_Method, parquet_file_from_geoglows, TermLinkNumber, Str
     #rivids = [280706358, 280759351]
     return rivids
 
-def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
+def Get_Date_For_Forecast(day_back, hour_back, streamflow_source: StreamflowSource):
 
     # get the date and time in UTC
     today = datetime.now(timezone.utc)
@@ -451,11 +453,11 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
 
     # set forecast hour based upon the streamflow source
     # GEOGLOWS: daily — hour doesn't matter
-    if streamflow_source == "GEOGLOWS":
+    if streamflow_source == StreamflowSource.GEOGLOWS:
         forecasthour = None  # explicitly signal "daily"
 
     # NWM short range: hour can be 2 hours behind the current forecast hour
-    elif streamflow_source == "NWM_short_range":
+    elif streamflow_source == StreamflowSource.NWM_SHORT_RANGE:
         h = int(forecasthour) - 2
         if h < 0:
             # roll back a day and wrap hour into prior day
@@ -465,7 +467,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
         forecasthour = f"{h:02d}"
 
     # NWM medium range: choose the closest cycle among 00, 06, 12, 18 that does NOT exceed the current hour
-    elif streamflow_source == "NWM_medium_range":
+    elif streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE:
         h_now = int(forecasthour)
         # allowed cycle hours
         cycles = [0, 6, 12, 18]
@@ -474,7 +476,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
         forecasthour = f"{cycle:02d}"
 
     # NWM long range: the forecast hour must be "00"
-    elif streamflow_source == "NWM_long_range":
+    elif streamflow_source == StreamflowSource.NWM_LONG_RANGE:
         forecasthour = "00"
 
     else:

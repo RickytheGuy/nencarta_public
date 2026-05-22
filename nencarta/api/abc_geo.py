@@ -8,17 +8,17 @@ class GISDataSource(ABC):
 
         return not (maxx1 <= minx2 or maxx2 <= minx1 or maxy1 <= miny2 or maxy2 <= miny1)
     
-    @abstractmethod
     @property
+    @abstractmethod
     def projection(self) -> str:
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def bbox(self) -> str:
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def epsg_4326_bbox(self) -> str:
         pass

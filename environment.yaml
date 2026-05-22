@@ -12,6 +12,7 @@ dependencies:
   - geoglows
   - geojson
   - geopandas
+  - libgdal-arrow-parquet
   - netcdf4
   - numba
   - numpy
@@ -20,6 +21,7 @@ dependencies:
   - pyproj
   - pyqt>=5.15
   - pygeos
+  - pyyaml
   - rasterio
   - requests
   - s3fs
