@@ -1,0 +1,156 @@
+from pathlib import Path
+
+from nencarta.api.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.api.configs import NencartaConfig
+
+class Workspace:
+    def __init__(self, configs: NencartaConfig, dem: Path | None = None):
+        self.configs = configs
+        self.watershed: str = configs.watershed_name
+        self.output_dir = Path(configs.output_dir) / self.watershed
+        self.mapper: Mapper = configs.mapper
+
+        self.DEM_folder = self.output_dir / 'DEM'
+        self.ARC_Folder = self.output_dir / 'ARC_InputFiles'
+        self.flood_folder = self.output_dir / 'FloodMap'
+        self.bathy_file_folder = self.output_dir / 'Bathymetry'
+        self.dem_updated_folder = self.output_dir / 'DEM_Updated'
+        self.strm_folder = self.output_dir / 'STRM'
+        self.land_folder = self.output_dir / 'LAND'
+        self.FLOW_Folder = self.output_dir / 'FLOW'
+        self.VDT_Folder = self.output_dir / 'VDT'
+        self.ESA_LC_Folder = self.output_dir / 'ESA_LC'
+        self.FIST_Folder = self.output_dir / 'FIST'
+        self.Consequences_Folder = self.output_dir / 'Consequences'
+        self.Flow_Direction_Folder = self.output_dir / 'FlowDirection'
+
+        configs_mannings_n = configs.mannings_text_file
+        if configs_mannings_n:
+            configs_mannings_n_path = Path(configs_mannings_n)
+            if not configs_mannings_n_path.is_file():
+                raise FileNotFoundError(f"Provided Manning's n text file not found: {configs_mannings_n}")
+            self.mannings_n_text_file = configs_mannings_n_path
+        else:
+            self.mannings_n_text_file = self.land_folder / 'AR_Manning_n_MED.txt'
+
+        self.floodmap_mode = configs.floodmap_mode
+
+        self.setup_dem(dem)
+
+        # currently the land file will be the same regardless of the streamflow source
+        self.LAND_File = self.land_folder / (self.FileName + '_LAND_Raster.tif')
+
+        #Datasets to be Created
+        streamflow_source: StreamflowSource = configs.streamflow_source
+        self.DEM_StrmShp = self.strm_folder / f"{streamflow_source}_{self.FileName}_StrmShp.gpkg"
+        self.DEM_Reanalsyis_FlowFile = self.FLOW_Folder / f"{streamflow_source}_{self.FileName}_Reanalysis.csv"
+        self.COMID_Q_File = (self.DEM_Reanalsyis_FlowFile.parent / f"{self.FileName}_2yr_flow_initial.csv")
+
+        # isolating the NWM or GEOGLOWS text in the streamflow_source variable
+        strm_source = 'NWM' if streamflow_source.is_nwm() else 'GEOGLOWS'
+        # these will only vary based upon if they are NWM or GEOGLOWS
+        self.ARC_FileName_Bathy = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{'yaml' if configs.use_yaml else 'txt'}"
+        self.ARC_FileName_for_DEM_Cleaner = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_InitialFlood.txt"
+        self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif" if configs.clean_dem else Path(self.assigned_dem)
+        self.VDT_Test_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_FS.csv"
+        self.VDT_Test_File_Bathy = self.VDT_Test_File.with_name(self.VDT_Test_File.stem + '_Bathy.csv')
+        self.STRM_File = self.strm_folder / f"{strm_source}_{self.FileName}_STRM_Raster.tif"
+        self.STRM_File_Clean = self.STRM_File.with_name(self.STRM_File.stem + '_Clean.tif')
+
+        vdt_ext = configs.vdt_file_extension
+        self.VDT_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_Database.{vdt_ext}"
+        self.VDT_File_Initial = self.VDT_File.with_name(self.VDT_File.stem + f"_Initial.{vdt_ext}")
+        self.VDT_File_Bathy = self.VDT_File.with_name(self.VDT_File.stem + f"_Bathy.{vdt_ext}")
+
+        self.AP_File =  self.VDT_Folder / f"{strm_source}_{self.FileName}_AP_Database_Bathy.{vdt_ext}"
+
+        self.Curve_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_CurveFile.csv"
+        self.Curve_File_Initial = self.Curve_File.with_name(self.Curve_File.stem + '_Initial.csv')
+        self.Curve_File_Bathy = self.Curve_File.with_name(self.Curve_File.stem + '_Bathy.csv')
+
+        # self.LU_and_Streams_Water_Map = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_Flood_Initial.tif"
+        self.bathy_water_mask = self.bathy_file_folder / f"{strm_source}_{self.FileName}_water_mask.tif"
+        self.DepthMapFile = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_Depth.tif"
+        self.ARC_BathyFile = self.bathy_file_folder / f"{strm_source}_{self.FileName}_ARC_Bathy.tif"
+        self.FS_BathyFile = self.bathy_file_folder / f"{strm_source}_{self.FileName}_FS_Bathy.tif"
+
+        self.floodmap_id = configs.floodmap_identifier
+        if self.floodmap_id:
+            self.floodmap_id = f"_{self.floodmap_id}"
+        else:
+            self.floodmap_id = ''
+
+        self.FloodMapFile = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_Flood{self.floodmap_id}.tif"
+        self.FloodMapFile_Initial = self.FloodMapFile.with_name(self.FloodMapFile.stem + '_Initial.tif')
+        self.FloodMapFile_Initial_SHP = self.FloodMapFile.with_name(self.FloodMapFile.stem + '_Initial.shp')
+        self.FloodMapFile_Bathy = self.FloodMapFile.with_name(self.FloodMapFile.stem + '_Bathy.tif')
+        self.FloodMapFile_Bathy_SHP = self.FloodMapFile.with_name(self.FloodMapFile.stem + '_Bathy.shp')
+
+        # these variables will have the full specifics of the streamflow source 
+        self.ARC_FileName_FloodForecast = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_FloodForecast.txt"
+        self.FloodDepthFile = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_FloodDepth{self.floodmap_id}.tif"
+        self.FloodWSEFile = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_FloodWSE{self.floodmap_id}.tif"
+        self.FloodVELFile = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_FloodVEL{self.floodmap_id}.tif"
+
+        if configs.mapper == Mapper.CURVE2FLOOD_FLDPLNPY:
+            self.setup_fldpln_files()
+
+    def setup_dem(self, dem: Path | None):
+        if dem:
+            self.FileName = Path(dem).stem
+        elif self.configs.bbox:
+            # the 5th decimal place corresponds to ~1m resolution, which is more precise than we need for naming purposes, so we can round to 5 decimal places for cleaner file names
+            self.FileName = f"dem_{self.configs.bbox[0]:.5f}_{self.configs.bbox[1]:.5f}_{self.configs.bbox[2]:.5f}_{self.configs.bbox[3]:.5f}"
+        else:
+            raise ValueError("Must specify either a DEM or a bounding box in the configs.")
+
+        if self.configs.buffer:
+            if not self.configs.source_dems:
+                raise ValueError(
+                    "Buffering requested but no source DEMs assigned."
+                )
+            self.FileName += '_buffered'
+        
+        self.original_dem = dem
+        if dem and not self.configs.bbox and not self.configs.buffer:
+            self.assigned_dem = Path(dem)
+        else:
+            self.assigned_dem = self.DEM_folder / f"{self.FileName}.{'vrt' if self.configs.use_vrt else 'tif'}"
+
+    def setup_fldpln_files(self):
+        self.fixed_dem = self.dem_updated_folder / (self.FileName + '_fixed.tif')
+        self.filled_dem = self.Flow_Direction_Folder / (self.FileName + '_filled.tif') 
+        self.flowdir = self.Flow_Direction_Folder / (self.FileName + '_flowdir.tif')
+        self.flowacc = self.Flow_Direction_Folder / (self.FileName + '_flowacc.tif')
+        self.new_StrmShp = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.shp')
+        self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
+        self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
+        self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
+        self.STRM_File_Clean = self.strm_folder / (self.FileName + '_matched.tif')
+
+    # def setup_flood_forecast_files(self, Forecast_Flood_Map: str, Forecast_Flood_Depth_Raster: str, ForecastFlowFile: str):
+    #     self.Forecast_Flood_Map = Forecast_Flood_Map
+    #     self.Forecast_Flood_Depth_Raster = Forecast_Flood_Depth_Raster
+    #     self.ForecastFlowFile = ForecastFlowFile
+
+    # def setup_flood_user_files(self, Flood_Maps: list[str], Depth_Maps: list[str], UserFlowFiles: list[str], Model_Input_Files: list[str]):
+    #     self.User_Flood_Maps = Flood_Maps
+    #     self.User_Depth_Maps = Depth_Maps
+    #     self.UserFlowFiles = UserFlowFiles
+    #     self.Model_Input_Files = Model_Input_Files
+
+    # def get_flow_files(self) -> list[str]:
+    #     if self.floodmap_mode == 'forecast':
+    #         return [self.ForecastFlowFile]
+    #     elif self.floodmap_mode == 'user':
+    #         return self.UserFlowFiles
+    #     else:
+    #         raise NotImplementedError(f"Floodmap mode '{self.floodmap_mode}' is not implemented.")
+        
+    def get_depth_files(self):
+        if self.floodmap_mode == 'forecast':
+            return [self.Forecast_Flood_Depth_Raster]
+        elif self.floodmap_mode == 'user':
+            return self.User_Depth_Maps
+        else:
+            raise NotImplementedError(f"Floodmap mode '{self.floodmap_mode}' is not implemented.")

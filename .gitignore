@@ -6,3 +6,4 @@ dist/
 .esa_worldcover_grid.parquet
 docs/_build/
 docs/__pycache__/
+.vscode/

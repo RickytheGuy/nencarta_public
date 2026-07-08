@@ -6,14 +6,17 @@ gdal
 geoglows
 geojson
 geopandas
+lmdb
 netCDF4
 numba
 numpy
 pandas
+pipefunc
 progress
 pyproj
 PyQt5>=5.15
 requests
+rich
 s3fs
 scipy
 shapely

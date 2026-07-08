@@ -9,6 +9,7 @@ import pprint
 import argparse
 import platform
 import subprocess
+from pathlib import Path
 import multiprocessing as mp
 from typing import TextIO
 from datetime import datetime, timedelta
@@ -27,6 +28,8 @@ from shapely.geometry import box
 from curve2flood import Curve2Flood_MainFunction
 from arc.Create_GeoJSON import Run_Main_VDT_to_GEOJSON_Program_Stream_Vector
 
+from nencarta.api.configs import NencartaConfig
+
 # local imports
 from . import LOG
 from . import gui_app
@@ -37,6 +40,8 @@ from . import Hydroterrain_Processing
 from . import esa_download_processing as ESA
 from . import streamflow_processing as HistFlows
 from . import Download_Process_ForecastData as ForecastFlows
+from .workspace import Workspace
+from .pipeline import build_pipeline
 
 CURVE2FLOOD_MAPPERS = [
     "Curve2Flood-Kernel Weighted",
@@ -445,14 +450,19 @@ def _write_arc_input_section(
         out_file.write(f"\nFlow_File_BF\t{watershed_dict['specified_bathyflow_field']}")
     out_file.write(f'\nFlow_File_QMax\t{watershed_dict["specified_highflow_field"]}')
     out_file.write(f'\nSpatial_Units\tdeg')
-    out_file.write(f'\nX_Section_Dist\t{bathy_args["X_Section_Dist"]}')
-    out_file.write(f'\nDegree_Manip\t{bathy_args["Degree_Manip"]}')
-    out_file.write(f'\nDegree_Interval\t{bathy_args["Degree_Interval"]}')
-    out_file.write(f'\nLow_Spot_Range\t{bathy_args["Low_Spot_Range"]}')
-    out_file.write(f'\nStr_Limit_Val\t{bathy_args["Str_Limit_Val"]}')
-    out_file.write(f'\nGen_Dir_Dist\t{bathy_args["Gen_Dir_Dist"]}')
-    out_file.write(f'\nGen_Slope_Dist\t{bathy_args["Gen_Slope_Dist"]}')
-    out_file.write(f'\nStream_Slope_Method\t{bathy_args["Stream_Slope_Method"]}')
+    optional_bathy_keys = [
+        "X_Section_Dist",
+        "Degree_Manip",
+        "Degree_Interval",
+        "Low_Spot_Range",
+        "Str_Limit_Val",
+        "Gen_Dir_Dist",
+        "Gen_Slope_Dist",
+        "Stream_Slope_Method",
+    ]
+    for key in optional_bathy_keys:
+        if key in bathy_args:
+            out_file.write(f'\n{key}\t{bathy_args[key]}')
 
 def _write_fldpln_section(out_file: TextIO, folder: FloodFolder, watershed_dict: dict, use_bathy_flow_dir: bool = False):
     out_file.write('\n\n#FLDPLN_Specific_Inputs')
@@ -1763,6 +1773,35 @@ def float_or_none(value):
         raise ValueError(f"Invalid q_baseflow_threshold: {value}") from exc
 
 def process_watershed(input_dict: dict, timer: Timer = None):
+    configs = NencartaConfig(input_dict)
+
+    if configs.dem_dir:
+        if configs.use_warning_flags_to_download_dem:
+            if configs.forensic_forecast_date:
+                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
+                DEM_List = ForecastFlows.Download_USGS_DEM_Data_Using_WarningFlag_Data(configs.geoglows_vpu, configs.dem_dir, configs.forensic_forecast_date)
+            else:
+                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
+                DEM_List = []
+        else:
+            #This is the list of all the DEM files we will go through
+            DEM_List = list(Path(configs.dem_dir).glob(configs.dem_filter))
+    elif configs.dem:
+        DEM_List = [configs.dem]
+    else:
+        DEM_List = []
+    
+    if not DEM_List:
+        if configs.source_dems and configs.bbox:
+            DEM_List = [None] # This will trigger the domain setup to attempt to use the source DEMs and bbox to set up the domain
+        else:
+            LOG.warning("No DEMs found in the specified folder and no source DEMs provided; cannot run pipeline.")
+            return
+        
+    workspaces = [Workspace(configs, DEM) for DEM in DEM_List]
+    run_pipeline(workspaces)
+    return
+
     """The core logic for processing a watershed."""
     verify_required_keys(input_dict)
     watershed_name = input_dict.get("name")
@@ -1857,6 +1896,36 @@ def process_watershed(input_dict: dict, timer: Timer = None):
     process_dem(watershed_dict, timer)
 
     LOG.info(f"Finished processing {watershed_name}")
+
+def run_pipeline(workspaces: list[Workspace], executor=None):
+    profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
+    parallel = workspaces[0].configs.parallel
+    pipeline = build_pipeline(profile)
+
+    pipeline.visualize_graphviz(filename='test.png', hide_default_args=True, orient='TB')
+
+    try:
+        pipeline.map(
+            {'workspace': workspaces},
+            parallel=parallel,
+            scheduling_strategy='eager',
+            show_progress=True,
+            executor=executor,
+            # error_handling='continue'
+            )
+        
+        if profile:
+            pipeline.print_profiling_stats()
+    except Exception as e:
+        if not pipeline.error_snapshot:
+            raise e
+    finally:
+        if pipeline.error_snapshot:
+            print(pipeline.error_snapshot.traceback)
+            print(pipeline.error_snapshot)
+
+    LOG.info(f"Finished processing")
+    return
 
 def process_json_input(json_file, parallel=None, num_workers=None):
     """

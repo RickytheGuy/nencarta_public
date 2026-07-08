@@ -1,13 +1,15 @@
 
 #This code looks at a DEM raster to find the dimensions, then writes a script to create a STRM raster.
 
-import sys, os, subprocess
+import os, subprocess
+from pathlib import Path
 
 import numpy as np
-from osgeo import gdal
+import pandas as pd
 import matplotlib.pyplot as plt
+from osgeo import gdal
 
-from .logger import LOG
+from nencarta.logger import LOG
 
 def convert_cell_size(dem_cell_size, dem_lower_left, dem_upper_right):
     """
@@ -123,7 +125,7 @@ def convert_cell_size(dem_cell_size, dem_lower_left, dem_upper_right):
 def FindFlowRateForEachCOMID(FlowFileName, COMID_Unique, COMID_to_ID, MinCOMID, MaxCOMID):
     num_unique = len(COMID_Unique)
     COMID_Unique_Flow = np.zeros(num_unique)
-    LOG.info('\nOpening and Reading ' + FlowFileName)
+    LOG.info(f'Opening and Reading {FlowFileName}')
     infile = open(FlowFileName,'r')
     lines = infile.readlines()
     infile.close()
@@ -167,27 +169,66 @@ def Calculate_TW_D_ForEachCOMID_ARC(CurveParamFileName, COMID_Unique_Flow, COMID
     COMID_Unique_TW = np.zeros(num_unique)
     COMID_Unique_Depth = np.zeros(num_unique)
     COMID_NumRecord = np.zeros(num_unique)
-    LOG.info('\nOpening and Reading ' + CurveParamFileName)
-    infile = open(CurveParamFileName,'r')
-    lines = infile.readlines()
-    infile.close()
+    LOG.info(f'Opening and Reading {CurveParamFileName}')
+    df = pd.read_parquet(CurveParamFileName) if Path(CurveParamFileName).suffix.endswith('.parquet') else pd.read_csv(CurveParamFileName)
+    df = df[df['COMID'].between(MinCOMID, MaxCOMID) & df['depth_a'].gt(0) & df['depth_b'].gt(0) & df['tw_a'].gt(0) & df['tw_b'].gt(0)]
     
-    num_lines = len(lines)
-    for n in range(1,num_lines):
-        (COMID, R, C, Base_E, DEM_E, QMax, Slope, XS_Angle, Da, Db, Ta, Tb, Va, Vb) = lines[n].strip().split(',')
-        if int(COMID)>=MinCOMID and int(COMID)<=MaxCOMID:
-            i = COMID_to_ID[int(COMID)-MinCOMID]
-            if float(Da)>0.0 and float(Db)>0.0 and float(Ta)>0.0 and float(Tb)>0.0:
-                COMID_NumRecord[i] = COMID_NumRecord[i] + 1
-                Q = COMID_Unique_Flow[i] * Q_Fraction
-                Depth = float(Da) * pow(Q,float(Db))
-                TopWidth = float(Ta) * pow(Q,float(Tb))
-                
-                #Calculate the Average Depth and TopWidth
-                COMID_Unique_TW[i] = ( COMID_Unique_TW[i]*(COMID_NumRecord[i]-1) + TopWidth ) / COMID_NumRecord[i]
-                COMID_Unique_Depth[i] = ( COMID_Unique_Depth[i]*(COMID_NumRecord[i]-1) + Depth ) / COMID_NumRecord[i]
+    # Map COMIDs -> compact IDs
+    idx = COMID_to_ID[
+        (df["COMID"].to_numpy(np.int64) - MinCOMID)
+    ]
+
+    # Remove any unmapped COMIDs (-1)
+    valid = idx >= 0
+
+    idx = idx[valid]
+
+    depth_a = df["depth_a"].to_numpy()[valid]
+    depth_b = df["depth_b"].to_numpy()[valid]
+    tw_a    = df["tw_a"].to_numpy()[valid]
+    tw_b    = df["tw_b"].to_numpy()[valid]
+
+    # Q for each record
+    Q = COMID_Unique_Flow[idx] * Q_Fraction
+
+    # Hydraulic geometry
+    depth = depth_a * np.power(Q, depth_b)
+    tw    = tw_a    * np.power(Q, tw_b)
+
+    # Aggregate by unique COMID index
+    count = np.bincount(
+        idx,
+        minlength=len(COMID_Unique_Flow)
+    )
+
+    depth_sum = np.bincount(
+        idx,
+        weights=depth,
+        minlength=len(COMID_Unique_Flow)
+    )
+
+    tw_sum = np.bincount(
+        idx,
+        weights=tw,
+        minlength=len(COMID_Unique_Flow)
+    )
+
+    # Final means
+    nonzero = count > 0
+
+    COMID_Unique_Depth = np.zeros_like(COMID_Unique_Flow)
+    COMID_Unique_TW    = np.zeros_like(COMID_Unique_Flow)
+
+    COMID_Unique_Depth[nonzero] = (
+        depth_sum[nonzero] / count[nonzero]
+    )
+
+    COMID_Unique_TW[nonzero] = (
+        tw_sum[nonzero] / count[nonzero]
+    )
     TopWidthMax = COMID_Unique_TW.max()
-    LOG.info('Max TopWidth is ' + str(TopWidthMax))
+    LOG.info(f'Max TopWidth is {TopWidthMax}')
+
     return (COMID_Unique_TW, COMID_Unique_Depth, TopWidthMax)
 
     
@@ -245,13 +286,6 @@ def GetListOfDEMs(inputfolder):
         if file.endswith('.tif') or file.endswith('.img'):
             DEM_Files.append(file)
     return DEM_Files
-
-def GetStreamlineBaseName(StreamShapefile):
-    SFile = StreamShapefile.replace('\\','/')
-    S_split = SFile.split('/')
-    StrmBase = S_split[-1]
-    StrmBase = StrmBase.replace('.shp','')
-    return StrmBase
 
 def Write_Output_Raster(s_output_filename, raster_data, ncols, nrows, dem_geotransform, dem_projection, s_file_format, s_output_type):   
     o_driver = gdal.GetDriverByName(s_file_format)  #Typically will be a GeoTIFF "GTiff"
@@ -940,7 +974,8 @@ def FindPathToNextAnchor(COMID_to_Evaluate, r_start, c_start, nrows, ncols, ANCH
             
         #Couldn't find a connecting stream, so we're done here.
         if r_next<0:
-            E_End = E[r,c]
+            if r > 0 and c > 0:
+                E_End = E[r,c]
             r=-9999
             #A2 = r*(ncols+2)+c
             A2 = -9999
@@ -1351,7 +1386,10 @@ def CreateFloodImpactMap(Flood, RR, CC, E, B, nrows, ncols, sd, TW_m, dx, dy, Lo
                 
                 Subset_Flood_Raster_Potential_Influence = B[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
                 '''
-                Subset_Flood_Raster_Potential_Influence = B[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
+                try:
+                    Subset_Flood_Raster_Potential_Influence = B[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
+                except IndexError:
+                    continue
                 
                 count_for_comid = np.count_nonzero(Subset_Flood_Raster_Potential_Influence == COMID_Value)
                 if count_for_comid > COMID_Instance_Count:
@@ -1369,12 +1407,11 @@ def CreateFloodImpactMap(Flood, RR, CC, E, B, nrows, ncols, sd, TW_m, dx, dy, Lo
 
 def MergeStreamElevationsWithDEM(E, B, Flood, FloodImpact, Elev_Streams, ES_R, ES_C, ncols, nrows, TW_m, dx, dy, COMID_Unique, COMID_to_ID, MinCOMID, COMID_Unique_TW, COMID_Unique_Depth, WeightBox, ElipseMask, TW):
     
-    Elev_Times_Weight = np.zeros((nrows+2,ncols+2)).astype(float)
-    Total_Weight = np.zeros((nrows+2,ncols+2)).astype(float)
-    FloodBig = Flood.astype(float)
+    Elev_Times_Weight = np.zeros((nrows+2,ncols+2), dtype=np.float32)
+    Total_Weight = np.zeros((nrows+2,ncols+2), dtype=np.float32)
     
     #This will further limit the flooding to only the cells that are flooded by the corresponding COMID Value
-    FloodBigImpact = np.zeros((nrows+2,ncols+2)).astype(float)
+    FloodBigImpact = np.zeros((nrows+2,ncols+2), dtype=np.float32)
     FloodImpact = FloodImpact.astype(int)
     
     num_nonzero = len(ES_R)
@@ -1424,9 +1461,11 @@ def MergeStreamElevationsWithDEM(E, B, Flood, FloodImpact, Elev_Streams, ES_R, E
             
             #The FloodBig basically clips any analysis to only the cells that are considered flooded.
             #  OIn 2/7/2024 I started using 'FloodBigImpact' instead of 'FloodBig'
-            Elev_Times_Weight[r_min:r_max,c_min:c_max] = Elev_Times_Weight[r_min:r_max,c_min:c_max] + ELEV * WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-            Total_Weight[r_min:r_max,c_min:c_max] = Total_Weight[r_min:r_max,c_min:c_max] + WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-            
+            try:
+                Elev_Times_Weight[r_min:r_max,c_min:c_max] = Elev_Times_Weight[r_min:r_max,c_min:c_max] + ELEV * WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
+                Total_Weight[r_min:r_max,c_min:c_max] = Total_Weight[r_min:r_max,c_min:c_max] + WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
+            except (ValueError, IndexError):
+                continue
             #LOG.info(ELEV)
             #LOG.info(Elev_Times_Weight[r_min:r_max,c_min:c_max])
             #LOG.info(FloodBig[r_min:r_max,c_min:c_max])
@@ -1436,7 +1475,9 @@ def MergeStreamElevationsWithDEM(E, B, Flood, FloodImpact, Elev_Streams, ES_R, E
             pass
     
     
-    Elev_divided_by_weight = Elev_Times_Weight / Total_Weight
+    # Elev_divided_by_weight = Elev_Times_Weight / Total_Weight
+    Elev_divided_by_weight = np.zeros((nrows+2,ncols+2), dtype=np.float32)
+    np.divide(Elev_Times_Weight, Total_Weight, out=Elev_divided_by_weight, where=Total_Weight!=0)
     
     #If a cell is in the channel (determined by Flood raster) then use the weighted stream elevation, otherwise use the DEM data (E)
     ModifiedDEM = np.where(Elev_divided_by_weight>0.0,Elev_divided_by_weight,E)
@@ -1456,56 +1497,51 @@ def Last_Ditch_Effort_To_Smooth_Stream_Bumps(Elev_Streams, nrows, ncols, CON_r, 
 
 
 def DEM_Cleaner_Program(OutputID, 
-                        StreamShapefile, 
-                        DEM_Folder, 
-                        DEM_List, 
-                        STRM_File_List, 
-                        Working_Folder, 
-                        FlowFileName, 
-                        CurveParamFileName, 
-                        FloodMapName, 
+                        StreamShapefile: os.PathLike, 
+                        DEM_Folder: os.PathLike, 
+                        DEM_List: list[str], 
+                        STRM_File_List: list[str], 
+                        Working_Folder: os.PathLike, 
+                        FlowFileName: os.PathLike, 
+                        CurveParamFileName: os.PathLike, 
+                        FloodMapName: os.PathLike, 
                         Q_Fraction, 
                         TopWidthPlausibleLimit, 
                         search_dist_for_min_elev, 
                         search_dist_perp_cells):
     
-    StrmBase = GetStreamlineBaseName(StreamShapefile)
-    
-    
+
     for ddd in range(len(DEM_List)):
         LOG.info('Working on Site ' + DEM_List[ddd])
         
         DEM_File = os.path.join(DEM_Folder, DEM_List[ddd])
         STRM_File_Clean = STRM_File_List[ddd]
         if STRM_File_Clean=='':
-            STRM_File = Working_Folder + 'STRM_' + DEM_List[ddd]
-            
-            if '.tif' in STRM_File:
-                STRM_File_Clean = STRM_File.replace('.tif','_Clean.tif')
-            if '.img' in STRM_File:
-                STRM_File_Clean = STRM_File.replace('.img','_Clean.img')
-        
-            if os.path.isfile(STRM_File):
-                LOG.info('Stream File Already Exists')
-            else:
-                LOG.info('Get the Raster Dimensions for ' + DEM_File)
-                (minx, miny, maxx, maxy, dx, dy, ncols, nrows, dem_geoTransform, dem_projection) = Get_Raster_Details(DEM_File)
-                cellsize_x = abs(float(dx))
-                cellsize_y = abs(float(dy))
-                lat_base = float(maxy) - 0.5*cellsize_y
-                lon_base = float(minx) + 0.5*cellsize_x
-        
-                LOG.info('Creating ' + STRM_File)
-                
-                #This should clip the larger DEM Raster to the correct size
-                function_str = 'gdal_rasterize -a_nodata -9999 -ot UInt32 -a ' + OutputID + ' -ts ' + str(ncols) + ' ' + str(nrows) + ' -te ' + ' '.join([str(x) for x in [minx, miny, maxx, maxy]]) + ' -l ' + StrmBase + ' ' + StreamShapefile + ' ' + STRM_File
-                LOG.info(function_str)
-                subprocess.call(function_str, shell=True)
-            
+            STRM_File_Clean = STRM_File.with_name(STRM_File.stem + '_Clean.tif')
+
             #Clean the Stream File
             if os.path.isfile(STRM_File_Clean):
                 LOG.info('Clean Stream File Already Exists: ' + STRM_File_Clean)
             else:
+                STRM_File = Path(Working_Folder) / f'STRM_{DEM_List[ddd]}'
+                if STRM_File.exists():
+                    LOG.info('Stream File Already Exists')
+                else:
+                    LOG.info('Get the Raster Dimensions for ' + DEM_File)
+                    (minx, miny, maxx, maxy, dx, dy, ncols, nrows, _, dem_projection) = Get_Raster_Details(DEM_File)
+                    cellsize_x = abs(float(dx))
+                    cellsize_y = abs(float(dy))
+                    lat_base = float(maxy) - 0.5*cellsize_y
+                    lon_base = float(minx) + 0.5*cellsize_x
+            
+                    LOG.info('Creating ' + STRM_File)
+                    StrmBase = Path(StreamShapefile).stem
+                    
+                    #This should clip the larger DEM Raster to the correct size
+                    function_str = 'gdal_rasterize -a_nodata -9999 -ot UInt32 -a ' + OutputID + ' -ts ' + str(ncols) + ' ' + str(nrows) + ' -te ' + ' '.join([str(x) for x in [minx, miny, maxx, maxy]]) + ' -l ' + StrmBase + ' ' + StreamShapefile + ' ' + STRM_File
+                    LOG.info(function_str)
+                    subprocess.call(function_str, shell=True)
+
                 LOG.info('Creating Clean Stream File: ' + STRM_File_Clean)
                 Clean_STRM_Raster(STRM_File, STRM_File_Clean)
         S = 0
@@ -1516,25 +1552,21 @@ def DEM_Cleaner_Program(OutputID,
         
         
         
-        E = np.zeros((nrows+2,ncols+2))  #Create an array that is slightly larger than the STRM Raster Array
+        
+        E = np.zeros((nrows+2,ncols+2), dtype=np.float32)  #Create an array that is slightly larger than the STRM Raster Array
         E[1:(nrows+1), 1:(ncols+1)] = DEM
-        E = E.astype(float)
         
         #Get Cellsize Information
         (dx, dy, dm) = convert_cell_size(cellsize, yll, yur)
         dz = pow(dx*dx+dy*dy,0.5)
         
         #Get list of Uniqe Stream IDs.  Also find where all the cell values are.
-        B = np.zeros((nrows+2,ncols+2))  #Create an array that is slightly larger than the STRM Raster Array
+        B = np.zeros((nrows+2,ncols+2), dtype=np.int32)  #Create an array that is slightly larger than the STRM Raster Array
         B[1:(nrows+1), 1:(ncols+1)] = S
-        B = B.astype(int)
-        # (RR,CC) = B.nonzero()
         (RR,CC) = np.where(B > 0)
         
         COMID_Unique = np.unique(B)
         COMID_Unique = COMID_Unique[np.where(COMID_Unique > 0)]
-        #Sort from Smallest to highest values
-        COMID_Unique = np.sort(COMID_Unique).astype(int)
         num_comids = len(COMID_Unique)
                 
         # Compute necessary values
@@ -1583,9 +1615,9 @@ def DEM_Cleaner_Program(OutputID,
         #TopWidthMax = 400.0
         LocalFloodOption = False
         if os.path.isfile(FloodMapName):
-            LOG.info('Using Flood Map: ' + FloodMapName)
+            LOG.info(f'Using Flood Map: {FloodMapName}')
             Flood = np.zeros((nrows+2,ncols+2))
-            (Flood[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, dem_geotransform, dem_projection) = Read_Raster_GDAL(FloodMapName)
+            (Flood[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(FloodMapName)
         else:
             LOG.info('YOU NEED TO CREATE AN INITIAL FLOOD MAP!!!')
             return
@@ -1593,13 +1625,13 @@ def DEM_Cleaner_Program(OutputID,
             #Write_Output_Raster(FloodMapName, Flood[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Int32)
         
         #If warranted, write a Flood Impact File
-        FloodImpact_File = os.path.join(Working_Folder, 'FLOOD_IMPACT_' + DEM_List[ddd])
+        FloodImpact_File = os.path.join(Working_Folder, f'FLOOD_IMPACT_{DEM_List[ddd]}')
         if os.path.isfile(FloodImpact_File):
-            LOG.info('Using Existing Flood Map: FLOOD_IMPACT_' + DEM_List[ddd])
+            LOG.info(f'Using Existing Flood Map: {FloodImpact_File}')
             FloodImpact = np.zeros((nrows+2,ncols+2))
-            (FloodImpact[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, dem_geotransform, dem_projection) = Read_Raster_GDAL(FloodImpact_File)
+            (FloodImpact[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(FloodImpact_File)
         else:
-            LOG.info('Creating Flood Impact Map: ' + FloodImpact_File)
+            LOG.info(f'Creating Flood Impact Map: {FloodImpact_File}')
             COMID_Unique_TW_Reduced = COMID_Unique_TW * 0.75
             FloodImpact = CreateFloodImpactMap(Flood, RR, CC, E, B, nrows, ncols, search_dist_for_min_elev, TopWidthMax, dx, dy, LocalFloodOption, COMID_Unique, COMID_to_ID, MinCOMID, COMID_Unique_TW_Reduced, COMID_Unique_Depth, WeightBox, ElipseMask, TW)
             Write_Output_Raster(FloodImpact_File, FloodImpact[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Int32)
@@ -1618,9 +1650,9 @@ def DEM_Cleaner_Program(OutputID,
         #(SEEDCONNECT, CON_r, CON_c) = Clean_Connections(SEEDCONNECT, B, nrows, ncols, CON_Val, 3)
         #(SEEDCONNECT, CON_r, CON_c) = Clean_Connections_NewMethod(SEEDCONNECT, B, nrows, ncols, CON_Val, 3)
         #(CON_r, CON_c) = SEEDCONNECT.nonzero()
-        SEED_CONNECT_FILE = os.path.join(Working_Folder, 'SEED_CONNECT_' + DEM_List[ddd])
+        SEED_CONNECT_FILE = os.path.join(Working_Folder, f'SEED_CONNECT_{DEM_List[ddd]}')
         if os.path.isfile(SEED_CONNECT_FILE):
-            LOG.info('File Already Exists:  ' + SEED_CONNECT_FILE)
+            LOG.info(f'File Already Exists: {SEED_CONNECT_FILE}')
         else:
             Write_Output_Raster(SEED_CONNECT_FILE, SEEDCONNECT, ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Int32)
         
@@ -1655,10 +1687,10 @@ def DEM_Cleaner_Program(OutputID,
         #COMIDs_To_Evaluate_List = [760748000, 760743009, 760703075]
         
         #Create Elevation Streams File
-        ElevStreamsName = os.path.join(Working_Folder, 'Elev_Streams_' + DEM_List[ddd])
+        ElevStreamsName = os.path.join(Working_Folder, f'Elev_Streams_{DEM_List[ddd]}')
         if os.path.isfile(ElevStreamsName):
-            LOG.info('Using Existing Elevation-Streams File: ' + ElevStreamsName)
-            (Elev_Streams, ncols, nrows, cellsize, yll, yur, xll, xur, lat, dem_geotransform, dem_projection) = Read_Raster_GDAL(ElevStreamsName)
+            LOG.info(f'Using Existing Elevation-Streams File: {ElevStreamsName}')
+            (Elev_Streams, ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(ElevStreamsName)
         else:
             Elev_Streams = np.zeros((nrows,ncols))
             #Starting at each Anchor Point, Find the Path to the next Anchor point

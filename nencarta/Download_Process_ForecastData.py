@@ -4,34 +4,24 @@ Created on Wed Apr 10 16:47:37 2024
 
 @author: mike, with a TON of help from Riley
 """
-
-# local imports
-from . import Download_USGS_DEM
-
-from . import LOG
-import io
-import pandas as pd
-import geopandas as gpd  #pip3 install geopandas
-import requests
-import s3fs
-import xarray as xr
-
-# built-in imports
-from datetime import datetime, timedelta, datetime, timezone
 import os
 import sys
+from datetime import datetime, timedelta, datetime, timezone
 
-#from osgeo import gdal, ogr, osr # For GDAL functions
-#conda install conda-forge::gdal
-'''
-try:
-    import gdal, osr
-    from gdalconst import GA_ReadOnly
-except: 
-    from osgeo import gdal
-    from osgeo import osr
-    from osgeo.gdalconst import GA_ReadOnly
-'''
+# local imports
+import io
+import s3fs
+import requests
+import xarray as xr
+import pandas as pd
+import geopandas as gpd  #pip3 install geopandas
+
+# built-in imports
+
+import nencarta.Download_USGS_DEM as Download_USGS_DEM
+from nencarta.logger import LOG
+from nencarta.api.enumerations import StreamflowSource
+
 
 #Hydroviewer=>  https://apps.geoglows.org/apps/geoglows-hydroviewer/      https://beta.apps.geoglows.org/
 #Forecast Data=>  http://geoglows-v2-forecasts.s3-website-us-west-2.amazonaws.com/
@@ -161,10 +151,10 @@ def _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids):
         column_order=["rivid", "min", "max", "median"],
     )
 
-def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source, nwm_api_key=None):
+def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source: StreamflowSource, nwm_api_key=None):
 
     try:
-        if streamflow_source == 'GEOGLOWS':
+        if streamflow_source == StreamflowSource.GEOGLOWS:
             ODP_FORECAST_S3_BUCKET_URI = 's3://geoglows-v2-forecasts'
             
             ODP_S3_BUCKET_REGION = 'us-west-2'
@@ -213,17 +203,17 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
             df_max.columns = ['median', 'min', 'max']
             df_max = df_max.reset_index()
         
-        elif streamflow_source.startswith('NWM'):
+        elif streamflow_source.is_nwm():
             rp_url = 'https://nwm-api.ciroh.org/forecast'
 
 
-            if streamflow_source == 'NWM_short_range':
+            if streamflow_source == StreamflowSource.NWM_SHORT_RANGE:
                 forecast_type = 'short_range'
                 number_of_ensembles = 0
-            elif streamflow_source == 'NWM_medium_range':
+            elif streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE:
                 forecast_type = 'medium_range'
                 number_of_ensembles = 5
-            elif streamflow_source == 'NWM_long_range':
+            elif streamflow_source == StreamflowSource.NWM_LONG_RANGE:
                 forecast_type = 'long_range'
                 number_of_ensembles = 3
 
@@ -285,9 +275,9 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
         )
 
         try:
-            if streamflow_source == 'GEOGLOWS':
+            if streamflow_source == StreamflowSource.GEOGLOWS:
                 df_max = _read_geoglows_retrospective_flow(forecastdate, rivids)
-            elif streamflow_source.startswith('NWM'):
+            elif streamflow_source.is_nwm():
                 df_max = _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids)
             else:
                 raise ValueError(f"streamflow_source {streamflow_source} not recognized.")
