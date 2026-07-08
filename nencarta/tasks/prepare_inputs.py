@@ -19,8 +19,8 @@ from nencarta.tasks import (
     remove_old_forecast_files,
     get_fist_inputs)
 from nencarta.workspace import Workspace
-from nencarta.api.model_config import ModelConfig
-from nencarta.api.enumerations import FloodMapMode
+from nencarta.core.model_config import ModelConfig
+from nencarta.core.enumerations import FloodMapMode
 
 
 def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:

@@ -2,10 +2,10 @@ from pathlib import Path
 
 import yaml
 
-from nencarta.api.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 
 def _arc_inputs(dem: Path,
                 stream_raster: Path,

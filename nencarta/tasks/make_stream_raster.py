@@ -6,9 +6,9 @@ from numba import njit
 from osgeo import gdal, ogr
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
+from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 
 @njit(cache=True)
 def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]:

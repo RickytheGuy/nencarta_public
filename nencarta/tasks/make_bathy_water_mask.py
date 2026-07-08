@@ -4,7 +4,7 @@ import numpy as np
 from osgeo import gdal
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
+from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
 
 def make_water_mask(workspace: Workspace) -> Path:

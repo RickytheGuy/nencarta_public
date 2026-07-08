@@ -12,6 +12,6 @@ from .flow_files import make_flow_file_from_forecast, assign_user_flow_files, re
 from .clean_dem import make_clean_dem
 from .run_models import run_arc_bathymetry, run_mapper_bathymetry, run_mapper_floodmaps, run_arc_for_initial_floodmap
 from .fist import get_fist_inputs, run_fist
-from .consequences import get_consequences_tasks, run_consequences
+from .consequences import run_consequences
 from .unbuffer import unbuffer_maps
 from .prepare_inputs import prepare_inputs_for_dem

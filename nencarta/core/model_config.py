@@ -1,8 +1,7 @@
 from pathlib import Path
-from functools import cached_property
 
-from nencarta.api.inspect_config import inspect_config
-from nencarta.api.enumerations import Mapper
+from nencarta.core.inspect_config import inspect_config
+from nencarta.core.enumerations import Mapper
 
 class ModelConfig():
     def __init__(
@@ -18,6 +17,9 @@ class ModelConfig():
         self.mapper = mapper
         self.quiet = quiet
 
-    @cached_property
+    @property
     def vdt_exists(self) -> bool:
         return self.arc_config.exists() and Path(inspect_config(self.arc_config, "Print_VDT_Database")).exists()
+    
+    def __repr__(self) -> str:
+        return f"ModelConfig(arc_config={self.arc_config}, mapper={self.mapper})"

@@ -8,7 +8,7 @@ import geopandas as gpd
 from shapely.geometry import box
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
+from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
 from nencarta._constants import CACHED_ESA_GRID
 

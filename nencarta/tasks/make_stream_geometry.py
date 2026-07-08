@@ -5,10 +5,10 @@ import pandas as pd
 import geopandas as gpd
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
-from nencarta.api.vector import Vector
+from nencarta.core.raster import Raster
+from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 
 def _filter_streams_with_lake_json(lake_filter_json: str, stream_df: gpd.GeoDataFrame, rivid_field: str) -> gpd.GeoDataFrame:
     # First let's remove the stream reaches that are in the stream_ids_in_lake_list

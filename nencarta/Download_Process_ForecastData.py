@@ -8,20 +8,17 @@ import os
 import sys
 from datetime import datetime, timedelta, datetime, timezone
 
-# local imports
 import io
 import s3fs
 import requests
 import xarray as xr
 import pandas as pd
-import geopandas as gpd  #pip3 install geopandas
-
-# built-in imports
+import geopandas as gpd
 
 import nencarta.Download_USGS_DEM as Download_USGS_DEM
 from nencarta.logger import LOG
-from nencarta.api.enumerations import StreamflowSource
-
+from nencarta.core.enumerations import StreamflowSource
+from nencarta._constants import GEOGLOWS_FORECAST_PREFIX_URL
 
 #Hydroviewer=>  https://apps.geoglows.org/apps/geoglows-hydroviewer/      https://beta.apps.geoglows.org/
 #Forecast Data=>  http://geoglows-v2-forecasts.s3-website-us-west-2.amazonaws.com/
@@ -152,57 +149,24 @@ def _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids):
     )
 
 def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source: StreamflowSource, nwm_api_key=None):
-
     try:
         if streamflow_source == StreamflowSource.GEOGLOWS:
-            ODP_FORECAST_S3_BUCKET_URI = 's3://geoglows-v2-forecasts'
-            
-            ODP_S3_BUCKET_REGION = 'us-west-2'
-            
-            s3 = s3fs.S3FileSystem(anon=True, client_kwargs=dict(region_name=ODP_S3_BUCKET_REGION))
-            
-            s3store = s3fs.S3Map(root=f'{ODP_FORECAST_S3_BUCKET_URI}/{forecastdate}00.zarr', s3=s3, check=False)
-            
             LOG.info('Pulling ' + str(len(rivids)) + ' river ids from GeoGLOWS Forecast Bucket')
-            df = xr.open_zarr(s3store).sel(rivid=rivids).to_dataframe().round(2).reset_index()
-
+            # Get the max value for each ensemble and rivid, then get the median, min, and max for each rivid
+            df_max = (
+                xr.open_zarr(f'{GEOGLOWS_FORECAST_PREFIX_URL}{forecastdate}00.zarr', storage_options={"anon": True})
+                .sel(rivid=rivids)
+                .to_dataframe()
+                .round(2)
+                .reset_index()
+                .groupby(['ensemble', 'rivid'], sort=False)
+                .max()
+                .groupby('rivid', sort=False)
+                .agg(median=('Qout', 'median'), min=('Qout', 'min'), max=('Qout', 'max'))
+                .reset_index()
+            )
             
-            #Create a new column called riv_ens, which is just the rivid with the ensemble number tagged on the end.
-            LOG.info('Calculating the peak flow for each ensemble member of each rivid')
-            new_col_num = len(df.columns)
-            riv_ens = df.rivid.values.astype(int)
-            df.insert(new_col_num,'riv_ens',riv_ens)
-            df['riv_ens'] = df['riv_ens'].apply(lambda x: x*100) + df['ensemble']
-            
-            #Find the max value for each ensemble for each rivid
-            maxflows = df.reset_index().groupby('riv_ens').max()['Qout']
-            
-            #Create lists of the riv_ens and the max flow for each rivid and ensemble.  Should be an easier way to do this, but I'm not that good with pd
-            riv_ens_list = maxflows.index.tolist()
-            maxflows = list(maxflows)
-            
-            #Create a dataframe that has the riv_ens and the max flow rate (Qmax).  Qmax is for each ensemble of each rivid.
-            LOG.info('Evaluting the min/med/max peak flows of the ensemble-members for each rivid')
-            df_max = pd.DataFrame(list(zip(riv_ens_list, maxflows)), columns=['riv_ens', 'Qmax'])
-            
-            #Create a new column for the rivid.  Simply divide the riv_ens by 100 to get the rivid.
-            new_col_num = len(df_max.columns)
-            riv_ens = df_max.riv_ens.values.astype(int)
-            df_max.insert(new_col_num,'rivid',riv_ens)
-            df_max['rivid'] = df_max['riv_ens'].apply(lambda x: int(x/100))
-            
-            #We now have the peak flow for each ensemble for each rivid.
-            #Now we want to calculate the max, min, and median of the peak flow amounts
-            max_series = df_max.reset_index().groupby('rivid').max()['Qmax']
-            min_series = df_max.reset_index().groupby('rivid').min()['Qmax']
-            median_series = df_max.reset_index().groupby('rivid').median()['Qmax'].to_frame()
-            
-            #Collect all the information and print to a csv.
-            LOG.info('Writing output file: ' + CSV_File_Name)
-            df_max = median_series.merge(min_series, left_index=True, right_index=True).merge(max_series, left_index=True, right_index=True)
-            df_max.columns = ['median', 'min', 'max']
-            df_max = df_max.reset_index()
-        
+            LOG.info(f'Writing output file: {CSV_File_Name}')
         elif streamflow_source.is_nwm():
             rp_url = 'https://nwm-api.ciroh.org/forecast'
 
@@ -426,7 +390,7 @@ def Get_RIVID_Values(Riv_Method, parquet_file_from_geoglows, TermLinkNumber, Str
     #rivids = [280706358, 280759351]
     return rivids
 
-def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
+def Get_Date_For_Forecast(day_back, hour_back, streamflow_source: StreamflowSource):
 
     # get the date and time in UTC
     today = datetime.now(timezone.utc)
@@ -441,11 +405,11 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
 
     # set forecast hour based upon the streamflow source
     # GEOGLOWS: daily — hour doesn't matter
-    if streamflow_source == "GEOGLOWS":
+    if streamflow_source == StreamflowSource.GEOGLOWS:
         forecasthour = None  # explicitly signal "daily"
 
     # NWM short range: hour can be 2 hours behind the current forecast hour
-    elif streamflow_source == "NWM_short_range":
+    elif streamflow_source == StreamflowSource.NWM_SHORT_RANGE:
         h = int(forecasthour) - 2
         if h < 0:
             # roll back a day and wrap hour into prior day
@@ -455,7 +419,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
         forecasthour = f"{h:02d}"
 
     # NWM medium range: choose the closest cycle among 00, 06, 12, 18 that does NOT exceed the current hour
-    elif streamflow_source == "NWM_medium_range":
+    elif streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE:
         h_now = int(forecasthour)
         # allowed cycle hours
         cycles = [0, 6, 12, 18]
@@ -464,7 +428,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source):
         forecasthour = f"{cycle:02d}"
 
     # NWM long range: the forecast hour must be "00"
-    elif streamflow_source == "NWM_long_range":
+    elif streamflow_source == StreamflowSource.NWM_LONG_RANGE:
         forecasthour = "00"
 
     else:

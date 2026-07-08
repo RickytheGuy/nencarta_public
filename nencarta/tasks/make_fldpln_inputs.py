@@ -20,7 +20,7 @@ from scipy.ndimage import binary_dilation, distance_transform_edt, label, minimu
 from shapely.geometry import box, Point, LineString, Polygon, MultiLineString, GeometryCollection
 
 from nencarta import workspace
-from nencarta.api.vector import Vector
+from nencarta.core.vector import Vector
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
 

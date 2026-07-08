@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from nencarta.api.model_config import ModelConfig
+from nencarta.core.model_config import ModelConfig
 from nencarta.logger import LOG
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 from nencarta.workspace import Workspace
-from nencarta.api.enumerations import FloodMapMode, StreamflowSource
+from nencarta.core.enumerations import FloodMapMode, StreamflowSource
 
 def get_fist_inputs(workspace: Workspace, flow_file: Path) -> tuple:
     OutProjection = "EPSG:4269"

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from nencarta.api.enumerations import FloodMapMode, Mapper, StreamflowSource
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.core.configs import NencartaConfig
 
 class Workspace:
     def __init__(self, configs: NencartaConfig, dem: Path | None = None):
@@ -128,29 +128,5 @@ class Workspace:
         self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
         self.STRM_File_Clean = self.strm_folder / (self.FileName + '_matched.tif')
 
-    # def setup_flood_forecast_files(self, Forecast_Flood_Map: str, Forecast_Flood_Depth_Raster: str, ForecastFlowFile: str):
-    #     self.Forecast_Flood_Map = Forecast_Flood_Map
-    #     self.Forecast_Flood_Depth_Raster = Forecast_Flood_Depth_Raster
-    #     self.ForecastFlowFile = ForecastFlowFile
-
-    # def setup_flood_user_files(self, Flood_Maps: list[str], Depth_Maps: list[str], UserFlowFiles: list[str], Model_Input_Files: list[str]):
-    #     self.User_Flood_Maps = Flood_Maps
-    #     self.User_Depth_Maps = Depth_Maps
-    #     self.UserFlowFiles = UserFlowFiles
-    #     self.Model_Input_Files = Model_Input_Files
-
-    # def get_flow_files(self) -> list[str]:
-    #     if self.floodmap_mode == 'forecast':
-    #         return [self.ForecastFlowFile]
-    #     elif self.floodmap_mode == 'user':
-    #         return self.UserFlowFiles
-    #     else:
-    #         raise NotImplementedError(f"Floodmap mode '{self.floodmap_mode}' is not implemented.")
-        
-    def get_depth_files(self):
-        if self.floodmap_mode == 'forecast':
-            return [self.Forecast_Flood_Depth_Raster]
-        elif self.floodmap_mode == 'user':
-            return self.User_Depth_Maps
-        else:
-            raise NotImplementedError(f"Floodmap mode '{self.floodmap_mode}' is not implemented.")
+    def __repr__(self):
+        return f"Workspace(watershed={self.watershed}, output_dir={self.output_dir})"

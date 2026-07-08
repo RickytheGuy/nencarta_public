@@ -28,7 +28,7 @@ from shapely.geometry import box
 from curve2flood import Curve2Flood_MainFunction
 from arc.Create_GeoJSON import Run_Main_VDT_to_GEOJSON_Program_Stream_Vector
 
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 
 # local imports
 from . import LOG

@@ -3,7 +3,7 @@ from datetime import datetime
 from collections.abc import Sequence
 
 from nencarta.logger import LOG
-from nencarta.api.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
 def normalize_mapper_name(mapper: str | None) -> str:
     if mapper is None:

@@ -4,7 +4,7 @@ from osgeo import gdal
 from pyproj import CRS
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
+from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
 
 def _apply_buffer(bbox, distance):

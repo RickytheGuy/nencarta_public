@@ -1,18 +1,13 @@
 import json
 import subprocess
-from pathlib import Path
 
 from osgeo import gdal
 
 from nencarta.logger import LOG
-from nencarta.api.floodmapper_output import FloodMapperOutput, FloodMapperBulkOutput
+from nencarta.core.floodmapper_output import FloodMapperBulkOutput
 from nencarta.workspace import Workspace
 
 gdal.UseExceptions()
-
-class ConsequencesTasks:
-    def __init__(self, tasks: list):
-        self.tasks = tasks
 
 def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_Raster_Name, Consequences_Output_GPKG_File):
     """
@@ -51,10 +46,9 @@ def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_
 
     return
 
-def get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput,
-                           workspace: Workspace) -> ConsequencesTasks:
+def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: Workspace) -> list:
     if not workspace.configs.estimate_consequences:
-        return ConsequencesTasks([])
+        return []
     
     tasks = []
     for floodmapper_output in floodmapper_bulk_output.outputs:
@@ -105,10 +99,11 @@ def get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput,
         ]
         tasks.append(docker_command)
 
-    return ConsequencesTasks(tasks)
+    return tasks
 
-def run_consequences(consequences_tasks: ConsequencesTasks):
-    for docker_command in consequences_tasks.tasks:
+def run_consequences(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: Workspace) -> None:
+    consequences_tasks = _get_consequences_tasks(floodmapper_bulk_output, workspace)
+    for docker_command in consequences_tasks:
         LOG.info(f"Running consequences estimation with command: {' '.join(docker_command)}")
         try:
             result = subprocess.run(docker_command, check=True, capture_output=True, text=True)

@@ -1,9 +1,9 @@
 from osgeo import gdal
 
 from nencarta.logger import LOG
-from nencarta.api.raster import Raster
+from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
-from nencarta.api.floodmapper_output import FloodMapperBulkOutput
+from nencarta.core.floodmapper_output import FloodMapperBulkOutput
 
 def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspace) -> None:
     """Crop a buffered flood map back to the source DEM extent and remove ocean cells."""

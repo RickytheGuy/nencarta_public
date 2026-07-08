@@ -1,7 +1,6 @@
 from pipefunc import Pipeline, PipeFunc
 
 import nencarta.tasks as tasks
-from nencarta.api.configs import NencartaConfig
 
 # def get_pipeline_names(configs: NencartaConfig) -> tuple[str, str, bool]:
 #     move_streams = (
@@ -235,7 +234,7 @@ def build_pipeline(profile: bool) -> Pipeline:
             tasks.run_mapper_bathymetry,
             "mapper_bathy_config",
             renames={'model_config': 'mapper_arc_config'},
-            mapspec="mapper_arc_config[i] -> mapper_bathy_config[i]",
+            mapspec="mapper_arc_config[i], workspace[i] -> mapper_bathy_config[i]",
         ),
         PipeFunc(
             tasks.run_mapper_floodmaps,
@@ -256,15 +255,10 @@ def build_pipeline(profile: bool) -> Pipeline:
             mapspec="model_configs[i], mapper_arc_config[i] -> fist_outputs[i]",
         ),
         PipeFunc(
-            tasks.get_consequences_tasks,
-            "consequences_tasks",
-            renames={'floodmapper_bulk_output': 'mapper_outputs'},
-            mapspec="mapper_outputs[i], workspace[i] -> consequences_tasks[i]",
-        ),
-        PipeFunc(
             tasks.run_consequences,
             "consequences_outputs",
-            mapspec="consequences_tasks[i] -> consequences_outputs[i]",
+            renames={'floodmapper_bulk_output': 'mapper_outputs'},
+            mapspec="mapper_outputs[i], workspace[i] -> consequences_outputs[i]",
         )
     ]
 

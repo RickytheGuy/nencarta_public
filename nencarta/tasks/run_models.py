@@ -3,11 +3,11 @@ from pathlib import Path
 
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.api.enumerations import Mapper
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.enumerations import Mapper
+from nencarta.core.configs import NencartaConfig
 from nencarta._constants import FLOODSPREADER_PATH
-from nencarta.api.floodmapper_output import FloodMapperBulkOutput, FloodMapperOutput
-from nencarta.api.model_config import ModelConfig
+from nencarta.core.floodmapper_output import FloodMapperBulkOutput, FloodMapperOutput
+from nencarta.core.model_config import ModelConfig
 
 def _run_arc(config: Path, model_config: ModelConfig) -> None:
     from arc import Arc # Lazy import helps load faster
@@ -24,16 +24,18 @@ def _run_mapper(config_file: Path, model_config: ModelConfig) -> None:
         Curve2Flood_MainFunction(str(config_file), quiet=model_config.quiet)
 
 def run_arc_bathymetry(model_config: ModelConfig) -> ModelConfig:
-    LOG.info("Running ARC to generate bathymetry...")
+    LOG.info("Running ARC...")
     _run_arc(model_config.arc_config, model_config)
     
     return model_config
 
-def run_mapper_bathymetry(model_config: ModelConfig) -> ModelConfig:
-    LOG.info("Running flood mapper to generate bathymetry...")
+def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not model_config.vdt_exists:
         return model_config
-    _run_mapper(model_config.arc_config, model_config)
+    
+    if not workspace.configs.disable_bathymetry:
+        LOG.info("Running flood mapper to generate bathymetry...")
+        _run_mapper(model_config.arc_config, model_config)
 
     return model_config
 

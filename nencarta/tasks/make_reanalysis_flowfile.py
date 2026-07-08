@@ -9,10 +9,10 @@ import pandas as pd
 import xarray as xr
 
 from nencarta.logger import LOG
-from nencarta.api.vector import Vector
+from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.api.configs import NencartaConfig
-from nencarta.api.enumerations import StreamflowSource
+from nencarta.core.configs import NencartaConfig
+from nencarta.core.enumerations import StreamflowSource
 from nencarta.exceptions import NoStreamsFoundException
 from nencarta._constants import GEOGLOWS_RETURN_PERIODS_URL, GEOGLOWS_FDC_URL, GEOGLOWS_DAILY_URL, NWM_RP_URL
 

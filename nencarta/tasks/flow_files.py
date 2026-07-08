@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from nencarta.logger import LOG
-from nencarta.api.vector import Vector
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.vector import Vector
+from nencarta.core.configs import NencartaConfig
 from nencarta.workspace import Workspace
-from nencarta.api.floodmapper_output import FloodMapperOutput
+from nencarta.core.floodmapper_output import FloodMapperOutput
 from nencarta import Download_Process_ForecastData as ForecastFlows
 
 def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
@@ -35,7 +35,7 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
             
         try:
             ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
-            if not ForecastFlowFile.exists():
+            if not ForecastFlowFile.exists() or configs.process_stream_network:
                 ForecastFlows.Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, ForecastFlowFile, configs.streamflow_source, configs.nwm_api_key)
         except Exception as e:
             LOG.error('Could not process forensic forecast streamflow download, please check your date or try again later...')

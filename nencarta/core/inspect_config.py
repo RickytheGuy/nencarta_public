@@ -12,8 +12,8 @@ def inspect_config(config_path: Path, key: str = None) -> dict[str, Any] | Any:
             for line in f:
                 if line.startswith('#') or not line.strip():
                     continue
-                key, value = line.split(maxsplit=1)
-                config[key] = value.strip()
+                k, value = line.split(maxsplit=1)
+                config[k] = value.strip()
 
     if key is not None:
         return config.get(key)

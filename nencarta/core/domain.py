@@ -38,9 +38,9 @@ from .vector import Vector
 from nencarta.logger import LOG
 from nencarta import DEM_Cleaner
 from nencarta import Hydroterrain_Processing
-from nencarta.api.configs import NencartaConfig
+from nencarta.core.configs import NencartaConfig
 from nencarta.workspace import FolderStructure
-from nencarta.api.enumerations import Mapper, StreamflowSource
+from nencarta.core.enumerations import Mapper, StreamflowSource
 from nencarta import Download_Process_ForecastData as ForecastFlows
 from nencarta._constants import (
     GEOGLOWS_DAILY_URL, GEOGLOWS_FDC_URL, GEOGLOWS_RETURN_PERIODS_URL, NWM_RP_URL, CACHED_ESA_GRID
