@@ -10,7 +10,7 @@ from .configs import define_configs_for_dem_cleaning, define_arc_configs, define
 from .make_bathy_water_mask import make_water_mask
 from .flow_files import make_flow_file_from_forecast, assign_user_flow_files, remove_old_forecast_files, make_return_period_flow_file
 from .clean_dem import make_clean_dem
-from .run_models import run_arc_bathymetry, run_mapper_bathymetry, run_mapper_floodmaps, run_arc_for_initial_floodmap
+from .run_models import run_arc_bathymetry, run_mapper_bathymetry, run_mapper_floodmaps, run_arc_for_initial_floodmap, run_fldpln_library
 from .fist import get_fist_inputs, run_fist
 from .consequences import run_consequences
 from .unbuffer import unbuffer_maps

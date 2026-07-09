@@ -60,6 +60,8 @@ def _fldpln_inputs(workspace: Workspace):
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
         "FSOutBATHY": workspace.FS_BathyFile,
+        "max_wse_rise": workspace.configs.fldpln_max_wse_rise,
+        "": "",
     }
 
 def _write_config(config_path: Path, params: dict):
@@ -179,17 +181,13 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["#Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File
         params["StrmShp_File"] = workspace.DEM_StrmShp
-        params["mapper"] = configs.mapper
+        params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
         params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.bathy_args.get("FS_ADJUST_FLOW_BY_FRACTION", 1.0)
-        params["OutFLD"] = workspace.FloodMapFile_Bathy
-        params["OutSHP"] = workspace.FloodMapFile_Bathy_SHP
         params["TopWidthDistanceFactor"] = configs.bathy_args.get("TopWidthDistanceFactor", 1.5)
         params["TW_MultFact"] = configs.bathy_args.get("TW_MultFact", 1.5)
         params["TopWidthPlausibleLimit"] = configs.bathy_args.get("TopWidthPlausibleLimit", 2000)
         if not configs.bathy_args.get("Make_Output_GPKG", True):
             params["Make_Output_GPKG"] = False
-        if configs.mapper.is_curve2flood_fldpln_mapper():
-            params.update(_fldpln_inputs(workspace))
 
         if configs.use_specified_depth_for_bathy_mask:
             params["FloodSpreader_SpecifyDepth"] = configs.specify_depths_for_bathy_mask[-1]

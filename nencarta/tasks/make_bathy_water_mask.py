@@ -13,7 +13,7 @@ def make_water_mask(workspace: Workspace) -> Path:
         LOG.info(f"{workspace.bathy_water_mask} already exists and we aren't making it again...")
         return workspace.bathy_water_mask
     
-    LOG.info("Creating water mask for DEM cleaner...")
+    LOG.info("Creating water mask...")
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     
     land_cover_array = Raster(workspace.LAND_File).read_array()

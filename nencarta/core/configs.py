@@ -160,7 +160,10 @@ class NencartaConfig:
         return return_periods
         
     def get(self, key: str, default=None):
-        return self.config_dict.get(key, default)
+        value = self.config_dict.get(key, default)
+        if value is None and default is not None:
+            return default
+        return value
     
     def get_path(self, key: str, default=None):
         value = self.get(key, default)
@@ -196,9 +199,9 @@ class NencartaConfig:
             self.dem_filter = "*"
 
         self.move_stream_network_to_new_locations: bool = self.get("move_stream_network_to_new_locations", False)
-        self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2"))
+        self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2", 5))  # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
         if self.move_stream_network_to_new_locations and self.stream_order_threshold is None:
-            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'stream_order_threshold' must be specified when moving stream network.")
+            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'new_strm_threshold_km2' must be specified when moving stream network.")
 
         self.mapper: Mapper = Mapper.from_string(self.get('mapper'))
         
@@ -254,7 +257,7 @@ class NencartaConfig:
         self.make_velocity_maps: bool = self.get("make_velocity_maps", True)
         self.make_wse_maps: bool = self.get("make_wse_maps", True)
         self.floodmap_identifier: str = self.get("floodmap_identifier", "")
-        self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2", 5) # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
+        self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2", 5 ** 2) # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
         self.min_match_score: float = self.get("min_match_score")
         self.quiet: bool = self.get("quiet", False)
         self.source_dems: list = self.get("source_dems", [])
@@ -270,6 +273,12 @@ class NencartaConfig:
         self.profile: bool = self.get("profile", True)
         self.parallel: bool = self.get("parallel", False)
         self.exclude: list[int] = self.get("exclude", [])
+        self.fldpln_dh: float = self.get("fldpln_dh", 0.5)
+        self.fldpln_min_depth: float = self.get("fldpln_min_depth", 0.1)
+        self.fldpln_max_depth: float = self.get("fldpln_max_depth", 25.0)
+        self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling", False)
+        self.fldpln_parallel: bool = self.get("fldpln_parallel", False)
+        self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise", 0.01)
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

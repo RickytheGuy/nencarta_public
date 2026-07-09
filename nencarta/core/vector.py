@@ -8,6 +8,7 @@ from typing import Any
 
 import pyogrio
 import geopandas as gpd
+from pyproj import CRS
 from shapely.geometry import box
 
 from .abc_geo import GISDataSource
@@ -69,24 +70,37 @@ class Vector(GISDataSource, LMDBCache):
     
     def _compute_metadata(self) -> dict[str, Any]:
         info = pyogrio.read_info(self.filepath, force_total_bounds=True)
-        projection = info['crs']
-        if projection is None and self.filepath.suffix.lower().endswith(('.parquet', '.geoparquet')):
-            import pyarrow.parquet as pq
 
-            parquet_file = pq.ParquetFile(self.filepath)
+        projection = info["crs"]
 
-            # Retrieve the file metadata
-            metadata = parquet_file.metadata
-            geo_metadata = json.loads(metadata.metadata[b'geo'].decode('utf-8'))
-            projection = ":".join(map(str,geo_metadata['columns']['geometry']['crs']['id'].values()))
+        # GeoParquet may have CRS metadata even if pyogrio doesn't report it.
+        if projection is None:
+            if Path(self.filepath).suffix.lower() == ".parquet":
+                import pyarrow.parquet as pq
 
-        bbox = info['total_bounds']
-        if projection is not None and projection != 'EPSG:4326':
-            minx, miny, maxx, maxy = bbox
-            gdf_bbox = gpd.GeoSeries([box(minx, miny, maxx, maxy)], crs=projection).to_crs(4326)
-            epsg_4326_bbox = gdf_bbox.total_bounds
-        else:
-            epsg_4326_bbox = bbox
+                metadata = pq.ParquetFile(self.filepath).metadata.metadata or {}
+                geo = metadata.get(b"geo")
+                if geo:
+                    crs = json.loads(geo.decode("utf-8"))["columns"]["geometry"].get("crs")
+                    # if crs and "id" in crs:
+                    #     projection = ":".join(map(str, crs["id"].values()))
+                    if crs:
+                        projection = CRS.from_user_input(crs)
+            else:
+                warnings.warn(f"Could not determine CRS for {self.filepath}. Assuming EPSG:4326.", stacklevel=2)
+                projection = CRS.from_epsg(4326)
+
+        bbox = info["total_bounds"]
+
+        epsg_4326_bbox = bbox
+        if projection is not None:
+            crs = CRS.from_user_input(projection)
+            if crs != CRS.from_epsg(4326):
+                epsg_4326_bbox = (
+                    gpd.GeoSeries([box(*bbox)], crs=crs)
+                    .to_crs(4326)
+                    .total_bounds
+                )
 
         return {
             "projection": projection,

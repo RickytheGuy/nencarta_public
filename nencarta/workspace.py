@@ -127,6 +127,7 @@ class Workspace:
         self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
         self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
         self.STRM_File_Clean = self.strm_folder / (self.FileName + '_matched.tif')
+        self.fldpln_library = self.VDT_Folder / 'fldpln_library.parquet'
 
     def __repr__(self):
         return f"Workspace(watershed={self.watershed}, output_dir={self.output_dir})"

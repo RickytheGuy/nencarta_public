@@ -38,7 +38,7 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     if not workspace.configs.mapper.is_curve2flood_fldpln_mapper():
         make_stream_raster(workspace)
 
-    if workspace.configs.clean_dem or not workspace.configs.disable_bathymetry:
+    if workspace.configs.clean_dem or (not workspace.configs.disable_bathymetry and not workspace.configs.mapper.is_curve2flood_fldpln_mapper()):
         make_water_mask(workspace)
 
     if workspace.configs.clean_dem:
