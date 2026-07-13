@@ -98,6 +98,9 @@ def make_stream_raster(workspace: Workspace) -> Path:
         LOG.info(f"{workspace.STRM_File_Clean} already exists and we aren't making it again...")
         return workspace.STRM_File_Clean
     
+    if not workspace.DEM_StrmShp.exists() and not configs.raise_errors_if_nothing_in_domain:
+        return None
+    
     LOG.info("Creating stream raster from stream geometry...")
     workspace.STRM_File_Clean.parent.mkdir(parents=True, exist_ok=True)
 

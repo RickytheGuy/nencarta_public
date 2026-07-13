@@ -28,6 +28,9 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
     if model_config.vdt_exists and not workspace.configs.process_stream_network:
         return model_config
     
+    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+        return model_config
+    
     LOG.info("Running ARC...")
     _run_arc(model_config.arc_config, model_config)
     
@@ -77,6 +80,9 @@ def _mapper_has_required_outputs(config: Path, workspace: Workspace) -> bool:
 def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not workspace.mapper.is_curve2flood_fldpln_mapper() or \
         (workspace.fldpln_library.exists() and not workspace.configs.process_stream_network):
+        return model_config
+    
+    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return model_config
 
     from curve2flood import build_fldpln_library

@@ -47,6 +47,9 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         workspace.configs.disable_bathymetry = True
         return workspace.stream_info_file
     
+    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+        return None
+    
     wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
     
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)

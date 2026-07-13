@@ -19,6 +19,9 @@ def make_flood_flow_file_from_base_max_file(workspace: Workspace, columns: list[
         LOG.info(f"{workspace.COMID_Q_File} already exists and we aren't making it again...")
         return workspace.COMID_Q_File
     
+    if not workspace.DEM_Reanalsyis_FlowFile.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+        return None
+    
     workspace.COMID_Q_File.parent.mkdir(parents=True, exist_ok=True)
 
     LOG.info("Creating flood flow file from reanalysis file...")

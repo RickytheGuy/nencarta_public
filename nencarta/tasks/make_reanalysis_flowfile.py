@@ -153,6 +153,9 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
 
     if workspace.DEM_Reanalsyis_FlowFile.exists() and not configs.process_stream_network:
         return workspace.DEM_Reanalsyis_FlowFile
+    
+    if not workspace.DEM_StrmShp.exists() and not configs.raise_errors_if_nothing_in_domain:
+        return None
 
     workspace.DEM_Reanalsyis_FlowFile.parent.mkdir(parents=True, exist_ok=True)
     stream_df = Vector(workspace.DEM_StrmShp).to_geopandas()
