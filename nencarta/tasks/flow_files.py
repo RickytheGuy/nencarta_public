@@ -17,7 +17,7 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
     #Forecast flow data from GeoGLOWS
     # parquet_file_from_geoglows = 'v2-model-table.parquet'     #http://geoglows-v2.s3-website-us-west-2.amazonaws.com/#tables/
     configs = workspace.configs
-    rivids = Vector(workspace.DEM_StrmShp).to_geopandas(columns=[configs.stream_id_field])[configs.stream_id_field].astype(int).tolist()
+    rivids = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas(columns=[configs.stream_id_field])[configs.stream_id_field].astype(int).tolist()
     
     forecastdate = configs.forensic_forecast_date
     forecasthour = configs.forensic_forecast_hour

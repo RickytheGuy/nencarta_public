@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from osgeo import gdal
 
 from nencarta.logger import LOG
@@ -1128,6 +1127,7 @@ def Adjust_Elevations_By_Perpendicular_Cells(E_Original, i, R_List, C_List, nrow
 
 
 def Plot_Elevation_Profiles(COMID_Name, Dist, DEM, ModDEM):
+    import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(Dist,DEM,'k')
     plt.plot(Dist,ModDEM,'r')

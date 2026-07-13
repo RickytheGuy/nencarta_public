@@ -15,8 +15,9 @@ from .abc_geo import GISDataSource
 from .geo_cache import LMDBCache
 
 class Vector(GISDataSource, LMDBCache):
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, use_threads: bool = True):
         self.filepath = Path(filepath).resolve()
+        self.use_threads = use_threads
 
         LMDBCache.__init__(self)
         self._metadata = self._load_or_compute_metadata()
@@ -123,11 +124,11 @@ class Vector(GISDataSource, LMDBCache):
 
         if self.filepath.suffix.lower() in ('.parquet', '.geoparquet'):
             try:
-                return gpd.read_parquet(self.filepath, bbox=bbox_epsg_4326, columns=columns)
+                return gpd.read_parquet(self.filepath, bbox=bbox_epsg_4326, columns=columns, use_threads=self.use_threads)
             except ValueError as e:
                 if "Specifying 'bbox' not supported for this Parquet file" in str(e):
                     # warnings.warn(f"Could not read {self.filepath} with bbox. Consider adding covering bbox to parquet file for faster reading.", stacklevel=2)
-                    gdf = gpd.read_parquet(self.filepath, columns=columns)
+                    gdf = gpd.read_parquet(self.filepath, columns=columns, use_threads=self.use_threads)
                     minx, miny, maxx, maxy = bbox_epsg_4326
                     gdf = gdf.cx[minx:maxx, miny:maxy]
                     return gdf

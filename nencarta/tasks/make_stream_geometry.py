@@ -58,9 +58,9 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
             return None
 
     if len(streamlines) == 1:
-        gdf = Vector(streamlines[0]).to_geopandas(bbox_epsg_4326=bbox)
+        gdf = Vector(streamlines[0], not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=bbox)
     else:
-        gdf = pd.concat([Vector(path).to_geopandas(bbox_epsg_4326=bbox) for path in streamlines], ignore_index=True, copy=False)
+        gdf = pd.concat([Vector(path, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=bbox) for path in streamlines], ignore_index=True, copy=False)
 
     gdf = gdf[~gdf.geometry.isna()]
 

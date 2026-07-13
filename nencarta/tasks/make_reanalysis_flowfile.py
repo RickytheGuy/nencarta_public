@@ -158,7 +158,7 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
         return None
 
     workspace.DEM_Reanalsyis_FlowFile.parent.mkdir(parents=True, exist_ok=True)
-    stream_df = Vector(workspace.DEM_StrmShp).to_geopandas()
+    stream_df = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas()
 
     river_ids = stream_df[configs.stream_id_field].astype(int).unique()
 

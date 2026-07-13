@@ -70,7 +70,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     else:
         lakes = None
 
-    source_gdf = Vector(workspace.DEM_StrmShp).to_geopandas()
+    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas()
     channel_mask = smooth_and_burn_dem(
         workspace, 
         source_gdf, 
@@ -114,7 +114,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         f.write(dem_raster.projection)
 
     if lakes is not None:
-        lakes_gdf = Vector(workspace.configs.lakes).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
+        lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
         wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
         wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
         wtbx_gdf.to_file(workspace.new_StrmShp)
