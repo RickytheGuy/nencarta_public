@@ -62,7 +62,9 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         lakes_ds.SetProjection(dem_raster.projection)
         ds: gdal.Dataset = ogr.Open(workspace.configs.lakes)
         lakes_layer: ogr.Layer = ds.GetLayer()
-        gdal.RasterizeLayer(lakes_ds, [1], lakes_layer)
+        bbox = dem_raster.bbox
+        lakes_layer.SetSpatialFilterRect(*bbox)
+        gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
         lakes_ds.FlushCache()
         lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
     else:
@@ -129,6 +131,13 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         source_id_col=workspace.configs.streamflow_source.upstream_id,
         source_ds_col=workspace.configs.streamflow_source.downstream_id,
     )
+    if streams_gdf.empty:
+        if workspace.configs.raise_errors_if_nothing_in_domain:
+            raise ValueError("No stream geometries remain after conflation.")
+        else:
+            workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+            return None
+        
     Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
 
     _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
@@ -546,6 +555,11 @@ def burn_streams_into_dem(
     # Mask out ocean (where elevation == 0)
     ocean_mask = (dem == 0)
     channel_mask &= ~ocean_mask
+
+    # Mask out dem's no data value
+    nodata = dem_ds.GetRasterBand(1).GetNoDataValue()
+    if nodata is not None:
+        channel_mask &= (dem != nodata)
 
     labels, num_features = label(channel_mask, structure=structure)
     
