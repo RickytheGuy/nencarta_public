@@ -1222,13 +1222,12 @@ def _conflate_streams(
             current_linkno_outlet = headwater_linknos[0]
             found = False
             while True:
-                if all(nx.has_path(GA, hdwtr, current_linkno_outlet) for hdwtr in headwater_linknos):
-                    found = True
-                    break
-    
                 try:
                     current_linkno_outlet = next(GA.successors(current_linkno_outlet))
                 except StopIteration:
+                    break
+                if all(nx.has_path(GA, hdwtr, current_linkno_outlet) for hdwtr in headwater_linknos):
+                    found = True
                     break
 
             if not found:
@@ -1312,10 +1311,7 @@ def _conflate_streams(
             for fid in nx.shortest_path(GB, fid_source_2, confluence_fid):
                 allowable_linknos[fid].update(source2_path)
 
-            try:
-                source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
-            except:
-                pass
+            source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
             for fid in nx.shortest_path(GB, confluence_fid, outlet_fid):
                 allowable_linknos[fid].update(source3_path)
 
