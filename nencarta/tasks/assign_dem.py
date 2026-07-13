@@ -152,15 +152,17 @@ def assign_and_validate_dem(
             out_proj = f"EPSG:{out_proj}"
         else:
             out_proj = raster.projection
+    else:
+        out_proj = raster.projection
 
-        builder, options = _build_options(
-            target_bbox,
-            vrt=(workspace.assigned_dem.suffix == '.vrt'),
-            src_proj=raster.projection,
-            out_proj=out_proj,
-            xres=xres,
-            yres=yres,
-        )
+    builder, options = _build_options(
+        target_bbox,
+        vrt=(workspace.assigned_dem.suffix == '.vrt'),
+        src_proj=raster.projection,
+        out_proj=out_proj,
+        xres=xres,
+        yres=yres,
+    )
 
     workspace.assigned_dem.parent.mkdir(parents=True, exist_ok=True)
     builder(workspace.assigned_dem, surrounding_dems, options=options)
