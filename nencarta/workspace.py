@@ -126,8 +126,11 @@ class Workspace:
         self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
         self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
         self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
-        self.STRM_File_Clean = self.strm_folder / (self.FileName + '_matched.tif')
+        self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
         self.fldpln_library = self.VDT_Folder / 'fldpln_library.parquet'
+
+        self.fldpln_bathymetry_input_file = self.ARC_Folder / f"{self.FileName}_fldpln_bathymetry_input.txt"
+        self.fldpln_bathymetry = self.bathy_file_folder / f"{self.FileName}_fldpln_bathymetry.tif"
 
     def __repr__(self):
         return f"Workspace(watershed={self.watershed}, output_dir={self.output_dir})"

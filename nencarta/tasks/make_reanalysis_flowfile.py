@@ -100,8 +100,8 @@ def _get_geoglows_rp(river_ids: list[int]) -> pd.DataFrame:
         # Multiping by 1.5 seems to be a reasonable esimate of the maximum high flow, while adding 50 helps small rivers with tiny
         # return period 100 flows (close to 0)
         # Going too big means the VDT has bigger gaps to fill, which can lead to worse performance and less accurate rating curves
-        # final_df[f'{col}_premium'] = final_df[col] * 1.5 + 50
-        final_df[f'{col}_premium'] = final_df[col] * 10
+        final_df[f'{col}_premium'] = (final_df[col] * 1.5) + 50
+        # final_df[f'{col}_premium'] = final_df[col] * 10
 
     final_df = final_df.round(3)
     return final_df
@@ -147,6 +147,10 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
     This is inspired by nencarta's equivalent function.
     """
     configs = workspace.configs
+    if configs.reanalysis_file:
+        workspace.DEM_Reanalsyis_FlowFile = Path(configs.reanalysis_file)
+        return workspace.DEM_Reanalsyis_FlowFile
+
     if workspace.DEM_Reanalsyis_FlowFile.exists() and not configs.process_stream_network:
         return workspace.DEM_Reanalsyis_FlowFile
 

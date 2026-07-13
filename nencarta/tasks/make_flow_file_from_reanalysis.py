@@ -18,6 +18,8 @@ def make_flood_flow_file_from_base_max_file(workspace: Workspace, columns: list[
     if workspace.COMID_Q_File.exists() and not workspace.configs.process_stream_network:
         LOG.info(f"{workspace.COMID_Q_File} already exists and we aren't making it again...")
         return workspace.COMID_Q_File
+    
+    workspace.COMID_Q_File.parent.mkdir(parents=True, exist_ok=True)
 
     LOG.info("Creating flood flow file from reanalysis file...")
     _make_flood_flow_file_from_base_max_file(workspace.DEM_Reanalsyis_FlowFile, workspace.COMID_Q_File, columns)

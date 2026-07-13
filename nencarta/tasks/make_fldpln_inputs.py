@@ -6,24 +6,28 @@ from pathlib import Path
 from functools import partial
 from dataclasses import dataclass
 from itertools import combinations
-from collections import deque, defaultdict
+from collections import defaultdict
 
 import tqdm
 import numpy as np
 import pandas as pd
 import networkx as nx
 import geopandas as gpd
-from numba import njit
+from numba import njit, prange
 from osgeo import gdal, ogr
 from whitebox import WhiteboxTools
+from scipy.interpolate import griddata
 from shapely import reverse, line_merge, prepare
 from scipy.ndimage import binary_dilation, distance_transform_edt, label, minimum_filter
 from shapely.geometry import box, Point, LineString, Polygon, MultiLineString, GeometryCollection
 
+from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.logger import LOG
 from nencarta.workspace import Workspace
+from nencarta.tasks.configs import define_arc_configs_for_fldpln_bathymetry
+from arc import Arc
+from curve2flood import remove_cells_not_connected
 
 wbt = WhiteboxTools()
 wbt.set_compress_rasters(True)
@@ -31,15 +35,19 @@ wbt.set_compress_rasters(True)
 def make_fldpln_inputs(workspace: Workspace) -> Path:
     if workspace.stream_info_file.exists() and \
         workspace.filled_dem.exists() and \
-        workspace.STRM_File_Clean.exists() and \
+        workspace.new_stream_raster.exists() and \
         workspace.new_StrmShp_matched.exists() and \
         workspace.flowdir.exists() and \
-        workspace.fixed_dem.exists() and \
+        workspace.fldpln_bathymetry.exists() and \
         not workspace.configs.process_stream_network:
         LOG.info(f"{workspace.stream_info_file} already exists and we aren't making it again...")
-        workspace.assigned_dem = workspace.fixed_dem
+        workspace.assigned_dem = workspace.fldpln_bathymetry
         workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+        workspace.STRM_File_Clean = workspace.new_stream_raster
+        workspace.configs.disable_bathymetry = True
         return workspace.stream_info_file
+    
+    wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
     
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
@@ -53,56 +61,243 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     )
 
     wbt.fill_depressions(str(workspace.fixed_dem), str(workspace.filled_dem))
+    if not workspace.filled_dem.exists():
+        raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
     wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
+    if not workspace.flowdir.exists():
+        raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
     wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
+    if not workspace.flowacc.exists():
+        raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
 
     # # If DEM units are not in km2, convert the threshold to the DEM units. This is important for the stream extraction step, which uses the flow accumulation raster to determine where streams are.
     threshold = workspace.configs.new_strm_threshold_km2
     dem_raster = Raster(workspace.assigned_dem)
     threshold_native = threshold * dem_raster.native_cell_area / dem_raster.cell_area_km2
     buffer_distance = (50/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 50 m buffer distance in DEM units
-    distance_to_clip_back = threshold_native ** 0.25 # Sqrt of the length of one side of the threshold area
+    snap_distance = (0.1/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 0.1 m snap distance in DEM units
+
+    # Remove the vector rasters, since whitebox will not make some of them if they exist
+    for file in workspace.new_StrmShp.parent.glob("*"):
+        if file.stem.startswith(workspace.new_StrmShp.stem):
+            file.unlink()
 
     wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
+    if not workspace.whitebox_stream_raster.exists():
+        raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
     wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
     wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
-    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp))
+    if not workspace.new_StrmShp.exists():
+        raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
+    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
 
+    # Whitebox does not insert the projection into the shapefile, so we need to do that here.
     prj_file = workspace.new_StrmShp.with_suffix('.prj')
     with open(prj_file, 'w') as f:
         f.write(dem_raster.projection)
 
     streams_gdf = _conflate_streams(
-        source_streams=workspace.DEM_StrmShp, 
+        source_gdf=source_gdf, 
         streams_vector=workspace.new_StrmShp, 
         buffer_distance=buffer_distance,
-        unbuffer_distance=distance_to_clip_back,
         dem_proj=dem_raster.projection, 
+        dem_bbox=dem_raster.bbox,
         source_id_col=workspace.configs.streamflow_source.upstream_id,
         source_ds_col=workspace.configs.streamflow_source.downstream_id,
     )
     Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
 
-    _rasterize_streams(str(workspace.STRM_File_Clean), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
+    _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
 
-    final_streams = gdal.Open(str(workspace.STRM_File_Clean)).ReadAsArray()
+    final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
     channel_mask |= (final_streams > 0)
+    channel_mask = remove_cells_not_connected(channel_mask, final_streams)
+
+    if not workspace.configs.disable_bathymetry:
+        config = define_arc_configs_for_fldpln_bathymetry(workspace)
+        Arc(str(config), quiet=workspace.configs.quiet).run()
+        if not workspace.ARC_BathyFile.exists():
+            raise FileNotFoundError(f"ARC bathymetry file {workspace.ARC_BathyFile} was not created successfully.")
+        
+        bathy_raster = Raster(workspace.ARC_BathyFile)
+        bathy = bathy_raster.read_array()
+
+        filled = interpolate_bathymetry(bathy, channel_mask)
+
+        smoothed = smooth_downhill(
+            filled,
+            channel_mask,
+            alpha=4.0,
+            iterations=8,
+        )
+        smoothed[~channel_mask] = Raster(workspace.fixed_dem).read_array()[~channel_mask]
+
+
+        Raster.write_array_using_reference(
+            smoothed,
+            bathy_raster,
+            workspace.fldpln_bathymetry
+        )
+
+        wbt.fill_depressions(str(workspace.fldpln_bathymetry), str(workspace.filled_dem))
+        if not workspace.filled_dem.exists():
+            raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
+        wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
+        if not workspace.flowdir.exists():
+            raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
+        wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
+        if not workspace.flowacc.exists():
+            raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
+
+        # Remove the vector rasters, since whitebox will not make some of them if they exist
+        for file in workspace.new_StrmShp.parent.glob("*"):
+            if file.stem.startswith(workspace.new_StrmShp.stem):
+                file.unlink()
+
+        wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
+        if not workspace.whitebox_stream_raster.exists():
+            raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
+        wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
+        wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
+        if not workspace.new_StrmShp.exists():
+            raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
+        wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+        wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
+
+        # Whitebox does not insert the projection into the shapefile, so we need to do that here.
+        prj_file = workspace.new_StrmShp.with_suffix('.prj')
+        with open(prj_file, 'w') as f:
+            f.write(dem_raster.projection)
+
+        streams_gdf = _conflate_streams_simple(
+            source_gdf=streams_gdf, 
+            streams_vector=workspace.new_StrmShp, 
+            buffer_distance=buffer_distance
+        )
+        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
+
+        _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
+
+        final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
+        channel_mask |= (final_streams > 0)
+
+
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     make_channel_mask(channel_mask, str(workspace.fixed_dem), str(workspace.bathy_water_mask))
 
     stream_info = _create_stream_info_table(
         streams_array=final_streams, 
         streams_gdf=streams_gdf, 
-        dem_file=workspace.fixed_dem,
+        dem_file=workspace.filled_dem,
         source_id_col=workspace.configs.streamflow_source.upstream_id,
         source_ds_col=workspace.configs.streamflow_source.downstream_id
     )
     stream_info.to_parquet(workspace.stream_info_file, index=False)
 
-    workspace.assigned_dem = workspace.fixed_dem
+    # workspace.assigned_dem = workspace.fixed_dem
+    workspace.assigned_dem = workspace.fldpln_bathymetry
     workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+    workspace.STRM_File_Clean = workspace.new_stream_raster
+    workspace.configs.disable_bathymetry = True
 
-def smooth_and_burn_dem(workspace: Workspace, source_gdf: gpd.GeoDataFrame, id_col: str = 'LINKNO', ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
+def interpolate_bathymetry(
+    bathymetry: np.ndarray,
+    channel_mask: np.ndarray,
+) -> np.ndarray:
+    # 2. Get the coordinates of valid (non-NaN) data and the NaNs
+    y, x = np.indices(bathymetry.shape)
+    valid_mask = ~np.isnan(bathymetry) & channel_mask
+    if not np.any(valid_mask):
+        raise ValueError("No valid bathymetry data found within the channel mask. Cannot interpolate. Are the streams for ARC in the newly derived stream network?")
+
+    # Extract coordinates and values of known points
+    coords = np.column_stack((y[valid_mask], x[valid_mask]))
+    values = bathymetry[valid_mask]
+
+
+    # Coordinates of the missing values we want to fill
+    nan_mask = np.isnan(bathymetry) & channel_mask
+    nan_coords = np.column_stack((y[nan_mask], x[nan_mask]))
+
+    # 3. Interpolate using griddata ('linear' or 'cubic')
+    interpolated_values = griddata(coords, values, nan_coords, method='linear')
+
+    missing = np.isnan(interpolated_values)
+    if np.any(missing):
+        interpolated_values[missing] = griddata(
+            coords,
+            values,
+            nan_coords[missing],
+            method="nearest",
+        )
+
+
+    # 4. Fill the missing points back into the original raster
+    bathymetry[nan_mask] = interpolated_values
+    return bathymetry
+
+@njit(cache=True, parallel=True, nogil=True)
+def smooth_downhill(
+    bathymetry: np.ndarray,
+    channel_mask: np.ndarray,
+    alpha: float = 2.0,
+    iterations: int = 5,
+) -> np.ndarray:
+    """
+    Smooth while giving greater weight to lower neighbors.
+    """
+    offsets = [
+        (-1, -1), (-1, 0), (-1, 1),
+        ( 0, -1),          ( 0, 1),
+        ( 1, -1), ( 1, 0), ( 1, 1),
+    ]
+    spatial = np.array([
+        [0.7, 1.0, 0.7],
+        [1.0, 0.0, 1.0],
+        [0.7, 1.0, 0.7],
+    ])
+
+    rows, cols = np.where(channel_mask)
+    for _ in range(iterations):
+        new = bathymetry.copy()
+
+        for i in prange(len(rows)):
+            r = rows[i]
+            c = cols[i]
+            center = bathymetry[r, c]
+            if not np.isfinite(center):
+                continue
+
+            values = [center]
+            weights = [1.0]
+
+            for dr, dc in offsets:
+                rr = r + dr
+                cc = c + dc
+
+                if (
+                    0 <= rr < bathymetry.shape[0]
+                    and 0 <= cc < bathymetry.shape[1]
+                    and channel_mask[rr, cc]
+                    and np.isfinite(bathymetry[rr, cc])
+                ):
+                    z = bathymetry[rr, cc]
+
+                    w = spatial[dr + 1, dc + 1]
+                    if z > center:
+                        w *= np.exp(-alpha * (z - center))
+
+                    values.append(z)
+                    weights.append(w)
+
+            new[r, c] = np.average(values, weights=weights)
+
+        bathymetry = new
+
+    return bathymetry
+
+def smooth_and_burn_dem(workspace: Workspace, source_gdf: gpd.GeoDataFrame, id_col: str = 'LINKNO', ds_col: str = 'DSLINKNO') -> np.ndarray:
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
     dem = dem_ds.ReadAsArray()
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, id_col, ds_col)
@@ -172,88 +367,6 @@ def elevation_components_nx(G: nx.Graph, elevations: dict) -> list[set]:
         components.append(component)
 
     return components
-
-def multi_source_bfs_with_nearest(G: nx.Graph, sources: list | set) -> tuple[dict, dict]:
-    """
-    Multi-source BFS for unweighted graph.
-
-    Returns:
-        distances[node] -> shortest distance to nearest source
-        nearest[node]   -> which source node is closest
-    """
-    distances = {}
-    nearest = {}
-    queue = deque()
-
-    # Initialize all sources
-    for s in sources:
-        distances[s] = 0
-        nearest[s] = s
-        queue.append(s)
-
-    while queue:
-        node = queue.popleft()
-        d = distances[node]
-        origin = nearest[node]
-
-        for nbr in G.neighbors(node):
-            if nbr not in distances:
-                distances[nbr] = d + 1
-                nearest[nbr] = origin   # propagate original boundary source
-                queue.append(nbr)
-
-    return distances, nearest
-
-def dual_boundary_bfs(G: nx.Graph, 
-                      higher_sources: list | set, lower_sources: list | set) -> tuple[dict, dict]:
-    """
-    Single-pass BFS computing:
-
-        dist_to_higher[node]
-        dist_to_lower[node]
-
-    for unweighted graph.
-    """
-    dist_high = {}
-    dist_low = {}
-
-    q_high = deque()
-    q_low = deque()
-
-    adj = G._adj
-
-    append_high = q_high.append
-    append_low = q_low.append
-    pop_high = q_high.popleft
-    pop_low = q_low.popleft
-
-    for s in higher_sources:
-        dist_high[s] = 0
-        append_high(s)
-
-    for s in lower_sources:
-        dist_low[s] = 0
-        append_low(s)
-
-    while q_high:
-        node = pop_high()
-        d = dist_high[node] + 1
-
-        for nbr in adj[node]:
-            if nbr not in dist_high:
-                dist_high[nbr] = d
-                append_high(nbr)
-
-    while q_low:
-        node = pop_low()
-        d = dist_low[node] + 1
-
-        for nbr in adj[node]:
-            if nbr not in dist_low:
-                dist_low[nbr] = d
-                append_low(nbr)
-
-    return dist_high, dist_low
 
 def smooth_burned_dem(array: np.ndarray, mask: np.ndarray = None, pbar: bool = True, max_difference: float = 0.5) -> np.ndarray:
     array = array.astype(np.float32, copy=False)
@@ -403,8 +516,8 @@ def burn_streams_into_dem(
 
     # Traverse each segment. Identify which end is up and downstream.
     # Then, take the upstream value. If it is not a multiple of 0.5, lower it to so.
-    # Go downstream. Each cell is a multipe of 0.5, no higher than upstream elevation or the current cell elevation.
-    for row in tqdm.tqdm(streams_gdf.itertuples(), total=len(streams_gdf), desc="Burning stream segments into DEM"):
+    # Go downstream. Each cell is a multiple of 0.5, no higher than upstream elevation or the current cell elevation.
+    for row in streams_gdf.itertuples():
         geom = row.geometry
         stream_id = row.Index
         if geom.geom_type == "MultiLineString":
@@ -822,16 +935,73 @@ def upstream_centroid(G: nx.DiGraph, node: int, reach_sig: dict[str, ReachSig]) 
     # Assume first point is upstream if isolated
     return Point(reach_sig[node].geom.coords[0])
 
+def _conflate_streams_simple(
+        source_gdf: gpd.GeoDataFrame,
+        streams_vector: os.PathLike,
+        buffer_distance: float,
+) -> gpd.GeoDataFrame:
+    """
+    We assume that source and wtbx streams are super closely aligned already.
+    We can just iterate over each source stream, find the one that intersects it the most, and assign that
+    """
+    wtbx_vector = Vector(streams_vector)
+    wtbx_gdf = wtbx_vector.to_geopandas()
+
+    source_gdf['corresponding_wtbx_id'] = None
+    wtbx_sindex = wtbx_gdf.sindex
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
+        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=2)
+        source_gdf['buffered'] = source_gdf.buffer(buffer_distance, resolution=2)
+
+    for source_row in source_gdf.itertuples():
+        source_geom: Polygon = source_row.buffered
+        possible_matches_index = list(wtbx_sindex.intersection(source_geom.bounds))
+        possible_matches: gpd.GeoDataFrame = wtbx_gdf.iloc[possible_matches_index]
+        best_match = None
+        best_area = 0
+        for wtbx_row in possible_matches.itertuples():
+            intersection_area = source_geom.intersection(wtbx_row.buffered).area
+            if intersection_area > best_area:
+                best_area = intersection_area
+                best_match = wtbx_row
+
+        if best_match is not None:
+            source_gdf.at[source_row.Index, 'corresponding_wtbx_id'] = best_match.Index
+
+    # Transfer all the attributes from the source to the wtbx gdf
+    wtbx_gdf = wtbx_gdf[['FID']].merge(
+        source_gdf.drop(columns=['buffered', 'FID']), 
+        left_index=True, 
+        right_on='corresponding_wtbx_id'
+    ).drop(columns='corresponding_wtbx_id')
+
+    wtbx_gdf = gpd.GeoDataFrame(wtbx_gdf, geometry='geometry', crs=source_gdf.crs)
+
+    return wtbx_gdf
+
+
+def is_linear_reach(G: nx.DiGraph, upstream: int, downstream: int):
+    path = nx.shortest_path(G, upstream, downstream)
+
+    for node in path[1:]:
+        if G.in_degree(node) != 1:
+            return False
+
+    return True
+
 def _conflate_streams(
-    source_streams: os.PathLike,
+    source_gdf: gpd.GeoDataFrame,
     streams_vector: os.PathLike,
     buffer_distance: float,
-    unbuffer_distance: float,
     dem_proj: str,
+    dem_bbox: tuple[float, float, float, float],
     source_id_col: str = "LINKNO",
     source_ds_col: str = "DSLINKNO",
     wtbx_id_col: str = "FID",
     wtbx_ds_col: str = "DS_LINK_ID",
+    strm_order_col: str = "strmOrder",
 ) -> gpd.GeoDataFrame:
     """
     Read files, build graphs, match the stream networks, and return the mapping state.
@@ -840,13 +1010,14 @@ def _conflate_streams(
     wtbx_gdf = wtbx_vector.to_geopandas().set_crs(dem_proj)
     bounds = wtbx_vector.epsg_4326_bbox
 
-    source_gdf = Vector(source_streams).to_geopandas(bounds)
+    # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
+    source_gdf = source_gdf[source_gdf.intersects(box(*bounds))].copy()
     source_gdf = source_gdf.to_crs(dem_proj)
-    min_strm_order = source_gdf['strmOrder'].min()
+    min_strm_order = source_gdf[strm_order_col].min()
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
-        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=4)
+        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=2)
         source_gdf['buffered'] = source_gdf.simplify(tolerance=1e-5).buffer(buffer_distance, resolution=2)
 
     GA = build_graph(source_gdf, id_col=source_id_col, ds_col=source_ds_col)
@@ -942,6 +1113,9 @@ def _conflate_streams(
                 best_source = source_headwater2
 
         if best_source is not None and best_source != source_headwater:
+            if not nx.has_path(GA, best_source, source_headwater) and nx.has_path(GA, source_headwater, best_source) and is_linear_reach(GA, source_headwater, best_source):
+                # We matched better with a downstream segment, but let us actually keep the upstream one instead (in a linear reach, i.e., no upstream tributaries)
+                continue
             del best_source_scores[source_headwater]
             best_source_scores[best_source] = (wtbx_headwater, best_source)
 
@@ -1014,10 +1188,17 @@ def _conflate_streams(
             headwater_linkno = headwater_fid_to_linkno[headwater_fid]
             # Find the outlet for this headwater
             outlet_fid = None
-            for fid in nx.descendants(GB, headwater_fid):
-                if GB.out_degree(fid) == 0:
-                    outlet_fid = fid
-                    break
+            descendants = list(nx.descendants(GB, headwater_fid))
+            if len(descendants) == 0:
+                # This headwater is an outlet, so we can just use it as the outlet
+                headwater_fids_accounted_for.add(headwater_fid)
+                best_outlet_linkno_to_fid[headwater_linkno] = headwater_fid
+                continue
+            else:
+                for fid in nx.descendants(GB, headwater_fid):
+                    if GB.out_degree(fid) == 0:
+                        outlet_fid = fid
+                        break
 
             if outlet_fid is None:
                 # Remove these headwaters from the best_source_scores, since they don't have a corresponding outlet
@@ -1079,9 +1260,6 @@ def _conflate_streams(
                 if nx.has_path(GB, fid_source_2, confluence_fid):
                     break
                 confluence_fid = next(GB.successors(confluence_fid))
-
-            if confluence_fid in final_matches:
-                continue
 
             confluence_linkno = headwater_fid_to_linkno[fid_source_1]
             do_these_headwaters_connect = True
@@ -1189,20 +1367,21 @@ def _conflate_streams(
     wtbx_gdf[source_id_col] = wtbx_gdf['FID'].map(lambda x: final_matches.get(x, np.nan))
     wtbx_gdf = wtbx_gdf[wtbx_gdf[source_id_col].notna()].copy()
 
-
-    bounds = source_gdf.total_bounds
-    buffered_bounds = (
-        bounds[0] + unbuffer_distance,
-        bounds[1] + unbuffer_distance,
-        bounds[2] - unbuffer_distance,
-        bounds[3] - unbuffer_distance,
+    min_bounds = (
+        dem_bbox[0] + buffer_distance,
+        dem_bbox[1] + buffer_distance,
+        dem_bbox[2] - buffer_distance,
+        dem_bbox[3] - buffer_distance
     )
-    wtbx_gdf = wtbx_gdf[wtbx_gdf.geometry.within(box(*buffered_bounds))].copy()
+    geom_intersects_bounds = wtbx_gdf.geometry.intersects(box(*min_bounds).boundary)
+    if not geom_intersects_bounds.all():
+        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(box(*min_bounds).boundary)].copy() # Remove streams that touch near the border of the AOI, since they are likely to be the most incorrect
     wtbx_gdf['topological_order'] = wtbx_gdf['FID'].map(lambda x: GB.nodes[x]['topological_order'])
 
     wtbx_gdf = wtbx_gdf.dissolve(source_id_col, as_index=False, sort=False, aggfunc={
         'FID': partial(select_most_downstream_fid, GB=GB),
         'topological_order': 'min',
+        'STRAHLER': 'max',
     })
     wtbx_gdf['geometry'] = wtbx_gdf['geometry'].apply(lambda geom: line_merge(geom))
     wtbx_gdf[source_id_col] = wtbx_gdf[source_id_col].astype(int)
@@ -1240,7 +1419,9 @@ def _rasterize_streams(stream_raster: str, dem: str, streams_vector: str, attrib
     stream_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     stream_ds.SetProjection(dem_ds.GetProjection())
     options = gdal.RasterizeOptions(attribute=attribute)
-    gdal.Rasterize(stream_ds, streams_vector, options=options)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        gdal.Rasterize(stream_ds, streams_vector, options=options)
 
 def _create_stream_info_table(
         streams_array: np.ndarray, 

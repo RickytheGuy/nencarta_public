@@ -273,6 +273,7 @@ class NencartaConfig:
         self.profile: bool = self.get("profile", True)
         self.parallel: bool = self.get("parallel", False)
         self.exclude: list[int] = self.get("exclude", [])
+        self.reanalysis_file: str = self.get("reanalysis_file")
         self.fldpln_dh: float = self.get("fldpln_dh", 0.5)
         self.fldpln_min_depth: float = self.get("fldpln_min_depth", 0.1)
         self.fldpln_max_depth: float = self.get("fldpln_max_depth", 25.0)

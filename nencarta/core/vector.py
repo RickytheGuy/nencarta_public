@@ -126,7 +126,7 @@ class Vector(GISDataSource, LMDBCache):
                 return gpd.read_parquet(self.filepath, bbox=bbox_epsg_4326, columns=columns)
             except ValueError as e:
                 if "Specifying 'bbox' not supported for this Parquet file" in str(e):
-                    warnings.warn(f"Could not read {self.filepath} with bbox. Consider adding covering bbox to parquet file for faster reading.", stacklevel=2)
+                    # warnings.warn(f"Could not read {self.filepath} with bbox. Consider adding covering bbox to parquet file for faster reading.", stacklevel=2)
                     gdf = gpd.read_parquet(self.filepath, columns=columns)
                     minx, miny, maxx, maxy = bbox_epsg_4326
                     gdf = gdf.cx[minx:maxx, miny:maxy]

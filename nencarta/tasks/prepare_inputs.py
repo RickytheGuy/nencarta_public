@@ -35,7 +35,7 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     make_reanalysis_file(workspace)
     make_flood_flow_file_from_base_max_file(workspace, ['COMID', 'rp2'])
 
-    if not workspace.configs.mapper.is_curve2flood_fldpln_mapper():
+    if not workspace.configs.mapper.is_curve2flood_fldpln_mapper() or not workspace.configs.disable_bathymetry:
         make_stream_raster(workspace)
 
     if workspace.configs.clean_dem or (not workspace.configs.disable_bathymetry and not workspace.configs.mapper.is_curve2flood_fldpln_mapper()):

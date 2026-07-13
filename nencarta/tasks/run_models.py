@@ -34,12 +34,14 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
     return model_config
 
 def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
-    if not model_config.vdt_exists or workspace.configs.disable_bathymetry or (model_config.burned_dem_exists and not workspace.configs.process_stream_network):
+    if not model_config.vdt_exists or\
+          workspace.configs.disable_bathymetry or \
+            (model_config.burned_dem_exists and not workspace.configs.process_stream_network) or\
+        workspace.configs.mapper.is_curve2flood_fldpln_mapper():
         return model_config
     
-    if not workspace.configs.disable_bathymetry:
-        LOG.info("Running flood mapper to generate bathymetry...")
-        _run_mapper(model_config.arc_config, model_config)
+    LOG.info("Running flood mapper to generate bathymetry...")
+    _run_mapper(model_config.arc_config, model_config)
 
     return model_config
 
@@ -78,9 +80,10 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         return model_config
 
     from curve2flood import build_fldpln_library
+    # print(f"Running Curve2Flood to build FLDPLN library with {workspace.fldpln_bathymetry}...")
 
     build_fldpln_library(
-        dem = workspace.assigned_dem,
+        dem = workspace.fldpln_bathymetry,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,
@@ -91,7 +94,7 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         iterative_spill = workspace.configs.fldpln_keep_spilling,
         vdt_file = workspace.VDT_File_Bathy,
         parallel = workspace.configs.fldpln_parallel,
-        pbar = True,
+        pbar = not workspace.configs.quiet,
     )
 
     return model_config
