@@ -52,10 +52,24 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
+    dem_raster = Raster(workspace.assigned_dem)
+    if workspace.configs.lakes:
+        lakes_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte)
+        lakes_ds.SetGeoTransform(dem_raster.geotransform)
+        lakes_ds.SetProjection(dem_raster.projection)
+        ds: gdal.Dataset = ogr.Open(workspace.configs.lakes)
+        lakes_layer: ogr.Layer = ds.GetLayer()
+        gdal.RasterizeLayer(lakes_ds, [1], lakes_layer)
+        lakes_ds.FlushCache()
+        lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
+    else:
+        lakes = None
+
     source_gdf = Vector(workspace.DEM_StrmShp).to_geopandas()
     channel_mask = smooth_and_burn_dem(
         workspace, 
         source_gdf, 
+        lakes,
         workspace.configs.streamflow_source.upstream_id, 
         workspace.configs.streamflow_source.downstream_id
     )
@@ -72,7 +86,6 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
 
     # # If DEM units are not in km2, convert the threshold to the DEM units. This is important for the stream extraction step, which uses the flow accumulation raster to determine where streams are.
     threshold = workspace.configs.new_strm_threshold_km2
-    dem_raster = Raster(workspace.assigned_dem)
     threshold_native = threshold * dem_raster.native_cell_area / dem_raster.cell_area_km2
     buffer_distance = (50/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 50 m buffer distance in DEM units
     snap_distance = (0.1/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 0.1 m snap distance in DEM units
@@ -89,13 +102,20 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
     if not workspace.new_StrmShp.exists():
         raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
-    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
-    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
 
     # Whitebox does not insert the projection into the shapefile, so we need to do that here.
     prj_file = workspace.new_StrmShp.with_suffix('.prj')
     with open(prj_file, 'w') as f:
         f.write(dem_raster.projection)
+
+    if lakes is not None:
+        lakes_gdf = Vector(workspace.configs.lakes).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
+        wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
+        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
+        wtbx_gdf.to_file(workspace.new_StrmShp)
+
+    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
 
     streams_gdf = _conflate_streams(
         source_gdf=source_gdf, 
@@ -162,13 +182,20 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
         if not workspace.new_StrmShp.exists():
             raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
-        wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
-        wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
-
+        
         # Whitebox does not insert the projection into the shapefile, so we need to do that here.
         prj_file = workspace.new_StrmShp.with_suffix('.prj')
         with open(prj_file, 'w') as f:
             f.write(dem_raster.projection)
+
+        if lakes is not None:
+            wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
+            wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
+            wtbx_gdf.to_file(workspace.new_StrmShp)
+        
+        wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+        wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
+
 
         streams_gdf = _conflate_streams_simple(
             source_gdf=streams_gdf, 
@@ -297,10 +324,15 @@ def smooth_downhill(
 
     return bathymetry
 
-def smooth_and_burn_dem(workspace: Workspace, source_gdf: gpd.GeoDataFrame, id_col: str = 'LINKNO', ds_col: str = 'DSLINKNO') -> np.ndarray:
+def smooth_and_burn_dem(
+        workspace: Workspace, 
+        source_gdf: gpd.GeoDataFrame,
+        lakes: np.ndarray | None = None, 
+        id_col: str = 'LINKNO', 
+        ds_col: str = 'DSLINKNO') -> np.ndarray:
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
     dem = dem_ds.ReadAsArray()
-    channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, id_col, ds_col)
+    channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col)
 
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
@@ -472,6 +504,7 @@ def burn_streams_into_dem(
         streamlines: np.ndarray,
         dem_ds: gdal.Dataset,
         streams_gdf: gpd.GeoDataFrame,
+        lakes: np.ndarray | None,
         id_col: str = 'LINKNO',
         ds_col: str = 'DSLINKNO',
         min_feature_size: int = 5
@@ -502,6 +535,14 @@ def burn_streams_into_dem(
     keep = counts > min_feature_size
     keep[0] = False
     channel_mask = keep[labels]
+
+    # Mask out lakes
+    if lakes is not None:
+        channel_mask &= ~lakes
+
+    # Mask out ocean (where elevation == 0)
+    ocean_mask = (dem == 0)
+    channel_mask &= ~ocean_mask
 
     labels, num_features = label(channel_mask, structure=structure)
     
@@ -575,6 +616,9 @@ def burn_linestring(
         channel_mask: np.ndarray, 
         labels: np.ndarray,
         local_min: np.ndarray):
+    if linkno not in G:
+        return  # Skip if the linkno is not in the graph
+    
     inverse_transform = gdal.InvGeoTransform(dem_ds.GetGeoTransform())
 
     # Find the first and last points of the linestring in pixel coordinates
@@ -1122,62 +1166,9 @@ def _conflate_streams(
     headwater_fids = set(f for f, _ in best_source_scores.values())
     headwater_fid_to_linkno = {f: l for f, l in best_source_scores.values()}
 
-    # Match outlets
-    best_outlet_linkno_to_fid = {}
-    scores = {}
-    for source_outlet in source_outlets:
-        source_ancestors = set(nx.ancestors(GA, source_outlet))
-        source_headwaters_that_connect = source_ancestors & source_headwaters
-        fids_that_should_connect = set(headwater_fid_to_linkno[f] for f in source_headwaters_that_connect if f in headwater_fid_to_linkno)
-        best_score = 0.5
-        best_wtbx = None
-        source_centroid = A_reach_sig[source_outlet].centroid
-        source_buffer = A_reach_sig[source_outlet].buffer_geom
-        source_downstream = downstream_centroid(GA, source_outlet, A_reach_sig)
-        source_upstream = upstream_centroid(GA, source_outlet, A_reach_sig)
-
-        for wtbx_outlet in sorted(wtbx_outlets, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:15]:
-            wtbx_upstream = upstream_centroid(GB, wtbx_outlet, B_reach_sig)
-            wtbx_downstream = downstream_centroid(GB, wtbx_outlet, B_reach_sig)
-            wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
-            intersection_area = source_buffer.intersection(wtbx_buffer).area
-            overlap_score = intersection_area / np.mean([source_buffer.area, wtbx_buffer.area])
-            score = 0.33 * point_similarity(source_downstream, wtbx_downstream, 3000)
-            score += 0.33 * point_similarity(source_upstream, wtbx_upstream, 3000)
-            score += 0.33 * strm_order_similarity(A_node_sig[source_outlet], B_node_sig[wtbx_outlet])
-            score += 0.5 * overlap_score
-
-
-            if score > best_score:
-                if fids_that_should_connect:
-                    wtbx_ancestors = set(nx.ancestors(GB, wtbx_outlet))
-                    wtbx_headwaters_that_connect = wtbx_ancestors & headwater_fids
-                    if not fids_that_should_connect.issubset(wtbx_headwaters_that_connect):
-                        continue
-                best_score = score
-                best_wtbx = wtbx_outlet
-
-        if best_wtbx is not None and best_score > scores.get(best_wtbx, 0):
-            best_outlet_linkno_to_fid[source_outlet] = best_wtbx
-            scores[best_wtbx] = best_score
-
-
-    # Make sure that for each outlet linkno-fid, that the headwaters connect to that outlet in both graphs
+    headwaters_with_no_outlet = headwater_fids
     headwater_fids_accounted_for = set()
-    for outlet_linkno, outlet_fid in best_outlet_linkno_to_fid.items():
-        outlet_fid_headwaters = set(f for f in nx.ancestors(GB, outlet_fid))
-        fid_headwaters_identified = outlet_fid_headwaters & headwater_fids
-        for headwater_fid in fid_headwaters_identified:
-            if headwater_fid in headwater_fids_accounted_for:
-                del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
-
-            headwater_linkno = headwater_fid_to_linkno[headwater_fid]
-            if not nx.has_path(GA, headwater_linkno, outlet_linkno):
-                del best_source_scores[headwater_linkno]
-            
-            headwater_fids_accounted_for.add(headwater_fid)
-
-    headwaters_with_no_outlet = headwater_fids - headwater_fids_accounted_for
+    best_outlet_linkno_to_fid = {}
     if headwaters_with_no_outlet:
         visited = set()
         # For each headwater, find the corresponding outlet
@@ -1232,8 +1223,6 @@ def _conflate_streams(
 
             headwater_fids_accounted_for.update(outlet_headwaters)
             best_outlet_linkno_to_fid[current_linkno_outlet] = outlet_fid
-
-
 
         headwater_fids = headwater_fids_accounted_for
 
@@ -1306,7 +1295,10 @@ def _conflate_streams(
             for fid in nx.shortest_path(GB, fid_source_2, confluence_fid):
                 allowable_linknos[fid].update(source2_path)
 
-            source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
+            try:
+                source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
+            except:
+                pass
             for fid in nx.shortest_path(GB, confluence_fid, outlet_fid):
                 allowable_linknos[fid].update(source3_path)
 

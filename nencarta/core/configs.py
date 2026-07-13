@@ -243,6 +243,7 @@ class NencartaConfig:
         self.StrmOrder_Upper: int = self.get("StrmOrder_Upper")
         self.q_baseflow_threshold: float = self.get("q_baseflow_threshold")
         self.lake_filter_json: str = self.get_path("lake_filter_json")
+        self.lakes: str = self.get_path("lakes")
         self.estimate_consequences: bool = self.get("estimate_consequences", False)
         self.overwrite_floodmaps: bool = self.get("overwrite_floodmaps", True)
         self.remove_old_forecast_files: bool = self.get("remove_old_forecast_files", False)

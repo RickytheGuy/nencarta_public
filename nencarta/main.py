@@ -1902,7 +1902,7 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
     parallel = workspaces[0].configs.parallel
     pipeline = build_pipeline(profile)
 
-    pipeline.visualize_graphviz(filename='test.png', hide_default_args=True, orient='TB')
+    # pipeline.visualize_graphviz(filename='test.png', hide_default_args=True, orient='TB')
 
     try:
         pipeline.map(

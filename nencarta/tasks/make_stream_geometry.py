@@ -71,6 +71,9 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
 
     if configs.lake_filter_json:
         gdf = _filter_streams_with_lake_json(configs.lake_filter_json, gdf, configs.stream_id_field)
+        # Make sure any linkno that has dslinkno not in linkno has dslinkno set to -1
+        river_ids = set(gdf[configs.stream_id_field])
+        gdf.loc[~gdf[configs.downstream_id_field].isin(river_ids), configs.downstream_id_field] = -1
 
     # if the StrmOrder_Field and StrmOrder_Lower or StrmOrder_Upper are not None use these to filter the StrmShp_gdf
     if configs.StrmOrder_Field and (configs.StrmOrder_Lower is not None or configs.StrmOrder_Upper is not None):
