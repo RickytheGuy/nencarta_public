@@ -71,7 +71,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         lakes = None
 
     source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas()
-    channel_mask = smooth_and_burn_dem(
+    channel_mask, fixed_dem = smooth_and_burn_dem(
         workspace, 
         source_gdf, 
         lakes,
@@ -103,6 +103,14 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
     if not workspace.whitebox_stream_raster.exists():
         raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
+            
+    # Remove in the newly created stream raster streams where the dem == 0
+    streams_ds: gdal.Dataset = gdal.Open(str(workspace.whitebox_stream_raster), gdal.GA_Update)
+    streams = streams_ds.ReadAsArray()
+    streams[fixed_dem == 0] = 0
+    streams_ds.WriteArray(streams)
+    streams_ds = None
+
     wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
     wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
     if not workspace.new_StrmShp.exists():
@@ -340,7 +348,7 @@ def smooth_and_burn_dem(
         source_gdf: gpd.GeoDataFrame,
         lakes: np.ndarray | None = None, 
         id_col: str = 'LINKNO', 
-        ds_col: str = 'DSLINKNO') -> np.ndarray:
+        ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
     dem = dem_ds.ReadAsArray()
     nodata_value = dem_ds.GetRasterBand(1).GetNoDataValue()
@@ -357,7 +365,7 @@ def smooth_and_burn_dem(
     output_ds.SetProjection(dem_ds.GetProjection())
     output_ds = None
 
-    return channel_mask
+    return channel_mask, dem
 
 def build_mask_graph(dem: np.ndarray, mask: np.ndarray) -> nx.Graph:
     G = nx.Graph()
