@@ -362,6 +362,10 @@ def smooth_and_burn_dem(
         nodata_value = -9999
     nan_mask = np.isnan(dem)
     dem[nan_mask] = nodata_value
+
+    ocean_mask = (dem == 0)
+    dem[ocean_mask] = nodata_value
+
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col)
 
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
@@ -369,6 +373,7 @@ def smooth_and_burn_dem(
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     output_ds.SetProjection(dem_ds.GetProjection())
+    output_ds.GetRasterBand(1).SetNoDataValue(nodata_value)
     output_ds = None
 
     return channel_mask, dem
