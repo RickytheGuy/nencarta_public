@@ -158,6 +158,9 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         config = define_arc_configs_for_fldpln_bathymetry(workspace)
         Arc(str(config), quiet=workspace.configs.quiet).run()
         if workspace.ARC_BathyFile.exists():
+            for file in [workspace.flowdir, workspace.flowacc, workspace.whitebox_stream_raster, workspace.new_StrmShp]:
+                file.unlink()
+
             bathy_raster = Raster(workspace.ARC_BathyFile)
             bathy = bathy_raster.read_array()
 
@@ -1041,6 +1044,7 @@ def _conflate_streams_simple(
             source_gdf.at[source_row.Index, 'corresponding_wtbx_id'] = best_match.Index
 
     # Transfer all the attributes from the source to the wtbx gdf
+    source_gdf["corresponding_wtbx_id"] = source_gdf["corresponding_wtbx_id"].astype('Int64')
     wtbx_gdf = wtbx_gdf[['FID']].merge(
         source_gdf.drop(columns=['buffered', 'FID']), 
         left_index=True, 
