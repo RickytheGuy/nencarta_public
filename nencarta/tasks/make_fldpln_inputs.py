@@ -201,7 +201,13 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
             wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
             wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
             if not workspace.new_StrmShp.exists():
-                raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
+                if workspace.configs.raise_errors_if_nothing_in_domain:
+                    raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
+                else:
+                    if workspace.new_StrmShp_matched.exists():
+                        workspace.new_StrmShp_matched.unlink()
+                    workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+                    return
             
             # Whitebox does not insert the projection into the shapefile, so we need to do that here.
             prj_file = workspace.new_StrmShp.with_suffix('.prj')
