@@ -208,7 +208,6 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
         wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
 
-
         streams_gdf = _conflate_streams_simple(
             source_gdf=streams_gdf, 
             streams_vector=workspace.new_StrmShp, 
@@ -1117,8 +1116,6 @@ def _conflate_streams(
     B_node_sig = compute_node_signatures(GB)
 
     # Get outlets of source graph
-    source_outlets = [n for n, sig in A_node_sig.items() if sig.kind.is_outlet()]
-    wtbx_outlets = [n for n, sig in B_node_sig.items() if sig.kind.is_outlet()]
     source_headwaters = {n for n, sig in A_node_sig.items() if sig.kind.is_source()}
     wtbx_headwaters = {n for n, sig in B_node_sig.items() if sig.kind.is_source()}
     wtbx_potential_headwaters = {
@@ -1293,10 +1290,12 @@ def _conflate_streams(
                         for fid in nx.shortest_path(GB, confluence_fid, fid):
                             final_matches[fid] = confluence_linkno
                             to_add.add(fid)
-                    else:
+                    elif nx.has_path(GB, fid, confluence_fid):
                         for fid in nx.shortest_path(GB, fid, confluence_fid):
                             final_matches[fid] = confluence_linkno
                             to_add.add(fid)
+                    else:
+                        continue
 
                 linkno_to_fid[confluence_linkno].update(to_add)
 
