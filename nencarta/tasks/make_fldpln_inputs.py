@@ -1310,7 +1310,10 @@ def _conflate_streams(
             for fid in nx.shortest_path(GB, fid_source_2, confluence_fid):
                 allowable_linknos[fid].update(source2_path)
 
-            source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
+            try:
+                source3_path = set(nx.shortest_path(GA, confluence_linkno, outlet_linkno))
+            except nx.NetworkXNoPath:
+                source3_path = set() # Occurs if outlet_fid == confluence_fid
             for fid in nx.shortest_path(GB, confluence_fid, outlet_fid):
                 allowable_linknos[fid].update(source3_path)
 
