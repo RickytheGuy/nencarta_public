@@ -343,6 +343,11 @@ def smooth_and_burn_dem(
         ds_col: str = 'DSLINKNO') -> np.ndarray:
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
     dem = dem_ds.ReadAsArray()
+    nodata_value = dem_ds.GetRasterBand(1).GetNoDataValue()
+    if nodata_value is None:
+        nodata_value = -9999
+    nan_mask = np.isnan(dem)
+    dem[nan_mask] = nodata_value
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col)
 
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
