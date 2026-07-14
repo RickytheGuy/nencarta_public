@@ -1088,6 +1088,9 @@ def _conflate_streams(
     """
     wtbx_vector = Vector(streams_vector)
     wtbx_gdf = wtbx_vector.to_geopandas().set_crs(dem_proj)
+    if wtbx_gdf.empty:
+        return wtbx_gdf
+    
     bounds = wtbx_vector.epsg_4326_bbox
 
     # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
