@@ -50,7 +50,7 @@ def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Mo
 
 def run_mapper_floodmaps(model_config: ModelConfig, workspace: Workspace) -> FloodMapperBulkOutput:
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
-        return None
+        return FloodMapperBulkOutput([])
     
     LOG.info("Running flood mapper to generate flood maps...")
     for config in model_config.mapper_configs:

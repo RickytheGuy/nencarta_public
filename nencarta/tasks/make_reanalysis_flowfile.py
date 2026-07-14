@@ -55,6 +55,12 @@ def _get_geoglows_rp(river_ids: list[int]) -> pd.DataFrame:
     # Rename columns to indicate return periods
     rp_df = rp_df.rename(columns={col: f'rp{int(col)}' for col in rp_df.columns})
 
+    if rp_df.empty:
+        # Create a dataframe with 0s for all return periods if no data is available
+        rp_df = pd.DataFrame(0, index=river_ids, columns=[f'rp{int(col)}' for col in [2, 5, 10, 25, 50, 100]])
+        rp_df.index.name = 'river_id'
+    
+
     p_exceedances = np.arange(0, 106, 5, dtype=float)
     p_exceedances[-1] = 1
     try:
