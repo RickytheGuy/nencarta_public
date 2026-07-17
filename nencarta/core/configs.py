@@ -273,6 +273,7 @@ class NencartaConfig:
         self.forecasthour: str = None
         self.profile: bool = self.get("profile", True)
         self.parallel: bool = self.get("parallel", False)
+        self.compression: str = self.get("compression", "LZW")
         self.exclude: list[int] = self.get("exclude", [])
         self.reanalysis_file: str = self.get("reanalysis_file")
         self.fldpln_dh: float = self.get("fldpln_dh", 0.5)

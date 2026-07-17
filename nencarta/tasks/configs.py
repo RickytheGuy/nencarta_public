@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import yaml
@@ -67,9 +68,16 @@ def _write_config(config_path: Path, params: dict):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, 'w') as f:
         if config_path.suffix.lower() in {'.yaml', '.yml'}:
+            stream = io.StringIO()
             # Convert all Paths in params to strings for YAML serialization
             params_serializable = {key: (str(value) if isinstance(value, (Path, Mapper)) else value) for key, value in params.items()}
-            yaml.dump(params_serializable, f, encoding='utf-8', sort_keys=False)
+            yaml.dump(params_serializable, stream, encoding='utf-8', sort_keys=False)
+            # if a line startwith "'#", then strip the quotation and make it a comment
+            content = stream.getvalue()
+            content = '\n'.join(line if not line.startswith("'#") else f"# {line[2:].split(':')[0][:-1]}" for line in content.split('\n'))
+            # Replace lines starting with : or ? with ''
+            content = '\n'.join(line if (not line.startswith(':') and not line.startswith('?')) else '' for line in content.split('\n'))
+            f.write(content)
         else:
             first_line = True
             for key, value in params.items():
@@ -146,8 +154,8 @@ def define_arc_configs_for_fldpln_bathymetry(workspace: Workspace) -> Path:
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
 
     configs = workspace.configs
-    # if workspace.ARC_BathyFile.exists() and not configs.process_stream_network:
-    #     return workspace.fldpln_bathymetry_input_file
+    if workspace.ARC_BathyFile.exists() and not configs.process_stream_network:
+        return workspace.fldpln_bathymetry_input_file
 
     params = _arc_inputs(
         dem=workspace.fixed_dem,
@@ -286,6 +294,7 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.floodmap_args.get("FS_ADJUST_FLOW_BY_FRACTION", 1.0)
     params["TW_MultFact"] = configs.floodmap_args.get("TW_MultFact", 1.5)
     params["TopWidthPlausibleLimit"] = configs.floodmap_args.get("TopWidthPlausibleLimit", 6000)
+    params["percentile"] = configs.floodmap_args.get("percentile", 0.5)
 
     if configs.flood_waterlc_and_strm_cells or configs.make_velocity_maps or True: # TODO
         params["Flood_WaterLC_and_STRM_Cells"] = configs.flood_waterlc_and_strm_cells

@@ -14,7 +14,7 @@ def _make_flood_flow_file_from_base_max_file(reanalysis_flow_file: Path,
     df.to_parquet(out_file, index=False, compression='brotli') if out_file.suffix.endswith('.parquet') else df.to_csv(out_file, index=False)
 
 
-def make_flood_flow_file_from_base_max_file(workspace: Workspace, columns: list[str]) -> Path:
+def make_flood_flow_file_from_base_max_file(workspace: Workspace) -> Path:
     if workspace.COMID_Q_File.exists() and not workspace.configs.process_stream_network:
         LOG.info(f"{workspace.COMID_Q_File} already exists and we aren't making it again...")
         return workspace.COMID_Q_File
@@ -25,6 +25,7 @@ def make_flood_flow_file_from_base_max_file(workspace: Workspace, columns: list[
     workspace.COMID_Q_File.parent.mkdir(parents=True, exist_ok=True)
 
     LOG.info("Creating flood flow file from reanalysis file...")
+    columns = ['COMID', workspace.configs.specified_bathyflow_field]
     _make_flood_flow_file_from_base_max_file(workspace.DEM_Reanalsyis_FlowFile, workspace.COMID_Q_File, columns)
 
     return workspace.COMID_Q_File

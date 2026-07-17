@@ -87,6 +87,9 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return model_config
+    
+    if workspace.fldpln_library.exists():
+        workspace.fldpln_library.unlink()
 
     from curve2flood import build_fldpln_library
     # print(f"Running Curve2Flood to build FLDPLN library with {workspace.fldpln_bathymetry}...")

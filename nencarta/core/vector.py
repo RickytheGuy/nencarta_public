@@ -83,9 +83,9 @@ class Vector(GISDataSource, LMDBCache):
                 geo = metadata.get(b"geo")
                 if geo:
                     crs = json.loads(geo.decode("utf-8"))["columns"]["geometry"].get("crs")
-                    # if crs and "id" in crs:
-                    #     projection = ":".join(map(str, crs["id"].values()))
-                    if crs:
+                    if crs and "id" in crs:
+                        projection = ":".join(map(str, crs["id"].values()))
+                    if crs and not projection:
                         projection = CRS.from_user_input(crs)
             else:
                 warnings.warn(f"Could not determine CRS for {self.filepath}. Assuming EPSG:4326.", stacklevel=2)

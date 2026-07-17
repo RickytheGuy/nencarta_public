@@ -49,7 +49,7 @@ class Workspace:
         # isolating the NWM or GEOGLOWS text in the streamflow_source variable
         strm_source = 'NWM' if streamflow_source.is_nwm() else 'GEOGLOWS'
         # these will only vary based upon if they are NWM or GEOGLOWS
-        self.ARC_FileName_Bathy = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{'yaml' if configs.use_yaml else 'txt'}"
+        self.ARC_FileName_Bathy = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{self.config_end}"
         self.ARC_FileName_for_DEM_Cleaner = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_InitialFlood.txt"
         self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif" if configs.clean_dem else Path(self.assigned_dem)
         self.VDT_Test_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_FS.csv"
@@ -95,6 +95,10 @@ class Workspace:
         if configs.mapper == Mapper.CURVE2FLOOD_FLDPLNPY:
             self.setup_fldpln_files()
 
+    @property
+    def config_end(self) -> str:
+        return 'yaml' if self.configs.use_yaml else 'txt'
+
     def setup_dem(self, dem: Path | None):
         if dem:
             self.FileName = Path(dem).stem
@@ -129,7 +133,7 @@ class Workspace:
         self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
         self.fldpln_library = self.VDT_Folder / 'fldpln_library.parquet'
 
-        self.fldpln_bathymetry_input_file = self.ARC_Folder / f"{self.FileName}_fldpln_bathymetry_input.txt"
+        self.fldpln_bathymetry_input_file = self.ARC_Folder / f"{self.FileName}_fldpln_bathymetry_input.{self.config_end}"
         self.fldpln_bathymetry = self.bathy_file_folder / f"{self.FileName}_fldpln_bathymetry.tif"
 
     def __repr__(self):

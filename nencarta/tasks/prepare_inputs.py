@@ -22,7 +22,6 @@ from nencarta.workspace import Workspace
 from nencarta.core.model_config import ModelConfig
 from nencarta.core.enumerations import FloodMapMode
 
-
 def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     DEM = workspace.assigned_dem
     if not DEM.suffix.lower() in {'.tif', '.vrt', '.img', '.tiff', '.btiff', '.bil', '.dem'}:
@@ -33,7 +32,7 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     make_land_cover(workspace)
     make_stream_geometry(workspace)
     make_reanalysis_file(workspace)
-    make_flood_flow_file_from_base_max_file(workspace, ['COMID', 'rp2'])
+    make_flood_flow_file_from_base_max_file(workspace)
 
     if not workspace.configs.mapper.is_curve2flood_fldpln_mapper() or not workspace.configs.disable_bathymetry:
         make_stream_raster(workspace)

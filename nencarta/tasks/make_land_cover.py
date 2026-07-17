@@ -50,7 +50,7 @@ def _download_grid_with_retry(url, max_retries=10, wait_seconds=10):
 
 def make_land_cover(workspace: Workspace,
                     year: Literal[2020, 2021] = 2021):
-    if workspace.LAND_File.exists():
+    if workspace.LAND_File.exists() and not workspace.configs.process_stream_network:
         LOG.info(f"Land cover file already exists at {workspace.LAND_File}, skipping generation.")
         return workspace.LAND_File
     
@@ -78,7 +78,7 @@ def make_land_cover(workspace: Workspace,
 
     LOG.info(f"Creating {workspace.LAND_File}")
     if not landcover_files:
-        out_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(workspace.LAND_File, dem_raster.ncols, dem_raster.nrows, 1, gdal.GDT_Byte, {'COMPRESS': 'DEFLATE', 'PREDICTOR': '2'})
+        out_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(workspace.LAND_File, dem_raster.ncols, dem_raster.nrows, 1, gdal.GDT_Byte, {'COMPRESS': workspace.configs.compression, 'PREDICTOR': '2'})
         out_ds.SetGeoTransform(dem_raster.geotransform)
         out_ds.SetProjection(dem_raster.projection)
         LOG.warning("No land cover files found for the specified DEM extent. Generating a fake land cover file filled with 10 (trees).")
@@ -104,7 +104,7 @@ def make_land_cover(workspace: Workspace,
                             xRes=xres,
                             yRes=yres,
                             resampleAlg='mode',
-                            creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=2'])
+                            creationOptions=[f'COMPRESS={workspace.configs.compression}', 'PREDICTOR=2'])
         gdal.Warp(workspace.LAND_File, landcover_files, options=options)
 
     return workspace.LAND_File

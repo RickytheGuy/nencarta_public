@@ -42,6 +42,7 @@ from . import streamflow_processing as HistFlows
 from . import Download_Process_ForecastData as ForecastFlows
 from .workspace import Workspace
 from .pipeline import build_pipeline
+from line_profiler import profile
 
 CURVE2FLOOD_MAPPERS = [
     "Curve2Flood-Kernel Weighted",
@@ -1896,7 +1897,7 @@ def process_watershed(input_dict: dict, timer: Timer = None):
     process_dem(watershed_dict, timer)
 
     LOG.info(f"Finished processing {watershed_name}")
-
+@profile
 def run_pipeline(workspaces: list[Workspace], executor=None):
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
@@ -1909,9 +1910,9 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
             {'workspace': workspaces},
             parallel=parallel,
             scheduling_strategy='eager',
-            show_progress=True,
+            show_progress="rich",
             executor=executor,
-            # error_handling='continue'
+            error_handling='continue'
             )
         
         if profile:
