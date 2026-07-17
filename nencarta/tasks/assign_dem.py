@@ -170,7 +170,7 @@ def assign_and_validate_dem(workspace: Workspace) -> Path:
     else:
         out_proj = raster.projection
 
-     builder, options = _build_options(
+    builder, options = _build_options(
         target_bbox,
         vrt=(workspace.assigned_dem.suffix == '.vrt'),
         src_proj=raster.projection,
