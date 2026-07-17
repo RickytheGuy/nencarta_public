@@ -1268,26 +1268,6 @@ def _conflate_streams(
                 best_score = score
                 best_wtbx = wtbx_outlet
 
-        # One more check: sometimes the dslinkno of the headwater might match the wbtx better. if so, use that
-        dslinkno = next(iter(GA.successors(source_headwater)), None)
-        if best_wtbx is not None and dslinkno is not None:
-            source_buffer = A_reach_sig[dslinkno].buffer_geom
-            wtbx_buffer = B_reach_sig[best_wtbx].buffer_geom
-            intersection_area = source_buffer.intersection(wtbx_buffer).area
-            score = intersection_area
-            if score > best_score:
-                source_headwater = dslinkno
-                best_score = score
-        elif best_wtbx is None and dslinkno is not None:
-            source_buffer = A_reach_sig[dslinkno].buffer_geom
-            for wtbx_outlet in sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
-                wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
-                intersection_area = source_buffer.intersection(wtbx_buffer).area
-                score = intersection_area
-                if score > best_score:
-                    best_score = score
-                    best_wtbx = wtbx_outlet
-
         if best_wtbx is not None and best_score > scores.get(best_wtbx, 0):
             best_source_scores[source_headwater] = (best_wtbx, source_headwater)
             scores[best_wtbx] = best_score
@@ -1325,12 +1305,33 @@ def _conflate_streams(
         wtbx_centroid = B_reach_sig[wtbx_headwater].centroid
         wtbx_buffer = B_reach_sig[wtbx_headwater].buffer_geom
 
+        downstream_wtbx = next(iter(GB.successors(wtbx_headwater)), None)
+        siblings = set(GB.predecessors(downstream_wtbx)) - {wtbx_headwater} if downstream_wtbx is not None else set()
+
         for source_headwater in sorted(non_source_headwaters, key=lambda x: A_reach_sig[x].geom.distance(wtbx_centroid))[:5]:
             source_buffer = A_reach_sig[source_headwater].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
             score = intersection_area
 
             if score > best_score:
+                # We have to be careful here. If the downstream segment or the sibling (other upstream of downstream) matches better, don't match
+                if downstream_wtbx is not None:
+                    downstream_buffer = B_reach_sig[downstream_wtbx].buffer_geom
+                    downstream_intersection_area = source_buffer.intersection(downstream_buffer).area
+                    if downstream_intersection_area > score:
+                        continue
+
+                    should_skip = False
+                    for sibling in siblings:
+                        sibling_buffer = B_reach_sig[sibling].buffer_geom
+                        sibling_intersection_area = source_buffer.intersection(sibling_buffer).area
+                        if sibling_intersection_area > score:
+                            should_skip = True
+                            break
+                        
+                    if should_skip:
+                        continue
+
                 best_score = score
                 best_source = source_headwater
 
@@ -1347,8 +1348,6 @@ def _conflate_streams(
         visited = set()
         # For each headwater, find the corresponding outlet
         for headwater_fid in headwaters_with_no_outlet:
-
-
             if headwater_fid in visited:
                 continue
 
@@ -1415,8 +1414,8 @@ def _conflate_streams(
                     visited.add(headwater_fid)
                 continue
 
-            # A check: if we had only 1 headwater, than we will have matched with the immediate downstream. But, we should instead match with the stream segment with the most overlap
-            if len(outlet_headwaters) == 1:
+            # A check: if we had only 1 headwater or there's still downstream segments, than we will have matched with the immediate downstream. But, we should instead match with the stream segment with the most overlap
+            if len(outlet_headwaters) == 1 or GA.out_degree(current_linkno_outlet) > 0:
                 headwater_fid = next(iter(outlet_headwaters))
                 best_score = 0
                 best_linkno = None
@@ -1474,6 +1473,9 @@ def _conflate_streams(
                 except StopIteration:
                     do_these_headwaters_connect = False
                     break
+
+            if confluence_linkno == 710958501:
+                pass
             if not do_these_headwaters_connect:
                 continue
 

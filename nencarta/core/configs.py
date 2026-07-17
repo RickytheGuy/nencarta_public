@@ -282,6 +282,7 @@ class NencartaConfig:
         self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling", False)
         self.fldpln_parallel: bool = self.get("fldpln_parallel", False)
         self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise", 0.01)
+        self.project_to_utm: bool = self.get("project_to_utm", False)
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

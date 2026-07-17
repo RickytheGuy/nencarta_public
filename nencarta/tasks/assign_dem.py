@@ -1,11 +1,16 @@
 from pathlib import Path
 
-from osgeo import gdal
 from pyproj import CRS
+from osgeo import gdal, osr
+from pyproj.aoi import AreaOfInterest
+from pyproj.database import query_utm_crs_info
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
+
+_WGS84 = osr.SpatialReference()
+_WGS84.ImportFromEPSG(4326)
 
 def _apply_buffer(bbox, distance):
     minx, miny, maxx, maxy = bbox
@@ -67,9 +72,7 @@ def _validate_dem_coordinate_system(dem: Path):
         
     return True
 
-def assign_and_validate_dem(
-        workspace: Workspace,
-        project_to_utm: bool = False) -> Path:
+def assign_and_validate_dem(workspace: Workspace) -> Path:
     configs = workspace.configs
     if workspace.original_dem == workspace.assigned_dem and workspace.assigned_dem.exists() and not configs.process_stream_network:
         LOG.info(f"{workspace.assigned_dem} exists")
@@ -135,27 +138,39 @@ def assign_and_validate_dem(
         raster = Raster(surrounding_dems[0])
         xres, yres = raster.resolution
 
-    if project_to_utm:
+    if configs.project_to_utm:
         if raster.is_in_degrees:
             xres = None
             yres = None
 
-        if not raster.is_in_meters and raster.is_in_degrees:
-            gt = raster.geotransform
-            height, width = raster.shape
-            lon_center = gt[0] + gt[1] * width / 2
-            lat_center = gt[3] + gt[5] * height / 2
+        # Center of raster
+        gt = raster.geotransform
+        height, width = raster.shape
+        x = gt[0] + (width / 2) * gt[1] + (height / 2) * gt[2]
+        y = gt[3] + (width / 2) * gt[4] + (height / 2) * gt[5]
 
-            zone = int((lon_center + 180) / 6) + 1
-
-            out_proj = 32600 + zone if lat_center >= 0 else 32700 + zone
-            out_proj = f"EPSG:{out_proj}"
+        srs = osr.SpatialReference(raster.projection)
+        if not srs.IsSame(_WGS84):
+            transform = osr.CoordinateTransformation(srs, _WGS84)
+            lon, lat, _ = transform.TransformPoint(x, y)
         else:
-            out_proj = raster.projection
+            lon, lat = x, y
+
+        crs = query_utm_crs_info(
+            datum_name="WGS 84",
+            area_of_interest=AreaOfInterest(
+                west_lon_degree=lon,
+                south_lat_degree=lat,
+                east_lon_degree=lon,
+                north_lat_degree=lat,
+            ),
+        )[0].code
+        crs = CRS.from_epsg(crs)
+        out_proj = crs.to_wkt()
     else:
         out_proj = raster.projection
 
-    builder, options = _build_options(
+     builder, options = _build_options(
         target_bbox,
         vrt=(workspace.assigned_dem.suffix == '.vrt'),
         src_proj=raster.projection,
