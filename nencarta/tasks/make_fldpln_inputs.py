@@ -27,6 +27,7 @@ from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
 from nencarta.tasks.configs import define_arc_configs_for_fldpln_bathymetry
+from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from arc import Arc
 from curve2flood import remove_cells_not_connected
 from line_profiler import profile
@@ -150,6 +151,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         dem_bbox=dem_raster.bbox,
         source_id_col=workspace.configs.streamflow_source.upstream_id,
         source_ds_col=workspace.configs.streamflow_source.downstream_id,
+        strm_order_col=workspace.configs.StrmOrder_Field,
     )
     if streams_gdf.empty:
         if workspace.configs.raise_errors_if_nothing_in_domain:
@@ -159,101 +161,102 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
             return None
         
     Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
-
     _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
 
     final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
     channel_mask |= (final_streams > 0)
     channel_mask = remove_cells_not_connected(channel_mask, final_streams)
 
-    if not workspace.configs.disable_bathymetry:
-        config = define_arc_configs_for_fldpln_bathymetry(workspace)
-        if workspace.ARC_BathyFile.exists():
-            workspace.ARC_BathyFile.unlink()
-        Arc(str(config), quiet=workspace.configs.quiet).run()
-        if workspace.ARC_BathyFile.exists():
-            for file in [workspace.flowdir, workspace.flowacc, workspace.whitebox_stream_raster, workspace.new_StrmShp]:
+    config = define_arc_configs_for_fldpln_bathymetry(workspace)
+    if workspace.ARC_BathyFile.exists():
+        workspace.ARC_BathyFile.unlink()
+    Arc(str(config), quiet=workspace.configs.quiet).run()
+    if workspace.ARC_BathyFile.exists():
+        for file in [workspace.flowdir, workspace.flowacc, workspace.whitebox_stream_raster, workspace.new_StrmShp]:
+            file.unlink()
+
+        bathy_raster = Raster(workspace.ARC_BathyFile)
+        bathy = bathy_raster.read_array()
+
+        fixed_dem = Raster(workspace.fixed_dem).read_array()
+        filled = interpolate_bathymetry(bathy, channel_mask, fixed_dem)
+
+        smoothed = smooth_downhill(
+            filled,
+            channel_mask,
+            alpha=4.0,
+            iterations=8,
+        )
+        smoothed[~channel_mask] = fixed_dem[~channel_mask]
+
+        Raster.write_array_using_reference(
+            smoothed,
+            bathy_raster,
+            workspace.fldpln_bathymetry
+        )
+
+        wbt.fill_depressions(str(workspace.fldpln_bathymetry), str(workspace.filled_dem))
+        if not workspace.filled_dem.exists():
+            raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
+        wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
+        if not workspace.flowdir.exists():
+            raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
+        wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
+        if not workspace.flowacc.exists():
+            raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
+
+        # Remove the vector rasters, since whitebox will not make some of them if they exist
+        for file in workspace.new_StrmShp.parent.glob("*"):
+            if file.stem.startswith(workspace.new_StrmShp.stem):
                 file.unlink()
 
-            bathy_raster = Raster(workspace.ARC_BathyFile)
-            bathy = bathy_raster.read_array()
+        wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
+        if not workspace.whitebox_stream_raster.exists():
+            raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
+        wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
+        wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
+        if not workspace.new_StrmShp.exists():
+            if workspace.configs.raise_errors_if_nothing_in_domain:
+                raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
+            else:
+                if workspace.new_StrmShp_matched.exists():
+                    workspace.new_StrmShp_matched.unlink()
+                workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+                return
 
-            fixed_dem = Raster(workspace.fixed_dem).read_array()
-            filled = interpolate_bathymetry(bathy, channel_mask, fixed_dem)
+        
+        wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+        wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
+        
+        # Whitebox does not insert the projection into the shapefile, so we need to do that here.
+        prj_file = workspace.new_StrmShp.with_suffix('.prj')
+        with open(prj_file, 'w') as f:
+            f.write(dem_raster.projection)
+        
+        if lakes is not None:
+            wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
+            wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
+            existing_ids = set(wtbx_gdf.loc[wtbx_gdf['FID'] > 0, 'FID'])
+            wtbx_gdf['DS_LINK_ID'] = wtbx_gdf['DS_LINK_ID'].apply(lambda x: x if x in existing_ids else -1)
+            wtbx_gdf.to_file(workspace.new_StrmShp)
 
-            smoothed = smooth_downhill(
-                filled,
-                channel_mask,
-                alpha=4.0,
-                iterations=8,
-            )
-            smoothed[~channel_mask] = fixed_dem[~channel_mask]
+        streams_gdf = _conflate_streams_simple(
+            source_gdf=streams_gdf, 
+            streams_vector=workspace.new_StrmShp, 
+            lakes_gdf=lakes_gdf,
+            buffer_distance=buffer_distance,
+            strm_order_col=workspace.configs.StrmOrder_Field,
+            StrmOrder_Lower=workspace.configs.StrmOrder_Lower,
+            StrmOrder_Upper=workspace.configs.StrmOrder_Upper,
+        )
+        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
 
-            Raster.write_array_using_reference(
-                smoothed,
-                bathy_raster,
-                workspace.fldpln_bathymetry
-            )
+        _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
 
-            wbt.fill_depressions(str(workspace.fldpln_bathymetry), str(workspace.filled_dem))
-            if not workspace.filled_dem.exists():
-                raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
-            wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
-            if not workspace.flowdir.exists():
-                raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
-            wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
-            if not workspace.flowacc.exists():
-                raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
-
-            # Remove the vector rasters, since whitebox will not make some of them if they exist
-            for file in workspace.new_StrmShp.parent.glob("*"):
-                if file.stem.startswith(workspace.new_StrmShp.stem):
-                    file.unlink()
-
-            wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
-            if not workspace.whitebox_stream_raster.exists():
-                raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
-            wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
-            wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
-            if not workspace.new_StrmShp.exists():
-                if workspace.configs.raise_errors_if_nothing_in_domain:
-                    raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
-                else:
-                    if workspace.new_StrmShp_matched.exists():
-                        workspace.new_StrmShp_matched.unlink()
-                    workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-                    return
-            
-            # Whitebox does not insert the projection into the shapefile, so we need to do that here.
-            prj_file = workspace.new_StrmShp.with_suffix('.prj')
-            with open(prj_file, 'w') as f:
-                f.write(dem_raster.projection)
-
-            
-            wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
-            wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
-            
-            if lakes is not None:
-                wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
-                wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
-                existing_ids = set(wtbx_gdf.loc[wtbx_gdf['FID'] > 0, 'FID'])
-                wtbx_gdf['DS_LINK_ID'] = wtbx_gdf['DS_LINK_ID'].apply(lambda x: x if x in existing_ids else -1)
-                wtbx_gdf.to_file(workspace.new_StrmShp)
-
-            streams_gdf = _conflate_streams_simple(
-                source_gdf=streams_gdf, 
-                streams_vector=workspace.new_StrmShp, 
-                lakes_gdf=lakes_gdf,
-                buffer_distance=buffer_distance
-            )
-            Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
-
-            _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
-
-            final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
-            channel_mask |= (final_streams > 0)
-        else:
-            workspace.fldpln_bathymetry = workspace.fixed_dem
+        final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
+        channel_mask |= (final_streams > 0)
+    else:
+        workspace.fldpln_bathymetry = workspace.fixed_dem
 
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     make_channel_mask(channel_mask, str(workspace.fixed_dem), str(workspace.bathy_water_mask))
@@ -1046,7 +1049,10 @@ def _conflate_streams_simple(
         buffer_distance: float,
         lakes_gdf: gpd.GeoDataFrame | None = None,
         wtbx_id_col: str = 'FID',
-        wtbx_ds_col: str = 'DS_LINK_ID'
+        wtbx_ds_col: str = 'DS_LINK_ID',
+        strm_order_col: str = 'strmOrder',
+        StrmOrder_Lower: int | None = None,
+        StrmOrder_Upper: int | None = None
 ) -> gpd.GeoDataFrame:
     """
     We assume that source and wtbx streams are super closely aligned already.
@@ -1098,6 +1104,8 @@ def _conflate_streams_simple(
     ).drop(columns='corresponding_wtbx_id')
 
     wtbx_gdf = gpd.GeoDataFrame(wtbx_gdf, geometry='geometry', crs=source_gdf.crs)
+    if (StrmOrder_Lower is not None or StrmOrder_Upper is not None):
+        wtbx_gdf = _filter_streams_by_stream_order(wtbx_gdf, strm_order_col, StrmOrder_Lower, StrmOrder_Upper)
 
     return wtbx_gdf
 
@@ -1309,6 +1317,9 @@ def _conflate_streams(
         siblings = set(GB.predecessors(downstream_wtbx)) - {wtbx_headwater} if downstream_wtbx is not None else set()
 
         for source_headwater in sorted(non_source_headwaters, key=lambda x: A_reach_sig[x].geom.distance(wtbx_centroid))[:5]:
+            if A_reach_sig[source_headwater].local_order > min_strm_order:
+                # We are going to be more strict here
+                continue
             source_buffer = A_reach_sig[source_headwater].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
             score = intersection_area
@@ -1630,6 +1641,8 @@ def _conflate_streams(
     wtbx_gdf[source_ds_col] = wtbx_gdf['FID'].map(fid_to_dsfid)
     wtbx_gdf[source_ds_col] = wtbx_gdf[source_ds_col].map(lambda x: final_matches.get(x, -1) if x != -1 else -1)
     wtbx_gdf.loc[wtbx_gdf[source_id_col] == wtbx_gdf[source_ds_col], source_ds_col] = -1 # Remove self-loops (since we filtered out the borders)
+    source_id_to_strm_order = source_gdf.set_index(source_id_col)[strm_order_col].to_dict()
+    wtbx_gdf[strm_order_col] = wtbx_gdf[source_id_col].map(source_id_to_strm_order)
 
     # Move linkno to the front
     cols = wtbx_gdf.columns.tolist()
