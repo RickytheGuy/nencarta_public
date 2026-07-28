@@ -118,6 +118,12 @@ def make_return_period_flow_file(workspace: Workspace) -> list[Path]:
         LOG.error("Return period flow file generation is not currently supported for NWM streamflow source.")
         raise NotImplementedError("Return period flow file generation is not currently supported for NWM streamflow source.")
     
+    if not workspace.DEM_Reanalsyis_FlowFile.exists():
+        if configs.raise_errors_if_nothing_in_domain:
+            raise FileNotFoundError(f"Reanalysis flow file {workspace.DEM_Reanalsyis_FlowFile} does not exist. Cannot create return period flow files.")
+        else:
+            return []
+    
     files = []
     for rp in configs.return_periods:
         return_period_flow_file = workspace.FLOW_Folder / f'{workspace.FileName}_rp{rp}.csv'

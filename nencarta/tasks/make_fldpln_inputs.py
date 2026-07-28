@@ -1190,6 +1190,8 @@ def _conflate_streams(
     # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
     source_gdf = source_gdf[source_gdf.intersects(box(*bounds))].copy()
     source_gdf = source_gdf.to_crs(dem_proj)
+    if strm_order_col not in source_gdf.columns:
+        raise ValueError(f"Source GeoDataFrame must have a '{strm_order_col}' column.")
     min_strm_order = source_gdf[strm_order_col].min()
 
     confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())

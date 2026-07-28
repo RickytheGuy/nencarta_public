@@ -85,7 +85,7 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         (workspace.fldpln_library.exists() and not workspace.configs.process_stream_network):
         return model_config
     
-    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+    if (not workspace.DEM_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()) and not workspace.configs.raise_errors_if_nothing_in_domain:
         return model_config
     
     if workspace.fldpln_library.exists():

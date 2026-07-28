@@ -1912,7 +1912,7 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
             scheduling_strategy='eager',
             show_progress="rich",
             executor=executor,
-            error_handling='continue'
+            # error_handling='continue'
             )
         
         if profile:
