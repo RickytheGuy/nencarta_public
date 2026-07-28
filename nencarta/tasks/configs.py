@@ -176,6 +176,7 @@ def define_arc_configs_for_fldpln_bathymetry(workspace: Workspace) -> Path:
     params["#Bathymetry_Information"] = ""
     params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", 0.2)
     params["Bathy_Use_Banks"] = configs.bathy_use_banks
+    params["StrmShp_File"] = workspace.DEM_StrmShp
 
     if configs.flood_waterlc_and_strm_cells:
         params["Flood_WaterLC_and_STRM_Cells"] = True
@@ -225,6 +226,8 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         # TODO
     # params["XS_Out_File"] = workspace.VDT_Folder / f"{workspace.FileName}_XS.csv"
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
+    params["reach_id"] = configs.stream_id_field
+    params["downstream_reach_id"] = configs.downstream_id_field
 
     if not configs.disable_bathymetry:
         params["#Mapper Input Data"] = ""
