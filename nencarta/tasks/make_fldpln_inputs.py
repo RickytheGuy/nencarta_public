@@ -30,11 +30,10 @@ from nencarta.tasks.configs import define_arc_configs_for_fldpln_bathymetry
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from arc import Arc
 from curve2flood import remove_cells_not_connected
-from line_profiler import profile
 
 wbt = WhiteboxTools()
 wbt.set_compress_rasters(True)
-@profile
+
 def make_fldpln_inputs(workspace: Workspace) -> Path:
     if workspace.stream_info_file.exists() and \
         workspace.filled_dem.exists() and \
@@ -75,7 +74,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     else:
         lakes = None
 
-    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas()
+    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas().to_crs(dem_raster.projection)
     channel_mask, fixed_dem = smooth_and_burn_dem(
         workspace, 
         source_gdf, 
@@ -188,6 +187,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
             iterations=8,
         )
         smoothed[~channel_mask] = fixed_dem[~channel_mask]
+        smoothed[smoothed < 1000] = -9999 # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
 
         Raster.write_array_using_reference(
             smoothed,
@@ -388,6 +388,8 @@ def smooth_and_burn_dem(
 
     ocean_mask = (dem == 0)
     dem[ocean_mask] = nodata_value
+
+    dem[dem < 1000] = nodata_value # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
 
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col)
 
