@@ -20,6 +20,7 @@ dependencies:
   - pyproj
   - pyqt>=5.15
   - requests
+  - rich
   - s3fs
   - scipy
   - shapely

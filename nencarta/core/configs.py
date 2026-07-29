@@ -40,12 +40,15 @@ def get_streamids_from_source(streamflow_source: str):
 
 
 class NencartaConfig:
+    """Validated user configuration for a watershed run."""
+
     def __init__(self, config_dict: dict):
         self.config_dict = config_dict
         self.setup()
 
     
     def validate_forecast_hour(self):
+        """Return a zero-padded forecast hour or None."""
         forensic_forecast_hour = self.get("forensic_forecast_hour")
         if forensic_forecast_hour:
             try:
@@ -59,6 +62,7 @@ class NencartaConfig:
         return forensic_forecast_hour
 
     def validate_forecast_hours(self):
+        """Validate NWM forecast-hour rules for the selected source."""
         # if the streamflow_source is "NWM_short_range" the forensic_forecast_hour can be between 0 and 23, the forensic_forecast_hour must be provided as a two-digit string
         short_range_forecast_hours = [f"{i:02d}" for i in range(0, 24)]
         medium_range_forecast_hours = ["00", "06", "12", "18"]
@@ -73,10 +77,12 @@ class NencartaConfig:
             raise ValueError(f"Watershed '{self.watershed_name}' requires 'forensic_forecast_hour' to be 0 when 'streamflow_source' is 'NWM_long_range'.")
 
     def validate_nwm_api_key(self):
+        """Require an API key for NWM sources."""
         if self.streamflow_source.upper().startswith("NWM") and not self.nwm_api_key:
             raise ValueError(f"Watershed '{self.watershed_name}' requires 'nwm_api_key' when 'streamflow_source' is NWM.")
 
     def validate_specified_depths(self):
+        """Validate bathymetry mask depth count for cleaner and non-cleaner runs."""
         if self.use_specified_depth_for_bathy_mask:
             if not self.specify_depths_for_bathy_mask or not isinstance(self.specify_depths_for_bathy_mask, list) or len(self.specify_depths_for_bathy_mask) not in [1, 2]:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of 1-2 floats when 'use_specified_depth_for_bathy_mask' is True.")
@@ -86,6 +92,7 @@ class NencartaConfig:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of one float when 'clean_dem' is False.")
 
     def validate_forecast_date(self):
+        """Return a valid forensic forecast date string or None."""
         # check if forensic_forecast_date and forensic_forecast_hour is provided in the watershed dictionary and if not set forensic_forecast_date=None
         # get forensic forecast date (string like "20231125" or "2023-11-25 06:00:00 UTC")
         forensic_forecast_date: str = self.get("forensic_forecast_date")
@@ -107,6 +114,7 @@ class NencartaConfig:
         return forensic_forecast_date
 
     def verify_required_keys(self):
+        """Validate the minimum inputs needed to build workspaces."""
         required_keys = ["name", "output_dir",]
         for key in required_keys:
             if key not in self.config_dict:
@@ -117,6 +125,7 @@ class NencartaConfig:
             raise KeyError(f"Watershed '{self.get('name', 'unknown')}' must have at least one of the following keys: 'flowline', or 'source_flowlines'.")
 
     def validate_user_floodmaps(self):
+        """Validate and normalize user-supplied flood map flow files."""
         floodmap_mode = self.get("floodmap_mode", "forecast")
         floodmap_mode = FloodMapMode.from_string(floodmap_mode)
 
@@ -133,6 +142,7 @@ class NencartaConfig:
         return floodmap_mode, user_flow_files
     
     def validate_bbox(self):
+        """Return a four-value bounding box as floats when provided."""
         bbox = self.get("bbox")
         if bbox:
             if not isinstance(bbox, Sequence) or len(bbox) != 4:
@@ -144,6 +154,7 @@ class NencartaConfig:
         return bbox
     
     def validate_return_periods(self):
+        """Validate requested return periods for return-period mode."""
         VALID_RETURN_PERIODS = {2, 5, 10, 25, 50, 100}
         return_periods = self.get("return_periods")
         if return_periods and self.floodmap_mode == FloodMapMode.RETURN_PERIOD:
@@ -160,16 +171,19 @@ class NencartaConfig:
         return return_periods
         
     def get(self, key: str, default=None):
+        """Return a config value, treating None as missing when a default exists."""
         value = self.config_dict.get(key, default)
         if value is None and default is not None:
             return default
         return value
     
     def get_path(self, key: str, default=None):
+        """Return a normalized path string or None."""
         value = self.get(key, default)
         return norm_or_none(value)
         
     def setup(self):
+        """Populate validated attributes used by the processing pipeline."""
         self.verify_required_keys()
         self.watershed_name: str = self.get("name")
 

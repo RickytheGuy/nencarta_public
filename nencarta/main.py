@@ -42,7 +42,6 @@ from . import streamflow_processing as HistFlows
 from . import Download_Process_ForecastData as ForecastFlows
 from .workspace import Workspace
 from .pipeline import build_pipeline
-from line_profiler import profile
 
 CURVE2FLOOD_MAPPERS = [
     "Curve2Flood-Kernel Weighted",
@@ -1773,131 +1772,45 @@ def float_or_none(value):
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid q_baseflow_threshold: {value}") from exc
 
-def process_watershed(input_dict: dict, timer: Timer = None):
-    configs = NencartaConfig(input_dict)
-
+def _resolve_workspace_dems(configs: NencartaConfig) -> list:
+    """Return DEM inputs that should become workspaces."""
     if configs.dem_dir:
         if configs.use_warning_flags_to_download_dem:
             if configs.forensic_forecast_date:
-                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
-                DEM_List = ForecastFlows.Download_USGS_DEM_Data_Using_WarningFlag_Data(configs.geoglows_vpu, configs.dem_dir, configs.forensic_forecast_date)
-            else:
-                # This outputs a list of DEMs were GEOGLOWS has forecasted flooding (2-year exceedance or above)
-                DEM_List = []
-        else:
-            #This is the list of all the DEM files we will go through
-            DEM_List = list(Path(configs.dem_dir).glob(configs.dem_filter))
-    elif configs.dem:
-        DEM_List = [configs.dem]
-    else:
-        DEM_List = []
+                return ForecastFlows.Download_USGS_DEM_Data_Using_WarningFlag_Data(
+                    configs.geoglows_vpu,
+                    configs.dem_dir,
+                    configs.forensic_forecast_date,
+                )
+            return []
+        return list(Path(configs.dem_dir).glob(configs.dem_filter))
+
+    if configs.dem:
+        return [configs.dem]
+
+    return []
+
+
+def process_watershed(input_dict: dict, timer: Timer = None):
+    """Process one watershed dictionary through the workspace pipeline.
+
+    The ``timer`` argument is kept for compatibility with older callers. The
+    current pipeline manages timing through task-level profiling.
+    """
+    configs = NencartaConfig(input_dict)
+    dem_list = _resolve_workspace_dems(configs)
     
-    if not DEM_List:
+    if not dem_list:
         if configs.source_dems and configs.bbox:
-            DEM_List = [None] # This will trigger the domain setup to attempt to use the source DEMs and bbox to set up the domain
+            dem_list = [None]
         else:
             LOG.warning("No DEMs found in the specified folder and no source DEMs provided; cannot run pipeline.")
             return
         
-    workspaces = [Workspace(configs, DEM) for DEM in DEM_List]
+    workspaces = [Workspace(configs, dem) for dem in dem_list]
     run_pipeline(workspaces)
     return
 
-    """The core logic for processing a watershed."""
-    verify_required_keys(input_dict)
-    watershed_name = input_dict.get("name")
-    
-    streamflow_source = input_dict.get("streamflow_source", "GEOGLOWS")
-    forensic_forecast_hour = validate_forecast_hour(input_dict.get("forensic_forecast_hour"))
-    validate_forecast_hours(streamflow_source, forensic_forecast_hour, watershed_name)
-
-    nwm_api_key = input_dict.get("nwm_api_key")
-    validate_nwm_api_key(nwm_api_key, watershed_name, streamflow_source)
-
-    use_specified_depth_for_bathy_mask = input_dict.get("use_specified_depth_for_bathy_mask", True)
-    specify_depths_for_bathy_mask = input_dict.get("specify_depths_for_bathy_mask")
-    clean_dem = input_dict.get("clean_dem", False)
-    validate_specified_depths(use_specified_depth_for_bathy_mask, specify_depths_for_bathy_mask, clean_dem, watershed_name)
-
-    floodmap_mode, user_flow_files = validate_user_floodmaps(input_dict)
-
-    if not input_dict.get("make_depth_maps", True) and input_dict.get('estimate_consequences', False):
-        LOG.warning(f"Watershed '{watershed_name}': 'make_depth_maps' is False but 'estimate_consequences' is True. Setting 'make_depth_maps' to True.")
-        input_dict['make_depth_maps'] = True
-
-    dem_filter = input_dict.get("dem_filter", "*")
-    if not dem_filter:
-        dem_filter = "*"
-
-    move_stream_network_to_new_locations = input_dict.get("move_stream_network_to_new_locations", False)
-    stream_order_threshold = float_or_none(input_dict.get("new_strm_threshold_km2"))
-    if move_stream_network_to_new_locations is True and stream_order_threshold is None:
-        raise ValueError(f"Watershed '{watershed_name}': 'stream_order_threshold' must be specified when moving stream network.")
-
-    watershed_dict = {
-        "name": watershed_name,
-        "flowline": os.path.normpath(input_dict["flowline"]),
-        "dem_dir": os.path.normpath(input_dict["dem_dir"]),
-        "output_dir": os.path.normpath(input_dict["output_dir"]),
-        "disable_bathymetry": input_dict.get("disable_bathymetry", False),
-        "bathy_use_banks": input_dict.get("bathy_use_banks", False),
-        "flood_waterlc_and_strm_cells": input_dict.get("flood_waterlc_and_strm_cells", False),
-        "land_watervalue": input_dict.get("land_watervalue", 80),
-        "clean_dem": clean_dem,
-        "mapper": normalize_mapper_name(input_dict.get("mapper", "FloodSpreader")),
-        "process_stream_network": input_dict.get("process_stream_network", False),
-        "use_specified_depth_for_bathy_mask": use_specified_depth_for_bathy_mask,
-        "age_of_forecast_days": input_dict.get("age_of_forecast_days", 7),
-        "find_banks_based_on_landcover": input_dict.get("find_banks_based_on_landcover", True),
-        "specify_depths_for_bathy_mask": specify_depths_for_bathy_mask,
-        "create_reach_average_curve_file": input_dict.get("create_reach_average_curve_file", False),
-        "use_warning_flags_to_download_dem": input_dict.get("use_warning_flags_to_download_dem", False),
-        "geoglows_vpu": input_dict.get("geoglows_vpu"),
-        "forensic_forecast_date": validate_forecast_date(input_dict.get("forensic_forecast_date"), streamflow_source),
-        "forensic_forecast_hour": forensic_forecast_hour,
-        "specified_bathyflow_field":input_dict.get("specified_bathyflow_field", "p_exceed_50"),
-        "specified_highflow_field":input_dict.get("specified_highflow_field", "rp100_premium"),
-        "StrmOrder_Field": input_dict.get("StrmOrder_Field"),
-        "StrmOrder_Lower": input_dict.get("StrmOrder_Lower"),
-        "StrmOrder_Upper": input_dict.get("StrmOrder_Upper"),
-        "q_baseflow_threshold": float_or_none(input_dict.get("q_baseflow_threshold")),
-        "lake_filter_json": norm_or_none(input_dict.get("lake_filter_json")),
-        "estimate_consequences": input_dict.get("estimate_consequences", False),
-        "streamflow_source": streamflow_source,
-        "nwm_api_key": nwm_api_key,
-        "overwrite_floodmaps": input_dict.get("overwrite_floodmaps", True),
-        "remove_old_forecast_files": input_dict.get("remove_old_forecast_files", False),
-        "make_fist_inputs": input_dict.get("make_fist_inputs", True),
-        "dem_filter": dem_filter,
-        "floodmap_mode": floodmap_mode,
-        "user_flow_files": user_flow_files,
-        "make_curvefile": input_dict.get("make_curvefile", True),
-        "make_ap_database": input_dict.get("make_ap_database", True),
-        "vdt_file_extension": input_dict.get("vdt_file_extension", 'txt'),
-        "mannings_text_file": norm_or_none(input_dict.get("mannings_text_file")),
-        "bathy_args": input_dict.get("bathy_args", {}),
-        "floodmap_args": input_dict.get("floodmap_args", {}),
-        "make_depth_maps": input_dict.get("make_depth_maps", True),
-        "make_velocity_maps": input_dict.get("make_velocity_maps", True),
-        "make_wse_maps": input_dict.get("make_wse_maps", True),
-        "floodmap_identifier": input_dict.get("floodmap_identifier", ""),
-        "move_stream_network_to_new_locations": input_dict.get("move_stream_network_to_new_locations", False),
-        "new_strm_threshold_km2": float_or_none(input_dict.get("new_strm_threshold_km2")),
-        "min_match_score": float_or_none(input_dict.get("min_match_score")),
-        "quiet": input_dict.get("quiet", False),
-    }
-
-    os.makedirs(watershed_dict["output_dir"], exist_ok=True)
-
-    LOG.info(f"Started processing watershed: {watershed_name}")
-    LOG.info(f"Parameters: {pprint.pformat(watershed_dict)}")
-
-    if timer is None:
-        timer = Timer()
-    process_dem(watershed_dict, timer)
-
-    LOG.info(f"Finished processing {watershed_name}")
-@profile
 def run_pipeline(workspaces: list[Workspace], executor=None):
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel

@@ -21,7 +21,6 @@ dependencies = [
 "beautifulsoup4",
 "cython",
 "dask",
-"fiona",
 "gdal",
 "geoglows",
 "geojson",
@@ -30,10 +29,12 @@ dependencies = [
 "numba",
 "numpy",
 "pandas",
+"pipefunc",
 "progress",
 "pyproj",
 "PyQt5>=5.15",
 "requests",
+"rich",
 "s3fs",
 "scipy",
 "shapely",
@@ -49,3 +50,14 @@ flood-mapping = "nencarta.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nencarta*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "ignore",
+    "pytest_tmp",
+]

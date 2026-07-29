@@ -1,5 +1,6 @@
 *.egg-info/
 *__pycache__/
+.pytest_cache/
 ignore/
 build/
 dist/
@@ -7,3 +8,4 @@ dist/
 docs/_build/
 docs/__pycache__/
 .vscode/
+pytest_tmp/

@@ -4,6 +4,8 @@ from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 from nencarta.core.configs import NencartaConfig
 
 class Workspace:
+    """Paths and per-DEM state for one watershed processing run."""
+
     def __init__(self, configs: NencartaConfig, dem: Path | None = None):
         self.configs = configs
         self.watershed: str = configs.watershed_name
@@ -97,9 +99,11 @@ class Workspace:
 
     @property
     def config_end(self) -> str:
+        """Return the ARC/mapper config extension for this workspace."""
         return 'yaml' if self.configs.use_yaml else 'txt'
 
     def setup_dem(self, dem: Path | None):
+        """Resolve DEM naming and the assigned working DEM path."""
         if dem:
             self.FileName = Path(dem).stem
         elif self.configs.bbox:
@@ -122,6 +126,7 @@ class Workspace:
             self.assigned_dem = self.DEM_folder / f"{self.FileName}.{'vrt' if self.configs.use_vrt else 'tif'}"
 
     def setup_fldpln_files(self):
+        """Add FLDPLN-specific working files to the workspace."""
         self.fixed_dem = self.dem_updated_folder / (self.FileName + '_fixed.tif')
         self.filled_dem = self.Flow_Direction_Folder / (self.FileName + '_filled.tif') 
         self.flowdir = self.Flow_Direction_Folder / (self.FileName + '_flowdir.tif')

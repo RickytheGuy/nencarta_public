@@ -1,35 +1,42 @@
-import threading
 import os
 import pickle
+import threading
 from typing import Any
 from pathlib import Path
 
 _HAS_LMDB = False
+_LMDB_ENV = None
 try:
-    # If lmdb is avaialable, we can significantly speed up raster metadata loading by caching it in an lmdb database.
-    # This is especially good if there are thousands of rasters to process
     import lmdb
-    _HAS_LMDB = True
 
-    _CACHE_DIR = Path.home() / ".cache"
+    # Cache raster metadata in LMDB when available. This is optional because
+    # locked or read-only home directories should not block package imports.
+    _CACHE_DIR = Path(os.environ.get("NENCARTA_CACHE_DIR", Path.home() / ".cache"))
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    _LMDB_PATH = _CACHE_DIR / "nencarta.lmdb"
     _LMDB_ENV = lmdb.open(
-            str(_LMDB_PATH),
-            map_size=1024**3,  # 1 GB
-            subdir=False,
-            lock=True,
-            sync=False,
-            metasync=False,
-            readahead=False,
-            writemap=True,
-            max_readers=512,
-        )
-except (ImportError, ModuleNotFoundError):
+        str(_CACHE_DIR / "nencarta.lmdb"),
+        map_size=1024**3,
+        subdir=False,
+        lock=True,
+        sync=False,
+        metasync=False,
+        readahead=False,
+        writemap=True,
+        max_readers=512,
+    )
+    _HAS_LMDB = True
+except (ImportError, ModuleNotFoundError, OSError, RuntimeError):
+    _HAS_LMDB = False
+    _LMDB_ENV = None
+except Exception:
+    _HAS_LMDB = False
+    _LMDB_ENV = None
     pass
 
 class LMDBCache:
+    """Optional LMDB-backed metadata cache for raster-like objects."""
+
     def __init__(self):
         self.can_cache = _HAS_LMDB
         if self.can_cache:
@@ -49,6 +56,7 @@ class LMDBCache:
         timestamp: float,
         metadata: dict[str, Any],
     ) -> None:
+        """Store metadata for a file timestamp."""
 
         key = self._cache_key(filepath)
 
@@ -68,6 +76,7 @@ class LMDBCache:
         filepath: str,
         timestamp: float,
     ) -> dict[str, Any] | None:
+        """Return cached metadata only when the file timestamp matches."""
 
         key = self._cache_key(filepath)
 

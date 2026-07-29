@@ -187,6 +187,7 @@ def define_arc_configs_for_fldpln_bathymetry(workspace: Workspace) -> Path:
     workspace.bathy_file_folder.mkdir(parents=True, exist_ok=True)
     params["BATHY_Out_File"] = workspace.ARC_BathyFile
     params["AROutBATHY"] = workspace.ARC_BathyFile
+    params["FSOutBATHY"] = workspace.fldpln_bathymetry
     
     LOG.info(f"Writing ARC config to {workspace.fldpln_bathymetry_input_file}.")
     _write_config(workspace.fldpln_bathymetry_input_file, params)
