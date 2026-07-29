@@ -391,7 +391,7 @@ def smooth_and_burn_dem(
 
     dem[dem < 1000] = nodata_value # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
 
-    channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col)
+    channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
 
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
@@ -564,6 +564,7 @@ def burn_streams_into_dem(
         lakes: np.ndarray | None,
         id_col: str = 'LINKNO',
         ds_col: str = 'DSLINKNO',
+        nodata_value: float = -9999,
         min_feature_size: int = 5
 ):
     # Rasterize streamlines on the fly
@@ -602,9 +603,8 @@ def burn_streams_into_dem(
     channel_mask &= ~ocean_mask
 
     # Mask out dem's no data value
-    nodata = dem_ds.GetRasterBand(1).GetNoDataValue()
-    if nodata is not None:
-        channel_mask &= (dem != nodata)
+    if nodata_value is not None:
+        channel_mask &= (dem != nodata_value)
 
     labels, num_features = label(channel_mask, structure=structure)
     
@@ -625,9 +625,9 @@ def burn_streams_into_dem(
         stream_id = row.Index
         if geom.geom_type == "MultiLineString":
             for line in geom.geoms:
-                burn_linestring(dem, streams, dem_ds, line, stream_id, G, streams_gdf, channel_mask, labels, local_min)
+                burn_linestring(dem, streams, dem_ds, line, stream_id, G, streams_gdf, channel_mask, labels, local_min, nodata_value)
         elif geom.geom_type == "LineString":
-            burn_linestring(dem, streams, dem_ds, geom, stream_id, G, streams_gdf, channel_mask, labels, local_min)
+            burn_linestring(dem, streams, dem_ds, geom, stream_id, G, streams_gdf, channel_mask, labels, local_min, nodata_value)
         else:
             raise ValueError(f"Unsupported geometry type: {geom.geom_type}")
         
@@ -677,7 +677,8 @@ def burn_linestring(
         streams_gdf: gpd.GeoDataFrame, 
         channel_mask: np.ndarray, 
         labels: np.ndarray,
-        local_min: np.ndarray):
+        local_min: np.ndarray,
+        nodata_value: float):
     if linkno not in G:
         return  # Skip if the linkno is not in the graph
     
@@ -690,21 +691,21 @@ def burn_linestring(
     col2, row2 = gdal.ApplyGeoTransform(inverse_transform, x2, y2)
 
     # Determine which end is upstream and which is downstream based on topolgy
-    if not (0 <= row1 < dem.shape[0] and 0 <= col1 < dem.shape[1]):
+    if not (0 <= row1 < dem.shape[0] and 0 <= col1 < dem.shape[1] and dem[math.floor(row1), math.floor(col1)] != nodata_value):
         # Traverse the linestring to find the first point that is within the DEM bounds
         for x, y in linestring.coords:
             col, row = gdal.ApplyGeoTransform(inverse_transform, x, y)
-            if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1]:
+            if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1] and dem[math.floor(row), math.floor(col)] != nodata_value:
                 col1, row1 = col, row
                 break
         else:
             return  # No valid point found within DEM bounds
         
-    if not (0 <= row2 < dem.shape[0] and 0 <= col2 < dem.shape[1]):
+    if not (0 <= row2 < dem.shape[0] and 0 <= col2 < dem.shape[1] and dem[math.floor(row2), math.floor(col2)] != nodata_value):
         # Traverse the linestring in reverse to find the last point that is within the DEM bounds
         for x, y in reversed(linestring.coords):
             col, row = gdal.ApplyGeoTransform(inverse_transform, x, y)
-            if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1]:
+            if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1] and dem[math.floor(row), math.floor(col)] != nodata_value:
                 col2, row2 = col, row
                 break
         else:
@@ -748,11 +749,11 @@ def burn_linestring(
     last_elevation = np.inf
     for upstream_id in upstream_ids:
         us_row, us_col = nearest_stream_raster_pixel(streams, row1, col1, upstream_id)
-        if 0 <= us_row < dem.shape[0] and 0 <= us_col < dem.shape[1] and dem[us_row, us_col] < last_elevation:
+        if 0 <= us_row < dem.shape[0] and 0 <= us_col < dem.shape[1] and dem[us_row, us_col] != nodata_value and dem[us_row, us_col] < last_elevation:
             last_elevation = dem[us_row, us_col]
 
     coords = np.asarray(linestring.coords)
-    _burn_linestring(dem, streams, coords, linkno, channel_mask, labels, local_min, inverse_transform, row1, col1, last_elevation)
+    _burn_linestring(dem, streams, coords, linkno, channel_mask, labels, local_min, inverse_transform, row1, col1, last_elevation, nodata_value)
 
 @njit(cache=True, nogil=True, parallel=True)
 def _burn_linestring(
@@ -766,7 +767,8 @@ def _burn_linestring(
     gt: tuple,
     row1: int, 
     col1: int, 
-    last_elevation: float):
+    last_elevation: float,
+    nodata_value: float):
     xs = coords[:, 0]
     ys = coords[:, 1]
     cols_ = np.floor(gt[0] + gt[1] * xs + gt[2] * ys).astype(np.int64)
@@ -782,7 +784,7 @@ def _burn_linestring(
     for row, col in zip(rows_[1:], cols_[1:]):
         row, col = nearest_stream_raster_pixel(streams, row, col, linkno)
 
-        if not (0 <= row < nrows and 0 <= col < ncols):
+        if not (0 <= row < nrows and 0 <= col < ncols and dem[row, col] != nodata_value):
             continue
 
         if row != last_row or col != last_col:
