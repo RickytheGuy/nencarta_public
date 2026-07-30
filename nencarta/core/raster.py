@@ -62,6 +62,10 @@ class Raster(GISDataSource, LMDBCache):
     @property
     def epsg_4326_bbox(self) -> tuple[float, float, float, float]:
         return tuple(self._metadata["epsg_4326_bbox"])
+
+    @property
+    def nodata_value(self) -> float | None:
+        return self._metadata.get("nodata_value", None)
     
     @property
     def is_in_meters(self) -> bool:
@@ -262,6 +266,8 @@ class Raster(GISDataSource, LMDBCache):
                 .total_bounds
             )
 
+        nodata_value = ds.GetRasterBand(1).GetNoDataValue()
+
         return {
             "geotransform": geotransform,
             "projection": projection,
@@ -269,6 +275,7 @@ class Raster(GISDataSource, LMDBCache):
             "resolution": resolution,
             "bbox": bbox,
             "epsg_4326_bbox": epsg_4326_bbox,
+            "nodata_value": nodata_value,
         }
 
     @classmethod
@@ -320,6 +327,9 @@ class Raster(GISDataSource, LMDBCache):
         
         # Write the data to the file
         band.WriteArray(array)
+
+        if reference_raster.nodata_value is not None:
+            band.SetNoDataValue(reference_raster.nodata_value)
 
         # Write to disk
         band.FlushCache()

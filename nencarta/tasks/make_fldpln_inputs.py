@@ -177,7 +177,6 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         bathy_raster = Raster(workspace.ARC_BathyFile)
         bathy = bathy_raster.read_array()
 
-        fixed_dem = Raster(workspace.fixed_dem).read_array()
         filled = interpolate_bathymetry(bathy, channel_mask, fixed_dem)
 
         smoothed = smooth_downhill(
@@ -191,7 +190,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
 
         Raster.write_array_using_reference(
             smoothed,
-            bathy_raster,
+            dem_raster,
             workspace.fldpln_bathymetry
         )
 
@@ -266,7 +265,8 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         streams_gdf=streams_gdf, 
         dem_file=workspace.filled_dem,
         source_id_col=workspace.configs.streamflow_source.upstream_id,
-        source_ds_col=workspace.configs.streamflow_source.downstream_id
+        source_ds_col=workspace.configs.streamflow_source.downstream_id,
+        no_data_value=dem_raster.nodata_value
     )
     stream_info.to_parquet(workspace.stream_info_file, index=False)
 
@@ -389,11 +389,10 @@ def smooth_and_burn_dem(
     ocean_mask = (dem == 0)
     dem[ocean_mask] = nodata_value
 
-    dem[dem < 1000] = nodata_value # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
-
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
-
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
+
+    dem[dem < 1000] = nodata_value # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
@@ -1491,8 +1490,6 @@ def _conflate_streams(
                     do_these_headwaters_connect = False
                     break
 
-            if confluence_linkno == 710958501:
-                pass
             if not do_these_headwaters_connect:
                 continue
 
@@ -1589,29 +1586,6 @@ def _conflate_streams(
             final_matches[fid] = best_linkno
             linkno_to_fid[best_linkno].add(fid)
 
-    # Consider this: n fids that are matched, which all happen to be upstream of a single fid that is not matched.
-    # Identify these unmatched fids, and if we have downstream linknos, lets propogate downstream
-    # unmatched_fids = [fid for fid in B_reach_sig if fid not in final_matches]
-    # for fid in unmatched_fids:
-    #     upstream_fids = set(nx.ancestors(GB, fid))
-    #     matched_upstream_fids = upstream_fids & set(final_matches.keys())
-    #     if not matched_upstream_fids:
-    #         continue
-
-    # import matplotlib.pyplot as plt
-    # # plot the wtbx gdf, different colored segments, with labels of fid-linkno pairs
-    # for fid, linkno in final_matches.items():
-    #     if fid not in B_reach_sig[8].ancestors:
-    #         continue
-    #     geom = B_reach_sig[fid].geom
-    #     plt.plot(*geom.xy, label=f"{fid}-{linkno}")
-
-    # plt.legend()
-    # plt.title("WTBX FID - Source LINKNO Matches")
-    # plt.xlabel("X")
-    # plt.ylabel("Y")
-    # plt.show()
-
     # Finally assign to the gdf
     wtbx_gdf[source_id_col] = wtbx_gdf['FID'].map(lambda x: final_matches.get(x, np.nan))
     wtbx_gdf = wtbx_gdf[wtbx_gdf[source_id_col].notna()].copy()
@@ -1679,8 +1653,8 @@ def _create_stream_info_table(
         streams_gdf: gpd.GeoDataFrame,
         dem_file: str,
         source_id_col: str,
-        source_ds_col: str
-        ) -> pd.DataFrame:
+        source_ds_col: str,
+        no_data_value: float = -9999) -> pd.DataFrame:
     ds: gdal.Dataset = gdal.Open(dem_file)
     dem: np.ndarray = ds.ReadAsArray()
     gt = ds.GetGeoTransform()
@@ -1700,8 +1674,6 @@ def _create_stream_info_table(
     for idx, row in streams_gdf.iterrows():
         line: LineString = row.geometry
         linkno = row[source_id_col]
-        if linkno == 760504908:
-            pass
 
         # Get the pixel coordinates of the start and end points
         start_point = Point(line.coords[0])
@@ -1716,14 +1688,14 @@ def _create_stream_info_table(
         end_row = round(end_row_raw)
 
         # For both the start and end points, check if we are right on the stream pixel. If not, check the neighbors and choose whichever is closest to the original point. This is to account for slight misalignments between the stream vector and raster.
-        if not (0 <= start_row < streams_array.shape[0] and 0 <= start_col < streams_array.shape[1]) or streams_array[start_row, start_col] != linkno:
+        if not (0 <= start_row < streams_array.shape[0] and 0 <= start_col < streams_array.shape[1] and dem[start_row, start_col] != no_data_value) or streams_array[start_row, start_col] != linkno:
             min_dist = float('inf')
             closest_row, closest_col = None, None
             for dr in range(-2, 3):
                 for dc in range(-2, 3):
                     r = start_row + dr
                     c = start_col + dc
-                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1]:
+                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1] and dem[r, c] != no_data_value:
                         if streams_array[r, c] == linkno:
                             dist = np.sqrt((c - start_col_raw) ** 2 + (r - start_row_raw) ** 2)
                             if dist < min_dist:
@@ -1734,14 +1706,14 @@ def _create_stream_info_table(
             else:
                 continue # Skip this stream if we can't find a valid start pixel
 
-        if not (0 <= end_row < streams_array.shape[0] and 0 <= end_col < streams_array.shape[1]) or streams_array[end_row, end_col] != linkno:
+        if not (0 <= end_row < streams_array.shape[0] and 0 <= end_col < streams_array.shape[1] and dem[end_row, end_col] != no_data_value) or streams_array[end_row, end_col] != linkno:
             min_dist = float('inf')
             closest_row, closest_col = None, None
             for dr in range(-2, 3):
                 for dc in range(-2, 3):
                     r = end_row + dr
                     c = end_col + dc
-                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1]:
+                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1] and dem[r, c] != no_data_value:
                         if streams_array[r, c] == linkno:
                             dist = np.sqrt((c - end_col_raw) ** 2 + (r - end_row_raw) ** 2)
                             if dist < min_dist:
