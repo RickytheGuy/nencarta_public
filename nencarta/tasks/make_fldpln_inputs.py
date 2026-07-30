@@ -26,9 +26,7 @@ from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.tasks.configs import define_arc_configs_for_fldpln_bathymetry
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
-from arc import Arc
 from curve2flood import remove_cells_not_connected
 
 wbt = WhiteboxTools()
@@ -40,13 +38,12 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         workspace.new_stream_raster.exists() and \
         workspace.new_StrmShp_matched.exists() and \
         workspace.flowdir.exists() and \
-        workspace.fldpln_bathymetry.exists() and \
+        workspace.fixed_dem.exists() and \
         not workspace.configs.process_stream_network:
         LOG.info(f"{workspace.stream_info_file} already exists and we aren't making it again...")
-        workspace.assigned_dem = workspace.fldpln_bathymetry
+        workspace.assigned_dem = workspace.fixed_dem
         workspace.DEM_StrmShp = workspace.new_StrmShp_matched
         workspace.STRM_File_Clean = workspace.new_stream_raster
-        workspace.configs.disable_bathymetry = True
         return workspace.stream_info_file
     
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
@@ -166,97 +163,6 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     channel_mask |= (final_streams > 0)
     channel_mask = remove_cells_not_connected(channel_mask, final_streams)
 
-    config = define_arc_configs_for_fldpln_bathymetry(workspace)
-    if workspace.ARC_BathyFile.exists():
-        workspace.ARC_BathyFile.unlink()
-    Arc(str(config), quiet=workspace.configs.quiet).run()
-    if workspace.ARC_BathyFile.exists():
-        for file in [workspace.flowdir, workspace.flowacc, workspace.whitebox_stream_raster, workspace.new_StrmShp]:
-            file.unlink()
-
-        bathy_raster = Raster(workspace.ARC_BathyFile)
-        bathy = bathy_raster.read_array()
-
-        filled = interpolate_bathymetry(bathy, channel_mask, fixed_dem)
-
-        smoothed = smooth_downhill(
-            filled,
-            channel_mask,
-            alpha=4.0,
-            iterations=8,
-        )
-        smoothed[~channel_mask] = fixed_dem[~channel_mask]
-        smoothed[smoothed < 1000] = -9999 # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
-
-        Raster.write_array_using_reference(
-            smoothed,
-            dem_raster,
-            workspace.fldpln_bathymetry
-        )
-
-        wbt.fill_depressions(str(workspace.fldpln_bathymetry), str(workspace.filled_dem))
-        if not workspace.filled_dem.exists():
-            raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
-        wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
-        if not workspace.flowdir.exists():
-            raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
-        wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
-        if not workspace.flowacc.exists():
-            raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
-
-        # Remove the vector rasters, since whitebox will not make some of them if they exist
-        for file in workspace.new_StrmShp.parent.glob("*"):
-            if file.stem.startswith(workspace.new_StrmShp.stem):
-                file.unlink()
-
-        wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
-        if not workspace.whitebox_stream_raster.exists():
-            raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
-        wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
-        wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
-        if not workspace.new_StrmShp.exists():
-            if workspace.configs.raise_errors_if_nothing_in_domain:
-                raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
-            else:
-                if workspace.new_StrmShp_matched.exists():
-                    workspace.new_StrmShp_matched.unlink()
-                workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-                return
-
-        
-        wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
-        wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
-        
-        # Whitebox does not insert the projection into the shapefile, so we need to do that here.
-        prj_file = workspace.new_StrmShp.with_suffix('.prj')
-        with open(prj_file, 'w') as f:
-            f.write(dem_raster.projection)
-        
-        if lakes is not None:
-            wtbx_gdf = Vector(workspace.new_StrmShp).to_geopandas()
-            wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
-            existing_ids = set(wtbx_gdf.loc[wtbx_gdf['FID'] > 0, 'FID'])
-            wtbx_gdf['DS_LINK_ID'] = wtbx_gdf['DS_LINK_ID'].apply(lambda x: x if x in existing_ids else -1)
-            wtbx_gdf.to_file(workspace.new_StrmShp)
-
-        streams_gdf = _conflate_streams_simple(
-            source_gdf=streams_gdf, 
-            streams_vector=workspace.new_StrmShp, 
-            lakes_gdf=lakes_gdf,
-            buffer_distance=buffer_distance,
-            strm_order_col=workspace.configs.StrmOrder_Field,
-            StrmOrder_Lower=workspace.configs.StrmOrder_Lower,
-            StrmOrder_Upper=workspace.configs.StrmOrder_Upper,
-        )
-        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
-
-        _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
-
-        final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
-        channel_mask |= (final_streams > 0)
-    else:
-        workspace.fldpln_bathymetry = workspace.fixed_dem
-
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     make_channel_mask(channel_mask, str(workspace.fixed_dem), str(workspace.bathy_water_mask))
 
@@ -270,11 +176,9 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     )
     stream_info.to_parquet(workspace.stream_info_file, index=False)
 
-    # workspace.assigned_dem = workspace.fixed_dem
-    workspace.assigned_dem = workspace.fldpln_bathymetry
+    workspace.assigned_dem = workspace.fixed_dem
     workspace.DEM_StrmShp = workspace.new_StrmShp_matched
     workspace.STRM_File_Clean = workspace.new_stream_raster
-    workspace.configs.disable_bathymetry = True
 
 def interpolate_bathymetry(
     bathymetry: np.ndarray,
@@ -1046,73 +950,6 @@ def upstream_centroid(G: nx.DiGraph, node: int, reach_sig: dict[int, ReachSig]) 
     # Assume first point is upstream if isolated
     return Point(reach_sig[node].geom.coords[0])
 
-def _conflate_streams_simple(
-        source_gdf: gpd.GeoDataFrame,
-        streams_vector: os.PathLike,
-        buffer_distance: float,
-        lakes_gdf: gpd.GeoDataFrame | None = None,
-        wtbx_id_col: str = 'FID',
-        wtbx_ds_col: str = 'DS_LINK_ID',
-        strm_order_col: str = 'strmOrder',
-        StrmOrder_Lower: int | None = None,
-        StrmOrder_Upper: int | None = None
-) -> gpd.GeoDataFrame:
-    """
-    We assume that source and wtbx streams are super closely aligned already.
-    We can just iterate over each source stream, find the one that intersects it the most, and assign that
-    """
-    wtbx_vector = Vector(streams_vector)
-    wtbx_gdf = wtbx_vector.to_geopandas()
-
-    
-    confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())
-    confluence_points.update(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[0]) if isinstance(x, LineString) else None).dropna())
-    split_network_at_confluences(wtbx_gdf, confluence_points, buffer_distance, wtbx_id_col, wtbx_ds_col)
-
-    if lakes_gdf is not None and not lakes_gdf.empty:
-        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
-        # Any ds link ids not in the network are set to -1
-        existing_ids = set(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] > 0, wtbx_id_col])
-        wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].apply(lambda x: x if x in existing_ids else -1)
-
-    source_gdf['corresponding_wtbx_id'] = None
-    wtbx_sindex = wtbx_gdf.sindex
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
-        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
-        source_gdf['buffered'] = source_gdf.buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
-
-    for source_row in source_gdf.itertuples():
-        source_geom: Polygon = source_row.buffered
-        possible_matches_index = list(wtbx_sindex.intersection(source_geom.bounds))
-        possible_matches: gpd.GeoDataFrame = wtbx_gdf.iloc[possible_matches_index]
-        best_match = None
-        best_area = 0
-        for wtbx_row in possible_matches.itertuples():
-            intersection_area = source_geom.intersection(wtbx_row.buffered).area
-            if intersection_area > best_area:
-                best_area = intersection_area
-                best_match = wtbx_row
-
-        if best_match is not None:
-            source_gdf.at[source_row.Index, 'corresponding_wtbx_id'] = best_match.Index
-
-    # Transfer all the attributes from the source to the wtbx gdf
-    source_gdf["corresponding_wtbx_id"] = source_gdf["corresponding_wtbx_id"].astype('Int64')
-    wtbx_gdf = wtbx_gdf[['FID', 'geometry']].merge(
-        source_gdf.drop(columns=['buffered', 'FID', 'geometry']), 
-        left_index=True, 
-        right_on='corresponding_wtbx_id'
-    ).drop(columns='corresponding_wtbx_id')
-
-    wtbx_gdf = gpd.GeoDataFrame(wtbx_gdf, geometry='geometry', crs=source_gdf.crs)
-    if (StrmOrder_Lower is not None or StrmOrder_Upper is not None):
-        wtbx_gdf = _filter_streams_by_stream_order(wtbx_gdf, strm_order_col, StrmOrder_Lower, StrmOrder_Upper)
-
-    return wtbx_gdf
-
-
 def is_linear_reach(G: nx.DiGraph, upstream: int, downstream: int):
     path = nx.shortest_path(G, upstream, downstream)
 
@@ -1200,6 +1037,66 @@ def _conflate_streams(
     confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())
     confluence_points.update(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[0]) if isinstance(x, LineString) else None).dropna())
     split_network_at_confluences(wtbx_gdf, confluence_points, buffer_distance, wtbx_id_col, wtbx_ds_col)
+
+    # Ok, so the filled DEM removes any endorheic basins, but the source gdf has them
+    # We need to detect this first and cut any wtbx ids that connect an outlet of an endorheic basin to a headwater in the source gdf
+    # We can do this by first building our own graphs, finding all wtbx outlets, and the checking if any are not close to a source outlet
+    GA = nx.from_pandas_edgelist(source_gdf[source_gdf[source_ds_col] > 0], source=source_id_col, target=source_ds_col, create_using=nx.DiGraph())
+    GB = nx.from_pandas_edgelist(wtbx_gdf[wtbx_gdf[wtbx_ds_col] > 0], source=wtbx_id_col, target=wtbx_ds_col, create_using=nx.DiGraph())
+
+    wtbx_outlets = {n for n in GB.nodes() if GB.out_degree(n) == 0}
+    source_outlets = {n for n in GA.nodes() if GA.out_degree(n) == 0 or (GA.out_degree(n) == 1 and max(GA.in_degree(d) for d in nx.descendants(GA, n)) <= 1)} # Allow matching to upstream of outlet that are on single line
+    source_outlets.update(source_gdf[~source_gdf[source_id_col].isin(source_outlets) & (source_gdf[source_ds_col] < 0)][source_id_col].tolist()) # Single headwaters can be matched now
+
+    wtbx_outlets_to_remove = set()
+    for wtbx_outlet in wtbx_outlets:
+        sindex = source_gdf.sindex
+        wtbx_outlet_geom = wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == wtbx_outlet, 'geometry'].values[0]
+        possible_matches_index = list(sindex.intersection(wtbx_outlet_geom.bounds))
+
+        candidates = source_gdf.iloc[possible_matches_index]
+        candidates = candidates[candidates[source_id_col].isin(source_outlets)]  # Only consider source outlets
+        if candidates.empty:
+            # Let's remove this wtbx outlet and all its ancestors
+            ancestors = nx.ancestors(GB, wtbx_outlet)
+            GB.remove_nodes_from(ancestors | {wtbx_outlet})
+            wtbx_gdf = wtbx_gdf[~wtbx_gdf[wtbx_id_col].isin(ancestors | {wtbx_outlet})]
+            wtbx_outlets_to_remove.add(wtbx_outlet)
+
+    wtbx_outlets -= wtbx_outlets_to_remove
+
+    source_outlets = {n for n in GA.nodes() if GA.out_degree(n) == 0} # Be more restrictive for this set
+    # Now we do the same for the source outlets
+    for source_outlet in source_outlets:
+        sindex = wtbx_gdf.sindex
+        if not any(source_gdf[source_id_col] == source_outlet):
+            continue
+        source_outlet_geom = source_gdf.loc[source_gdf[source_id_col] == source_outlet, 'geometry'].values[0]
+        possible_matches_index = list(sindex.intersection(source_outlet_geom.bounds))
+
+        candidates = wtbx_gdf.iloc[possible_matches_index]
+        candidates = candidates[candidates[wtbx_id_col].isin(wtbx_outlets)]  # Only consider wtbx outlets
+        if candidates.empty:
+            # Find the nearest wtbx stream, remove it. Update its upstream's dslinkno to be -1
+            candidates = wtbx_gdf.iloc[possible_matches_index]
+            candidates = candidates.loc[candidates.geometry.distance(source_outlet_geom).sort_values().index]
+            # Now, choose the nearest candidate, but if another candidate is more downstream, chose that (recursively)
+            if not candidates.empty:
+                nearest_candidate = candidates.iloc[0]
+                nearest_candidate_id = nearest_candidate[wtbx_id_col]
+                downstream_id = next(GB.successors(nearest_candidate_id), None)
+                while downstream_id:
+                    if downstream_id in candidates[wtbx_id_col].values:
+                        nearest_candidate_id = downstream_id
+                        downstream_id = next(GB.successors(nearest_candidate_id), None)
+                    else:
+                        break
+
+                upstream_mask = wtbx_gdf[wtbx_ds_col] == nearest_candidate_id
+                if upstream_mask.any():
+                    wtbx_gdf.loc[wtbx_gdf[wtbx_ds_col] == nearest_candidate_id, wtbx_ds_col] = -1
+                wtbx_gdf = wtbx_gdf[wtbx_gdf[wtbx_id_col] != nearest_candidate_id]
+                GB.remove_node(nearest_candidate_id)      
 
     if lakes_gdf is not None and not lakes_gdf.empty:
         wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
@@ -1586,6 +1483,52 @@ def _conflate_streams(
             final_matches[fid] = best_linkno
             linkno_to_fid[best_linkno].add(fid)
 
+    # Ok, now check for any fids that have  descendants assigned, but they themselves are not assigned.
+    for fid in B_reach_sig:
+        if fid in final_matches:
+            continue
+
+        ancestors = B_reach_sig[fid].ancestors
+        descendants = nx.descendants(GB, fid)
+        if any(d in final_matches for d in descendants):
+            # First off, do we intersect more than 50% with any source stream?
+            fid_buffer = B_reach_sig[fid].buffer_geom
+            best_score = fid_buffer.area * 0.5
+            best_linkno = None
+            sindex = source_gdf.sindex
+            possible_matches_index = list(sindex.intersection(fid_buffer.bounds))
+            for idx in possible_matches_index:
+                source_linkno = source_gdf.iloc[idx][source_id_col]
+                if source_linkno not in A_reach_sig:
+                    continue
+                source_buffer = A_reach_sig[source_linkno].buffer_geom
+                intersection_area = fid_buffer.intersection(source_buffer).area
+                score = intersection_area
+                if score > best_score:
+                    best_score = score
+                    best_linkno = source_linkno
+
+            if best_linkno is not None:
+                # Ensure that this linkno is either upstream of the same linkno of the linkno of the first matched descenant fid
+                descendant_fid = next(GB.successors(fid))
+                while descendant_fid not in final_matches:
+                    descendant_fid = next(GB.successors(descendant_fid))
+                descendant_linkno = final_matches[descendant_fid]
+                if not (best_linkno in A_reach_sig[descendant_linkno].ancestors or best_linkno == descendant_linkno):
+                    continue
+
+                if linkno_to_fid[best_linkno]:
+                    S = GB.subgraph(linkno_to_fid[best_linkno] | {fid})
+                    if not nx.is_weakly_connected(S):
+                        continue
+
+                    # Ensure in and out degree all <= 1
+                    if any(S.in_degree(n) > 1 or S.out_degree(n) > 1 for n in S.nodes):
+                        continue
+
+                final_matches[fid] = best_linkno
+                linkno_to_fid[best_linkno].add(fid)
+
     # Finally assign to the gdf
     wtbx_gdf[source_id_col] = wtbx_gdf['FID'].map(lambda x: final_matches.get(x, np.nan))
     wtbx_gdf = wtbx_gdf[wtbx_gdf[source_id_col].notna()].copy()
@@ -1630,6 +1573,7 @@ def _conflate_streams(
     cols.insert(1, cols.pop(cols.index(source_ds_col)))
     wtbx_gdf = wtbx_gdf[cols]
     wtbx_gdf = wtbx_gdf[wtbx_gdf['geometry'].geom_type == 'LineString'].copy()
+    wtbx_gdf = wtbx_gdf.set_crs(dem_proj) # Do this again, sometimes it is erased
 
     return wtbx_gdf
 
@@ -1647,6 +1591,32 @@ def _rasterize_streams(stream_raster: str, dem: str, streams_vector: str, attrib
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)
         gdal.Rasterize(stream_ds, streams_vector, options=options)
+
+@njit(cache=True)
+def nearest_stream_cell(streams_array: np.ndarray, dem: np.ndarray, no_data_value: float, linkno: int, row_raw: float, col_raw: float, row: int, col: int) -> tuple[int | None, int | None]:
+    min_dist = float('inf')
+    closest_row, closest_col = None, None
+    for dr in range(-2, 3):
+        for dc in range(-2, 3):
+            r = row + dr
+            c = col + dc
+            if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1] and dem[r, c] != no_data_value:
+                if streams_array[r, c] == linkno:
+                    dist = np.sqrt((c - col_raw) ** 2 + (r - row_raw) ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_row, closest_col = r, c
+
+    if closest_row is not None and closest_col is not None:
+        return closest_row, closest_col
+
+    rows, cols = np.nonzero(streams_array == linkno)
+    if len(rows) == 0:
+        return None, None
+
+    distances = (cols - col_raw) ** 2 + (rows - row_raw) ** 2
+    nearest = int(np.argmin(distances))
+    return int(rows[nearest]), int(cols[nearest])
 
 def _create_stream_info_table(
         streams_array: np.ndarray, 
@@ -1689,36 +1659,14 @@ def _create_stream_info_table(
 
         # For both the start and end points, check if we are right on the stream pixel. If not, check the neighbors and choose whichever is closest to the original point. This is to account for slight misalignments between the stream vector and raster.
         if not (0 <= start_row < streams_array.shape[0] and 0 <= start_col < streams_array.shape[1] and dem[start_row, start_col] != no_data_value) or streams_array[start_row, start_col] != linkno:
-            min_dist = float('inf')
-            closest_row, closest_col = None, None
-            for dr in range(-2, 3):
-                for dc in range(-2, 3):
-                    r = start_row + dr
-                    c = start_col + dc
-                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1] and dem[r, c] != no_data_value:
-                        if streams_array[r, c] == linkno:
-                            dist = np.sqrt((c - start_col_raw) ** 2 + (r - start_row_raw) ** 2)
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_row, closest_col = r, c
+            closest_row, closest_col = nearest_stream_cell(streams_array, dem, no_data_value, linkno, start_row_raw, start_col_raw, start_row, start_col)
             if closest_row is not None and closest_col is not None:
                 start_row, start_col = closest_row, closest_col
             else:
                 continue # Skip this stream if we can't find a valid start pixel
 
         if not (0 <= end_row < streams_array.shape[0] and 0 <= end_col < streams_array.shape[1] and dem[end_row, end_col] != no_data_value) or streams_array[end_row, end_col] != linkno:
-            min_dist = float('inf')
-            closest_row, closest_col = None, None
-            for dr in range(-2, 3):
-                for dc in range(-2, 3):
-                    r = end_row + dr
-                    c = end_col + dc
-                    if 0 <= r < streams_array.shape[0] and 0 <= c < streams_array.shape[1] and dem[r, c] != no_data_value:
-                        if streams_array[r, c] == linkno:
-                            dist = np.sqrt((c - end_col_raw) ** 2 + (r - end_row_raw) ** 2)
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_row, closest_col = r, c
+            closest_row, closest_col = nearest_stream_cell(streams_array, dem, no_data_value, linkno, end_row_raw, end_col_raw, end_row, end_col)
             if closest_row is not None and closest_col is not None:
                 end_row, end_col = closest_row, closest_col
             else:

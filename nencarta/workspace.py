@@ -138,8 +138,5 @@ class Workspace:
         self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
         self.fldpln_library = self.VDT_Folder / 'fldpln_library.parquet'
 
-        self.fldpln_bathymetry_input_file = self.ARC_Folder / f"{self.FileName}_fldpln_bathymetry_input.{self.config_end}"
-        self.fldpln_bathymetry = self.bathy_file_folder / f"{self.FileName}_fldpln_bathymetry.tif"
-
     def __repr__(self):
         return f"Workspace(watershed={self.watershed}, output_dir={self.output_dir})"

@@ -39,8 +39,7 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
 def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not model_config.vdt_exists or\
           workspace.configs.disable_bathymetry or \
-            (model_config.burned_dem_exists and not workspace.configs.process_stream_network) or\
-        workspace.configs.mapper.is_curve2flood_fldpln_mapper():
+            (model_config.burned_dem_exists and not workspace.configs.process_stream_network):
         return model_config
     
     LOG.info("Running flood mapper to generate bathymetry...")
@@ -95,7 +94,7 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     # print(f"Running Curve2Flood to build FLDPLN library with {workspace.fldpln_bathymetry}...")
 
     build_fldpln_library(
-        dem = workspace.fldpln_bathymetry,
+        dem = workspace.assigned_dem,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,

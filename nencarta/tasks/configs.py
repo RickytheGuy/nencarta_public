@@ -150,50 +150,6 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     _write_config(workspace.ARC_FileName_for_DEM_Cleaner, params)
     return workspace.ARC_FileName_for_DEM_Cleaner
 
-def define_arc_configs_for_fldpln_bathymetry(workspace: Workspace) -> Path:
-    workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
-
-    configs = workspace.configs
-    if workspace.ARC_BathyFile.exists() and not configs.process_stream_network:
-        return workspace.fldpln_bathymetry_input_file
-
-    params = _arc_inputs(
-        dem=workspace.fixed_dem,
-        stream_raster=workspace.new_stream_raster,
-        land_cover=workspace.LAND_File,
-        mannings_n_file=workspace.mannings_n_text_file,
-        reanalysis_flow_file=workspace.DEM_Reanalsyis_FlowFile,
-        river_id="COMID",
-        highflow_field=configs.specified_highflow_field,
-        baseflow_field=configs.specified_bathyflow_field,
-        bathy_args=configs.bathy_args,
-        include_baseflow=True
-    )
-    
-    params["#VDT_Output_File_and_CurveFile"] = ""
-    params["VDT_Database_NumIterations"] = 0
-
-    params["#Bathymetry_Information"] = ""
-    params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", 0.2)
-    params["Bathy_Use_Banks"] = configs.bathy_use_banks
-    params["StrmShp_File"] = workspace.DEM_StrmShp
-
-    if configs.flood_waterlc_and_strm_cells:
-        params["Flood_WaterLC_and_STRM_Cells"] = True
-        params["LAND_WaterValue"] = configs.land_watervalue
-    if configs.find_banks_based_on_landcover:
-        params["FindBanksBasedOnLandCover"] = True
-
-    workspace.bathy_file_folder.mkdir(parents=True, exist_ok=True)
-    params["BATHY_Out_File"] = workspace.ARC_BathyFile
-    params["AROutBATHY"] = workspace.ARC_BathyFile
-    params["FSOutBATHY"] = workspace.fldpln_bathymetry
-    
-    LOG.info(f"Writing ARC config to {workspace.fldpln_bathymetry_input_file}.")
-    _write_config(workspace.fldpln_bathymetry_input_file, params)
-    
-    return workspace.fldpln_bathymetry_input_file
-
 def define_arc_configs(workspace: Workspace,) -> Path:
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
     workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
@@ -276,8 +232,6 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params = {'#ARC_Inputs': ''}
     if configs.disable_bathymetry:
         params["DEM_File"] = workspace.assigned_dem
-    elif configs.mapper.is_curve2flood_fldpln_mapper():
-        params["DEM_File"] = workspace.fldpln_bathymetry
     else:
         params["DEM_File"] = workspace.FS_BathyFile
     params["Stream_File"] = workspace.STRM_File_Clean
