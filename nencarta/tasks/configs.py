@@ -61,6 +61,10 @@ def _fldpln_inputs(workspace: Workspace):
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
         "max_wse_rise": workspace.configs.fldpln_max_wse_rise,
+        "FLDPLN_Median_Filter_Size": workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"),
+        "FLDPLN_Missing_FSP_Interpolation": workspace.configs.floodmap_args.get("FLDPLN_Missing_FSP_Interpolation"),
+        "FLDPLN_DoF_Signal": workspace.configs.floodmap_args.get("FLDPLN_DoF_Signal"),
+        "FLDPLN_Threshold_Mode": workspace.configs.floodmap_args.get("FLDPLN_Threshold_Mode"),
         "": "",
     }
 
@@ -190,11 +194,11 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     params["exponent_depth"] = 0.21
     params["coefficient_width"] = 2.44
     params["exponent_width"] = 0.34
+    params["StrmShp_File"] = workspace.DEM_StrmShp
 
     if not configs.disable_bathymetry:
         params["#Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File
-        params["StrmShp_File"] = workspace.DEM_StrmShp
         params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
         params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.bathy_args.get("FS_ADJUST_FLOW_BY_FRACTION", 1.0)
         params["TopWidthDistanceFactor"] = configs.bathy_args.get("TopWidthDistanceFactor", 1.5)

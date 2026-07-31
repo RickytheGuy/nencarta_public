@@ -55,7 +55,7 @@ def run_mapper_floodmaps(model_config: ModelConfig, workspace: Workspace) -> Flo
     for config in model_config.mapper_configs:
         if model_config.vdt_exists and not _mapper_has_required_outputs(config, workspace):
             _run_mapper(config, model_config)
-    print(f'finished: {workspace.watershed}')
+            
     return FloodMapperBulkOutput(model_config.mapper_configs)
 
 def run_arc_for_initial_floodmap(config: Path, configs: NencartaConfig) -> Path:
