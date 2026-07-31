@@ -90,8 +90,9 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     if workspace.fldpln_library.exists():
         workspace.fldpln_library.unlink()
 
+    LOG.info("Building FLDPLN library...")
+
     from curve2flood import build_fldpln_library
-    # print(f"Running Curve2Flood to build FLDPLN library with {workspace.fldpln_bathymetry}...")
 
     build_fldpln_library(
         dem = workspace.assigned_dem,

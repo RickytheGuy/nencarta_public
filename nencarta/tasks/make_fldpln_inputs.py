@@ -32,54 +32,35 @@ from curve2flood import remove_cells_not_connected
 wbt = WhiteboxTools()
 wbt.set_compress_rasters(True)
 
-def make_fldpln_inputs(workspace: Workspace) -> Path:
-    if workspace.stream_info_file.exists() and \
-        workspace.filled_dem.exists() and \
-        workspace.new_stream_raster.exists() and \
-        workspace.new_StrmShp_matched.exists() and \
-        workspace.flowdir.exists() and \
-        workspace.fixed_dem.exists() and \
-        not workspace.configs.process_stream_network:
-        LOG.info(f"{workspace.stream_info_file} already exists and we aren't making it again...")
-        workspace.assigned_dem = workspace.fixed_dem
-        workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-        workspace.STRM_File_Clean = workspace.new_stream_raster
-        return workspace.stream_info_file
-    
-    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
-        return None
-    
-    wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
-    
-    workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
-    workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
+def load_lakes(workspace: Workspace, dem_raster: Raster) -> tuple[np.ndarray, gpd.GeoDataFrame] | None:
+    """
+    We load the lakes in the DEM's domain. We do not want to include lakes/reservoirs.
+    """
+    if not workspace.configs.lakes:
+        return None, None
 
-    dem_raster = Raster(workspace.assigned_dem)
-    if workspace.configs.lakes:
-        lakes_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte)
-        lakes_ds.SetGeoTransform(dem_raster.geotransform)
-        lakes_ds.SetProjection(dem_raster.projection)
-        ds: gdal.Dataset = ogr.Open(workspace.configs.lakes)
-        lakes_layer: ogr.Layer = ds.GetLayer()
-        bbox = dem_raster.bbox
-        lakes_layer.SetSpatialFilterRect(*bbox)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
-        lakes_ds.FlushCache()
-        lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
-    else:
-        lakes = None
+    lakes_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte)
+    lakes_ds.SetGeoTransform(dem_raster.geotransform)
+    lakes_ds.SetProjection(dem_raster.projection)
+    ds: gdal.Dataset = ogr.Open(workspace.configs.lakes)
+    lakes_layer: ogr.Layer = ds.GetLayer()
+    bbox = dem_raster.bbox
+    lakes_layer.SetSpatialFilterRect(*bbox)
 
-    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas().to_crs(dem_raster.projection)
-    channel_mask, fixed_dem = smooth_and_burn_dem(
-        workspace, 
-        source_gdf, 
-        lakes,
-        workspace.configs.streamflow_source.upstream_id, 
-        workspace.configs.streamflow_source.downstream_id
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
 
+    lakes_ds.FlushCache()
+    lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
+
+    lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
+    if 'Area_PW' in lakes_gdf.columns:
+        lakes_gdf = lakes_gdf[lakes_gdf['Area_PW'] > 1] # Filter to about this size lake
+
+    return lakes, lakes_gdf
+
+def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray) -> float:
     wbt.fill_depressions(str(workspace.fixed_dem), str(workspace.filled_dem))
     if not workspace.filled_dem.exists():
         raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
@@ -105,10 +86,11 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     if not workspace.whitebox_stream_raster.exists():
         raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
             
-    # Remove in the newly created stream raster streams where the dem == 0
+    # Remove in the newly created stream raster streams where the dem == 0 (ocean) or where the dem is nodata. This is important for the stream extraction step, which uses the flow accumulation raster to determine where streams are.
     streams_ds: gdal.Dataset = gdal.Open(str(workspace.whitebox_stream_raster), gdal.GA_Update)
     streams = streams_ds.ReadAsArray()
     streams[fixed_dem == 0] = 0
+    streams[fixed_dem == dem_raster.nodata_value] = 0
     streams_ds.WriteArray(streams)
     streams_ds = None
 
@@ -131,12 +113,43 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     with open(prj_file, 'w') as f:
         f.write(dem_raster.projection)
 
-    if lakes is not None:
-        lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
-        if 'Area_PW' in lakes_gdf.columns:
-            lakes_gdf = lakes_gdf[lakes_gdf['Area_PW'] > 1] # Filter to about this size lake
-    else:
-        lakes_gdf = None
+    return buffer_distance
+
+def make_fldpln_inputs(workspace: Workspace) -> Path:
+    if workspace.stream_info_file.exists() and \
+        workspace.filled_dem.exists() and \
+        workspace.new_stream_raster.exists() and \
+        workspace.new_StrmShp_matched.exists() and \
+        workspace.flowdir.exists() and \
+        workspace.fixed_dem.exists() and \
+        not workspace.configs.process_stream_network:
+        LOG.info(f"{workspace.stream_info_file} already exists and we aren't making it again...")
+        workspace.assigned_dem = workspace.fixed_dem
+        workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+        workspace.STRM_File_Clean = workspace.new_stream_raster
+        return workspace.stream_info_file
+    
+    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+        return None
+    
+    wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
+    
+    workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
+    workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
+
+    dem_raster = Raster(workspace.assigned_dem)
+    lakes, lakes_gdf = load_lakes(workspace, dem_raster)
+
+    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas().to_crs(dem_raster.projection)
+    channel_mask, fixed_dem = smooth_and_burn_dem(
+        workspace, 
+        source_gdf, 
+        lakes,
+        workspace.configs.streamflow_source.upstream_id, 
+        workspace.configs.streamflow_source.downstream_id
+    )
+
+    buffer_distance = derive_hydrography_using_whitebox(workspace, dem_raster, fixed_dem)
 
     streams_gdf = _conflate_streams(
         source_gdf=source_gdf, 
@@ -166,7 +179,8 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     make_channel_mask(channel_mask, str(workspace.fixed_dem), str(workspace.bathy_water_mask))
 
-    stream_info = _create_stream_info_table(
+    _create_stream_info_table(
+        workspace.stream_info_file,
         streams_array=final_streams, 
         streams_gdf=streams_gdf, 
         dem_file=workspace.filled_dem,
@@ -174,107 +188,10 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
         source_ds_col=workspace.configs.streamflow_source.downstream_id,
         no_data_value=dem_raster.nodata_value
     )
-    stream_info.to_parquet(workspace.stream_info_file, index=False)
 
     workspace.assigned_dem = workspace.fixed_dem
     workspace.DEM_StrmShp = workspace.new_StrmShp_matched
     workspace.STRM_File_Clean = workspace.new_stream_raster
-
-def interpolate_bathymetry(
-    bathymetry: np.ndarray,
-    channel_mask: np.ndarray,
-    fixed_dem: np.ndarray
-) -> np.ndarray:
-    # 2. Get the coordinates of valid (non-NaN) data and the NaNs
-    y, x = np.indices(bathymetry.shape)
-    valid_mask = ~np.isnan(bathymetry) & channel_mask
-    if not np.any(valid_mask):
-        bathymetry[channel_mask] = fixed_dem[channel_mask]
-        return bathymetry
-
-    # Extract coordinates and values of known points
-    coords = np.column_stack((y[valid_mask], x[valid_mask]))
-    values = bathymetry[valid_mask]
-
-    # Coordinates of the missing values we want to fill
-    nan_mask = np.isnan(bathymetry) & channel_mask
-    nan_coords = np.column_stack((y[nan_mask], x[nan_mask]))
-
-    # 3. Interpolate using griddata ('linear' or 'cubic')
-    interpolated_values = griddata(coords, values, nan_coords, method='linear')
-
-    missing = np.isnan(interpolated_values)
-    if np.any(missing):
-        interpolated_values[missing] = griddata(
-            coords,
-            values,
-            nan_coords[missing],
-            method="nearest",
-        )
-
-    # 4. Fill the missing points back into the original raster
-    bathymetry[nan_mask] = interpolated_values
-    return bathymetry
-
-@njit(cache=True, parallel=True, nogil=True)
-def smooth_downhill(
-    bathymetry: np.ndarray,
-    channel_mask: np.ndarray,
-    alpha: float = 2.0,
-    iterations: int = 5,
-) -> np.ndarray:
-    """
-    Smooth while giving greater weight to lower neighbors.
-    """
-    offsets = [
-        (-1, -1), (-1, 0), (-1, 1),
-        ( 0, -1),          ( 0, 1),
-        ( 1, -1), ( 1, 0), ( 1, 1),
-    ]
-    spatial = np.array([
-        [0.7, 1.0, 0.7],
-        [1.0, 0.0, 1.0],
-        [0.7, 1.0, 0.7],
-    ])
-
-    rows, cols = np.where(channel_mask)
-    for _ in range(iterations):
-        new = bathymetry.copy()
-
-        for i in prange(len(rows)):
-            r = rows[i]
-            c = cols[i]
-            center = bathymetry[r, c]
-            if not np.isfinite(center):
-                continue
-
-            values = [center]
-            weights = [1.0]
-
-            for dr, dc in offsets:
-                rr = r + dr
-                cc = c + dc
-
-                if (
-                    0 <= rr < bathymetry.shape[0]
-                    and 0 <= cc < bathymetry.shape[1]
-                    and channel_mask[rr, cc]
-                    and np.isfinite(bathymetry[rr, cc])
-                ):
-                    z = bathymetry[rr, cc]
-
-                    w = spatial[dr + 1, dc + 1]
-                    if z > center:
-                        w *= np.exp(-alpha * (z - center))
-
-                    values.append(z)
-                    weights.append(w)
-
-            new[r, c] = np.average(values, weights=weights)
-
-        bathymetry = new
-
-    return bathymetry
 
 def smooth_and_burn_dem(
         workspace: Workspace, 
@@ -512,7 +429,7 @@ def burn_streams_into_dem(
     labels, num_features = label(channel_mask, structure=structure)
     
     # Buffer the stream raster as a new mask
-    channel_border = binary_dilation(streams > 0, structure=np.ones((3, 3), dtype=bool)).astype(np.bool_)
+    channel_border = binary_dilation(streams > 0, structure=structure).astype(np.bool_)
     channel_border &= (streams == 0) & (dem > -9998)
 
     streams_gdf = streams_gdf.set_index(id_col)
@@ -586,17 +503,18 @@ def burn_linestring(
         return  # Skip if the linkno is not in the graph
     
     inverse_transform = gdal.InvGeoTransform(dem_ds.GetGeoTransform())
+    coords = np.asarray(linestring.coords)
 
     # Find the first and last points of the linestring in pixel coordinates
-    x1, y1 = linestring.coords[0]
+    x1, y1 = coords[0]
     col1, row1 = gdal.ApplyGeoTransform(inverse_transform, x1, y1)
-    x2, y2 = linestring.coords[-1]
+    x2, y2 = coords[-1]
     col2, row2 = gdal.ApplyGeoTransform(inverse_transform, x2, y2)
 
     # Determine which end is upstream and which is downstream based on topolgy
     if not (0 <= row1 < dem.shape[0] and 0 <= col1 < dem.shape[1] and dem[math.floor(row1), math.floor(col1)] != nodata_value):
         # Traverse the linestring to find the first point that is within the DEM bounds
-        for x, y in linestring.coords:
+        for x, y in coords:
             col, row = gdal.ApplyGeoTransform(inverse_transform, x, y)
             if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1] and dem[math.floor(row), math.floor(col)] != nodata_value:
                 col1, row1 = col, row
@@ -606,7 +524,7 @@ def burn_linestring(
         
     if not (0 <= row2 < dem.shape[0] and 0 <= col2 < dem.shape[1] and dem[math.floor(row2), math.floor(col2)] != nodata_value):
         # Traverse the linestring in reverse to find the last point that is within the DEM bounds
-        for x, y in reversed(linestring.coords):
+        for x, y in np.flipud(coords):
             col, row = gdal.ApplyGeoTransform(inverse_transform, x, y)
             if 0 <= row < dem.shape[0] and 0 <= col < dem.shape[1] and dem[math.floor(row), math.floor(col)] != nodata_value:
                 col2, row2 = col, row
@@ -627,14 +545,14 @@ def burn_linestring(
         upstream_node = upstream_nodes[0]
         upstream_geom = streams_gdf.at[upstream_node, 'geometry']
         if not Point(x1, y1).touches(upstream_geom):
-            linestring = reverse(linestring)
+            coords = np.flipud(coords)
             col1, row1, col2, row2 = col2, row2, col1, row1  # Swap the coordinates as well
     elif downstream_nodes and any(G.successors(downstream_nodes[0])):  # Only check downstream if the downstream node has a successor (i.e., it is not an outlet)
         # Check if the last point is an endpoint in the downstream node. If not, then the last point is upstream and we need to reverse the line.
         downstream_node = downstream_nodes[0]
         downstream_geom = streams_gdf.at[downstream_node, 'geometry']
         if not Point(x2, y2).touches(downstream_geom):
-            linestring = reverse(linestring)
+            coords = np.flipud(coords)
             col1, row1, col2, row2 = col2, row2, col1, row1  # Swap the coordinates as well
     else:
         # Fallback to using elevation to determine upstream/downstream if no upstream or downstream nodes exist.
@@ -642,7 +560,7 @@ def burn_linestring(
         elev2 = dem[row2, col2]
         if elev1 < elev2:
             # Reverse the line
-            linestring = reverse(linestring)
+            coords = np.flipud(coords)
             col1, row1, col2, row2 = col2, row2, col1, row1  # Swap the coordinates as well
 
     col2, row2 = col1, row1
@@ -655,7 +573,6 @@ def burn_linestring(
         if 0 <= us_row < dem.shape[0] and 0 <= us_col < dem.shape[1] and dem[us_row, us_col] != nodata_value and dem[us_row, us_col] < last_elevation:
             last_elevation = dem[us_row, us_col]
 
-    coords = np.asarray(linestring.coords)
     _burn_linestring(dem, streams, coords, linkno, channel_mask, labels, local_min, inverse_transform, row1, col1, last_elevation, nodata_value)
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -671,7 +588,7 @@ def _burn_linestring(
     row1: int, 
     col1: int, 
     last_elevation: float,
-    nodata_value: float):
+    nodata_value: float) -> None:
     xs = coords[:, 0]
     ys = coords[:, 1]
     cols_ = np.floor(gt[0] + gt[1] * xs + gt[2] * ys).astype(np.int64)
@@ -900,56 +817,6 @@ def pd_is_na(x) -> bool:
     except Exception:
         return x is None
 
-# ---------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------
-
-def downstream_centroid(G: nx.DiGraph, node: int, reach_sig: dict[int, ReachSig]) -> Point:
-    if G.out_degree(node) > 0:
-        downstream = list(G.successors(node))[0]
-        # Find the endpoint which touches the downstream node
-        geom = reach_sig[node].geom
-        start_pt = Point(geom.coords[0])
-        end_pt = Point(geom.coords[-1])
-        if start_pt.touches(reach_sig[downstream].geom):
-            return start_pt
-        return end_pt
-
-    if G.in_degree(node) > 0:
-        upstream = list(G.predecessors(node))[0]
-        geom = reach_sig[node].geom
-        start_pt = Point(geom.coords[0])
-        end_pt = Point(geom.coords[-1])
-        if start_pt.touches(reach_sig[upstream].geom):
-            return end_pt
-        return start_pt
-    
-    # Just return the centroid if isolated
-    return reach_sig[node].centroid
-
-def upstream_centroid(G: nx.DiGraph, node: int, reach_sig: dict[int, ReachSig]) -> Point:
-    if G.in_degree(node) > 0:
-        upstream = list(G.predecessors(node))[0]
-        # Find the endpoint which touches the upstream node
-        geom = reach_sig[node].geom
-        start_pt = Point(geom.coords[0])
-        end_pt = Point(geom.coords[-1])
-        if start_pt.touches(reach_sig[upstream].geom):
-            return start_pt
-        return end_pt
-
-    if G.out_degree(node) > 0:
-        downstream = list(G.successors(node))[0]
-        geom = reach_sig[node].geom
-        start_pt = Point(geom.coords[0])
-        end_pt = Point(geom.coords[-1])
-        if end_pt.touches(reach_sig[downstream].geom):
-            return start_pt
-        return end_pt
-    
-    # Assume first point is upstream if isolated
-    return Point(reach_sig[node].geom.coords[0])
-
 def is_linear_reach(G: nx.DiGraph, upstream: int, downstream: int):
     path = nx.shortest_path(G, upstream, downstream)
 
@@ -959,90 +826,86 @@ def is_linear_reach(G: nx.DiGraph, upstream: int, downstream: int):
 
     return True
 
-def split_network_at_confluences(wtbx_gdf: gpd.GeoDataFrame, confluence_points: set[Point], buffer_distance: float, wtbx_id_col: str, wtbx_ds_col: str):
+def split_network_at_confluences(
+    wtbx_gdf: gpd.GeoDataFrame, 
+    source_gdf: gpd.GeoDataFrame,
+    buffer_distance: float, 
+    wtbx_id_col: str, 
+    wtbx_ds_col: str):
+    confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())
+    confluence_points.update(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[0]) if isinstance(x, LineString) else None).dropna())
+
     # If the confluence point is within the buffer distance, let us split the wtbx stream at that point and create a new reach. This will help with matching the streams better.
     max_fid = wtbx_gdf[wtbx_id_col].max()
     geom_col_index = wtbx_gdf.columns.to_list().index('geometry')
     ds_col_index = wtbx_gdf.columns.to_list().index(wtbx_ds_col)
+
+    # upstream_map = defaultdict(list)
+
+    # for fid, ds in zip(wtbx_gdf[wtbx_id_col], wtbx_gdf[wtbx_ds_col]):
+    #     upstream_map[ds].append(fid)
+
     for confluence_point in confluence_points:
-        candidate_matches: gpd.GeoDataFrame = wtbx_gdf.iloc[wtbx_gdf.sindex.query(confluence_point, predicate='dwithin', distance=buffer_distance)]
-        if len(candidate_matches) != 1:
+        candidate_idx = wtbx_gdf.sindex.query(
+            confluence_point,
+            predicate="dwithin",
+            distance=buffer_distance,
+        )
+
+        if len(candidate_idx) != 1:
             continue
 
+        idx = candidate_idx[0]
+        row = wtbx_gdf.iloc[idx]
+
         # Split the line
-        wtbx_river: LineString = candidate_matches.iloc[0].geometry
+        wtbx_river: LineString = row.geometry
 
         d = wtbx_river.project(confluence_point)
 
         new_upstream = substring(wtbx_river, 0, d)
         new_downstream = substring(wtbx_river, d, wtbx_river.length)
 
+        # Let's not split if it makes a super tiny river segment.
         if min(new_upstream.length, new_downstream.length) < buffer_distance:
             continue
 
-        current_fid = candidate_matches.iloc[0][wtbx_id_col]
-        downstream_fid = candidate_matches.iloc[0][wtbx_ds_col]
+        # current_fid = row[wtbx_id_col]
+        # downstream_fid = row[wtbx_ds_col]
         max_fid += 1
         new_fid = max_fid
-
-        upstream_fids = list(wtbx_gdf.loc[wtbx_gdf[wtbx_ds_col] == current_fid][wtbx_id_col])
+        # upstream_fids = upstream_map[current_fid]
 
         # Find which segment is upstream and downstream based on which geometry touches    
-        if downstream_fid > -1:
-            if new_upstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == downstream_fid].geometry.values[0]):
-                # new_upstream is the downstream segment
-                new_upstream, new_downstream = new_downstream, new_upstream
-        elif (upstream_fids := list(wtbx_gdf.loc[wtbx_gdf[wtbx_ds_col] == current_fid][wtbx_id_col])):
-            if new_downstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == upstream_fids[0]].geometry.values[0]):
-                # new_downstream is the upstream segment
-                new_upstream, new_downstream = new_downstream, new_upstream
+        # if downstream_fid > -1:
+        #     if new_upstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == downstream_fid].geometry.values[0]):
+        #         # new_upstream is the downstream segment
+        #         new_upstream, new_downstream = new_downstream, new_upstream
+        # elif upstream_fids:
+        #     if new_downstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == upstream_fids[0]].geometry.values[0]):
+        #         # new_downstream is the upstream segment
+        #         new_upstream, new_downstream = new_downstream, new_upstream
 
-        new_row = candidate_matches.iloc[0].copy()
+        # Create a new row for the downstream segment
+        new_row = row.copy()
         new_row[wtbx_id_col] = new_fid
         new_row['geometry'] = new_downstream
-        wtbx_gdf.loc[len(wtbx_gdf)] = new_row
-        wtbx_gdf.iat[candidate_matches.index[0], geom_col_index] = new_upstream
-        wtbx_gdf.iat[candidate_matches.index[0], ds_col_index] = new_fid
+        wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame([new_row])], ignore_index=True)
+        wtbx_gdf.iat[idx, geom_col_index] = new_upstream
+        wtbx_gdf.iat[idx, ds_col_index] = new_fid
 
-def _conflate_streams(
-    source_gdf: gpd.GeoDataFrame,
-    streams_vector: os.PathLike,
-    lakes_gdf: gpd.GeoDataFrame | None,
-    buffer_distance: float,
-    dem_proj: str,
-    dem_bbox: tuple[float, float, float, float],
-    source_id_col: str = "LINKNO",
-    source_ds_col: str = "DSLINKNO",
-    wtbx_id_col: str = "FID",
-    wtbx_ds_col: str = "DS_LINK_ID",
-    strm_order_col: str = "strmOrder",
-) -> gpd.GeoDataFrame:
-    """
-    Read files, build graphs, match the stream networks, and return the mapping state.
-    """
-    wtbx_vector = Vector(streams_vector)
-    wtbx_gdf = wtbx_vector.to_geopandas().set_crs(dem_proj)
-    if wtbx_gdf.empty:
-        return wtbx_gdf
-    
-    bounds = wtbx_vector.epsg_4326_bbox
+    return wtbx_gdf
 
-    # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
-    source_gdf = source_gdf[source_gdf.intersects(box(*bounds))].copy()
-    source_gdf = source_gdf.to_crs(dem_proj)
-    if strm_order_col not in source_gdf.columns:
-        raise ValueError(f"Source GeoDataFrame must have a '{strm_order_col}' column.")
-    min_strm_order = source_gdf[strm_order_col].min()
-
-    confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())
-    confluence_points.update(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[0]) if isinstance(x, LineString) else None).dropna())
-    split_network_at_confluences(wtbx_gdf, confluence_points, buffer_distance, wtbx_id_col, wtbx_ds_col)
-
-    # Ok, so the filled DEM removes any endorheic basins, but the source gdf has them
-    # We need to detect this first and cut any wtbx ids that connect an outlet of an endorheic basin to a headwater in the source gdf
-    # We can do this by first building our own graphs, finding all wtbx outlets, and the checking if any are not close to a source outlet
-    GA = nx.from_pandas_edgelist(source_gdf[source_gdf[source_ds_col] > 0], source=source_id_col, target=source_ds_col, create_using=nx.DiGraph())
-    GB = nx.from_pandas_edgelist(wtbx_gdf[wtbx_gdf[wtbx_ds_col] > 0], source=wtbx_id_col, target=wtbx_ds_col, create_using=nx.DiGraph())
+def enforce_endorheic_basins(
+        source_gdf: gpd.GeoDataFrame,
+        wtbx_gdf: gpd.GeoDataFrame,
+        source_id_col: str,
+        source_ds_col: str,
+        wtbx_id_col: str,
+        wtbx_ds_col: str,
+):
+    GA: nx.DiGraph = nx.from_pandas_edgelist(source_gdf[source_gdf[source_ds_col] > 0], source=source_id_col, target=source_ds_col, create_using=nx.DiGraph())
+    GB: nx.DiGraph = nx.from_pandas_edgelist(wtbx_gdf[wtbx_gdf[wtbx_ds_col] > 0], source=wtbx_id_col, target=wtbx_ds_col, create_using=nx.DiGraph())
 
     wtbx_outlets = {n for n in GB.nodes() if GB.out_degree(n) == 0}
     source_outlets = {n for n in GA.nodes() if GA.out_degree(n) == 0 or (GA.out_degree(n) == 1 and max(GA.in_degree(d) for d in nx.descendants(GA, n)) <= 1)} # Allow matching to upstream of outlet that are on single line
@@ -1050,67 +913,69 @@ def _conflate_streams(
 
     wtbx_outlets_to_remove = set()
     for wtbx_outlet in wtbx_outlets:
-        sindex = source_gdf.sindex
         wtbx_outlet_geom = wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == wtbx_outlet, 'geometry'].values[0]
-        possible_matches_index = list(sindex.intersection(wtbx_outlet_geom.bounds))
-
+        possible_matches_index = list(source_gdf.sindex.intersection(wtbx_outlet_geom.bounds))
         candidates = source_gdf.iloc[possible_matches_index]
         candidates = candidates[candidates[source_id_col].isin(source_outlets)]  # Only consider source outlets
-        if candidates.empty:
-            # Let's remove this wtbx outlet and all its ancestors
-            ancestors = nx.ancestors(GB, wtbx_outlet)
-            GB.remove_nodes_from(ancestors | {wtbx_outlet})
-            wtbx_gdf = wtbx_gdf[~wtbx_gdf[wtbx_id_col].isin(ancestors | {wtbx_outlet})]
-            wtbx_outlets_to_remove.add(wtbx_outlet)
+        if not candidates.empty:
+            continue
+
+        # Let's remove this wtbx outlet and all its ancestors
+        ancestors = nx.ancestors(GB, wtbx_outlet)
+        GB.remove_nodes_from(ancestors | {wtbx_outlet})
+        wtbx_gdf = wtbx_gdf[~wtbx_gdf[wtbx_id_col].isin(ancestors | {wtbx_outlet})]
+        wtbx_outlets_to_remove.add(wtbx_outlet)
 
     wtbx_outlets -= wtbx_outlets_to_remove
 
     source_outlets = {n for n in GA.nodes() if GA.out_degree(n) == 0} # Be more restrictive for this set
     # Now we do the same for the source outlets
     for source_outlet in source_outlets:
-        sindex = wtbx_gdf.sindex
         if not any(source_gdf[source_id_col] == source_outlet):
             continue
-        source_outlet_geom = source_gdf.loc[source_gdf[source_id_col] == source_outlet, 'geometry'].values[0]
-        possible_matches_index = list(sindex.intersection(source_outlet_geom.bounds))
 
+        source_outlet_geom = source_gdf.loc[source_gdf[source_id_col] == source_outlet, 'geometry'].values[0]
+        possible_matches_index = list(wtbx_gdf.sindex.intersection(source_outlet_geom.bounds))
         candidates = wtbx_gdf.iloc[possible_matches_index]
         candidates = candidates[candidates[wtbx_id_col].isin(wtbx_outlets)]  # Only consider wtbx outlets
+        if not candidates.empty:
+            continue
+
+        # Find the nearest wtbx stream, remove it. Update its upstream's dslinkno to be -1
+        candidates = wtbx_gdf.iloc[possible_matches_index]
+        candidates = candidates.loc[candidates.geometry.distance(source_outlet_geom).sort_values().index]
         if candidates.empty:
-            # Find the nearest wtbx stream, remove it. Update its upstream's dslinkno to be -1
-            candidates = wtbx_gdf.iloc[possible_matches_index]
-            candidates = candidates.loc[candidates.geometry.distance(source_outlet_geom).sort_values().index]
-            # Now, choose the nearest candidate, but if another candidate is more downstream, chose that (recursively)
-            if not candidates.empty:
-                nearest_candidate = candidates.iloc[0]
-                nearest_candidate_id = nearest_candidate[wtbx_id_col]
+            continue
+
+        # Now, choose the nearest candidate, but if another candidate is more downstream, chose that (recursively)
+        nearest_candidate = candidates.iloc[0]
+        nearest_candidate_id = nearest_candidate[wtbx_id_col]
+        downstream_id = next(GB.successors(nearest_candidate_id), None)
+        while downstream_id:
+            if downstream_id in candidates[wtbx_id_col].values:
+                nearest_candidate_id = downstream_id
                 downstream_id = next(GB.successors(nearest_candidate_id), None)
-                while downstream_id:
-                    if downstream_id in candidates[wtbx_id_col].values:
-                        nearest_candidate_id = downstream_id
-                        downstream_id = next(GB.successors(nearest_candidate_id), None)
-                    else:
-                        break
+            else:
+                break
 
-                upstream_mask = wtbx_gdf[wtbx_ds_col] == nearest_candidate_id
-                if upstream_mask.any():
-                    wtbx_gdf.loc[wtbx_gdf[wtbx_ds_col] == nearest_candidate_id, wtbx_ds_col] = -1
-                wtbx_gdf = wtbx_gdf[wtbx_gdf[wtbx_id_col] != nearest_candidate_id]
-                GB.remove_node(nearest_candidate_id)      
+        # Now, remove the nearest candidate and update its upstream's dslinkno to be -1
+        upstream_mask = wtbx_gdf[wtbx_ds_col] == nearest_candidate_id
+        if upstream_mask.any():
+            wtbx_gdf.loc[wtbx_gdf[wtbx_ds_col] == nearest_candidate_id, wtbx_ds_col] = -1
+        wtbx_gdf = wtbx_gdf[wtbx_gdf[wtbx_id_col] != nearest_candidate_id]
+        GB.remove_node(nearest_candidate_id)   
 
-    if lakes_gdf is not None and not lakes_gdf.empty:
-        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
-        # Any ds link ids not in the network are set to -1
-        existing_ids = set(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] > 0, wtbx_id_col])
-        wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].apply(lambda x: x if x in existing_ids else -1)
+    return wtbx_gdf
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
-        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
-        source_gdf['buffered'] = source_gdf.simplify(tolerance=1e-5, preserve_topology=False).buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
-
-    source_gdf['buffered'] = source_gdf["buffered"].make_valid()
-
+def build_graphs(
+    source_gdf: gpd.GeoDataFrame,
+    wtbx_gdf: gpd.GeoDataFrame,
+    min_strm_order: int,
+    source_id_col: str = "LINKNO",
+    source_ds_col: str = "DSLINKNO",
+    wtbx_id_col: str = "FID",
+    wtbx_ds_col: str = "DS_LINK_ID",
+):
     GA = build_graph(source_gdf, id_col=source_id_col, ds_col=source_ds_col)
     GB = build_graph(wtbx_gdf, id_col=wtbx_id_col, ds_col=wtbx_ds_col)
 
@@ -1124,7 +989,7 @@ def _conflate_streams(
         ]
 
         if len(orders) == 0:
-            GA.nodes[node]['STRAHLER'] = min_strm_order # The source gdf has headwater streams merged, so there is no stream order 1. I assume that we will always have a headwater stream in the AOI for this to work.
+            GA.nodes[node]['STRAHLER'] = min_strm_order # The source gdf may have headwater streams merged, so there may not be a stream order 1. I assume that we will always have a headwater stream in the AOI for this to work.
             continue
 
         max_order = max(orders)
@@ -1137,31 +1002,36 @@ def _conflate_streams(
     for i, node in enumerate(nx.topological_sort(GB)):
         GB.nodes[node]['topological_order'] = i
 
-    # Use a projected CRS for distance/length calculations
-    wtbx_gdf[source_id_col] = np.nan
+    return GA, GB
 
-    A_reach_sig = compute_reach_signatures(GA)
-    B_reach_sig = compute_reach_signatures(GB)
-
-    # Get outlets of source graph
-    source_headwaters = {n for n, sig in A_reach_sig.items() if sig.kind.is_source()}
-    wtbx_headwaters = {n for n, sig in B_reach_sig.items() if sig.kind.is_source()}
+def match_to_source_headwaters(
+    best_source_scores: dict[int, tuple[int, int]],
+    scores: dict[int, float],
+    source_headwaters: set[int],
+    wtbx_headwaters: set[int],
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    wtbx_gdf: gpd.GeoDataFrame,
+    wtbx_id_col: str,
+    min_strm_order: int,
+    GB: nx.DiGraph
+):
     wtbx_potential_headwaters = {
         n for n, sig in B_reach_sig.items() if sig.local_order == min_strm_order and all(B_reach_sig[pred].local_order < min_strm_order for pred in GB.predecessors(n)) # The predecessors are both headwaters
     }
     wtbx_potential_headwaters -= wtbx_headwaters
-    non_source_headwaters = set(GA.nodes()) - source_headwaters
 
-    # Match headwaters
-    best_source_scores = {}
-    scores = {}
     for source_headwater in source_headwaters:
         best_score = 0
         best_wtbx = None
-        source_centroid = A_reach_sig[source_headwater].centroid
+        # source_centroid = A_reach_sig[source_headwater].centroid
         source_buffer = A_reach_sig[source_headwater].buffer_geom
 
-        for wtbx_outlet in sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
+        nearest_wtbx_headwaters = wtbx_gdf.iloc[wtbx_gdf.sindex.query(source_buffer, predicate="intersects", sort=True)][wtbx_id_col]
+        nearest_wtbx_headwaters = nearest_wtbx_headwaters[nearest_wtbx_headwaters.isin(wtbx_headwaters)].tolist()
+
+        # for wtbx_outlet in sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
+        for wtbx_outlet in nearest_wtbx_headwaters:
             wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
             score = intersection_area
@@ -1170,7 +1040,11 @@ def _conflate_streams(
                 best_score = score
                 best_wtbx = wtbx_outlet
 
-        for wtbx_outlet in sorted(wtbx_potential_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
+        nearest_wtbx_potential_headwaters = wtbx_gdf.iloc[wtbx_gdf.sindex.query(source_buffer, predicate="intersects", sort=True)][wtbx_id_col]
+        nearest_wtbx_potential_headwaters = nearest_wtbx_potential_headwaters[nearest_wtbx_potential_headwaters.isin(wtbx_potential_headwaters)].tolist()
+
+        # for wtbx_outlet in sorted(wtbx_potential_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
+        for wtbx_outlet in nearest_wtbx_potential_headwaters:
             wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
             score = intersection_area
@@ -1182,14 +1056,26 @@ def _conflate_streams(
             best_source_scores[source_headwater] = (best_wtbx, source_headwater)
             scores[best_wtbx] = best_score
 
+def match_others_to_source_headwaters(
+    best_source_scores: dict[int, tuple[int, int]],
+    scores: dict[int, float],
+    source_gdf: gpd.GeoDataFrame,
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    non_source_headwaters: set[int],
+    source_id_col: str,
+    GA: nx.DiGraph
+):
     # Check the computed wtbx headwaters, and see if there is a better match for any of them. If so, replace the match.
     for source_headwater, (wtbx_headwater, _) in list(best_source_scores.items()):
         best_score = scores.get(wtbx_headwater, 0)
         best_source = None
-        wtbx_centroid = B_reach_sig[wtbx_headwater].centroid
         wtbx_buffer = B_reach_sig[wtbx_headwater].buffer_geom
 
-        for source_headwater2 in sorted(non_source_headwaters, key=lambda x: A_reach_sig[x].geom.distance(wtbx_centroid))[:5]:
+        nearest_source_headwaters = source_gdf.iloc[source_gdf.sindex.query(wtbx_buffer, predicate="intersects", sort=True)][source_id_col]
+        nearest_source_headwaters = nearest_source_headwaters[nearest_source_headwaters.isin(non_source_headwaters)].tolist()
+
+        for source_headwater2 in nearest_source_headwaters:
             source_buffer2 = A_reach_sig[source_headwater2].buffer_geom
             intersection_area = source_buffer2.intersection(wtbx_buffer).area
             score = intersection_area
@@ -1198,13 +1084,28 @@ def _conflate_streams(
                 best_score = score
                 best_source = source_headwater2
 
-        if best_source is not None and best_source != source_headwater:
-            if not nx.has_path(GA, best_source, source_headwater) and nx.has_path(GA, source_headwater, best_source) and is_linear_reach(GA, source_headwater, best_source):
-                # We matched better with a downstream segment, but let us actually keep the upstream one instead (in a linear reach, i.e., no upstream tributaries)
-                continue
-            del best_source_scores[source_headwater]
-            best_source_scores[best_source] = (wtbx_headwater, best_source)
+        if best_source is None or best_source == source_headwater:
+            continue
 
+        if not nx.has_path(GA, best_source, source_headwater) and nx.has_path(GA, source_headwater, best_source) and is_linear_reach(GA, source_headwater, best_source):
+            # We matched better with a downstream segment, but let us actually keep the upstream one instead (in a linear reach, i.e., no upstream tributaries)
+            continue
+
+        del best_source_scores[source_headwater]
+        best_source_scores[best_source] = (wtbx_headwater, best_source)
+
+def match_wtbx_headwaters(
+    best_source_scores: dict[int, tuple[int, int]],
+    scores: dict[int, float],
+    source_gdf: gpd.GeoDataFrame,
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    non_source_headwaters: set[int],
+    wtbx_headwaters: set[int],
+    source_id_col: str,
+    GB: nx.DiGraph,
+    min_strm_order: int
+):
     # One more check: let's look at any unassigned wtbx headwater and see if we have a really good match for it. If so, assign it.
     for wtbx_headwater in wtbx_headwaters:
         if wtbx_headwater in best_source_scores.values():
@@ -1212,162 +1113,193 @@ def _conflate_streams(
 
         best_score = 0
         best_source = None
-        wtbx_centroid = B_reach_sig[wtbx_headwater].centroid
         wtbx_buffer = B_reach_sig[wtbx_headwater].buffer_geom
 
         downstream_wtbx = next(iter(GB.successors(wtbx_headwater)), None)
         siblings = set(GB.predecessors(downstream_wtbx)) - {wtbx_headwater} if downstream_wtbx is not None else set()
 
-        for source_headwater in sorted(non_source_headwaters, key=lambda x: A_reach_sig[x].geom.distance(wtbx_centroid))[:5]:
+        # Use sindex to find nearest source headwaters to the wtbx headwater centroid
+        nearest_source_headwaters = source_gdf.iloc[source_gdf.sindex.query(wtbx_buffer, predicate="intersects", sort=True)][source_id_col]
+        nearest_source_headwaters = nearest_source_headwaters[nearest_source_headwaters.isin(non_source_headwaters)].tolist()
+
+        for source_headwater in nearest_source_headwaters:
             if A_reach_sig[source_headwater].local_order > min_strm_order:
                 # We are going to be more strict here
                 continue
+
             source_buffer = A_reach_sig[source_headwater].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
             score = intersection_area
 
-            if score > best_score:
-                # We have to be careful here. If the downstream segment or the sibling (other upstream of downstream) matches better, don't match
-                if downstream_wtbx is not None:
-                    downstream_buffer = B_reach_sig[downstream_wtbx].buffer_geom
-                    downstream_intersection_area = source_buffer.intersection(downstream_buffer).area
-                    if downstream_intersection_area > score:
-                        continue
+            if score <= best_score:
+                continue
 
-                    should_skip = False
-                    for sibling in siblings:
-                        sibling_buffer = B_reach_sig[sibling].buffer_geom
-                        sibling_intersection_area = source_buffer.intersection(sibling_buffer).area
-                        if sibling_intersection_area > score:
-                            should_skip = True
-                            break
-                        
-                    if should_skip:
-                        continue
+            # We have to be careful here. If the downstream segment or the sibling (other upstream of downstream) matches better, don't match
+            if downstream_wtbx is not None:
+                downstream_buffer = B_reach_sig[downstream_wtbx].buffer_geom
+                downstream_intersection_area = source_buffer.intersection(downstream_buffer).area
+                if downstream_intersection_area > score:
+                    continue
 
-                best_score = score
-                best_source = source_headwater
+                should_skip = False
+                for sibling in siblings:
+                    sibling_buffer = B_reach_sig[sibling].buffer_geom
+                    sibling_intersection_area = source_buffer.intersection(sibling_buffer).area
+                    if sibling_intersection_area > score:
+                        should_skip = True
+                        break
+                    
+                if should_skip:
+                    continue
+
+            best_score = score
+            best_source = source_headwater
 
         if best_source is not None and best_score > scores.get(wtbx_headwater, 0):
-            best_source_scores[wtbx_headwater] = (wtbx_headwater, best_source)
+            best_source_scores[best_source] = (wtbx_headwater, best_source)
 
+def find_outlets_of_headwaters(
+    best_source_scores: dict[int, tuple[int, int]],
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    GA: nx.DiGraph,
+    GB: nx.DiGraph
+):
     headwater_fids = set(f for f, _ in best_source_scores.values())
     headwater_fid_to_linkno = {f: l for f, l in best_source_scores.values()}
-
-    headwaters_with_no_outlet = headwater_fids
     headwater_fids_accounted_for = set()
     best_outlet_linkno_to_fid = {}
-    if headwaters_with_no_outlet:
-        visited = set()
-        # For each headwater, find the corresponding outlet
-        for headwater_fid in headwaters_with_no_outlet:
-            if headwater_fid in visited:
-                continue
 
-            headwater_linkno = headwater_fid_to_linkno[headwater_fid]
-            # Find the outlet for this headwater
-            outlet_fid = None
-            descendants = list(nx.descendants(GB, headwater_fid))
-            if len(descendants) == 0:
-                # This headwater is an outlet, so we can just use it as the outlet
-                headwater_fids_accounted_for.add(headwater_fid)
-                best_outlet_linkno_to_fid[headwater_linkno] = headwater_fid
-                continue
-            else:
-                for fid in nx.descendants(GB, headwater_fid):
-                    if GB.out_degree(fid) == 0:
-                        outlet_fid = fid
-                        break
+    if not headwater_fids:
+        return headwater_fids, best_outlet_linkno_to_fid, headwater_fid_to_linkno
 
-            if outlet_fid is None:
-                # Remove these headwaters from the best_source_scores, since they don't have a corresponding outlet
-                del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
-                visited.add(headwater_fid)
-                continue
+    headwater_fids_to_remove = set()
+    
+    # For each headwater, find the corresponding outlet
+    for headwater_fid in headwater_fids:
+        headwater_linkno = headwater_fid_to_linkno[headwater_fid]
+        # Find the outlet for this headwater
+        outlet_fid = None
+        descendants = list(nx.descendants(GB, headwater_fid))
+        if len(descendants) == 0:
+            # This headwater is an outlet, so we can just use it as the outlet
+            headwater_fids_accounted_for.add(headwater_fid)
+            best_outlet_linkno_to_fid[headwater_linkno] = headwater_fid
+            continue
+        else:
+            for fid in nx.descendants(GB, headwater_fid):
+                if GB.out_degree(fid) == 0:
+                    outlet_fid = fid
+                    break
 
-            # Find all headwater fids that connect to this outlet, with no current outlet
-            outlet_headwaters = set(f for f in B_reach_sig[outlet_fid].ancestors) & headwaters_with_no_outlet
-            
-            # Find the most common downstream linkno for these headwaters in GA
-            headwater_linknos = [headwater_fid_to_linkno[f] for f in outlet_headwaters]
-            current_linkno_outlet = headwater_linknos[0]
-            found = False
-            while True:
+        if outlet_fid is None:
+            # Remove these headwaters from the best_source_scores, since they don't have a corresponding outlet
+            del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
+            continue
+
+        # Find all headwater fids that connect to this outlet, with no current outlet
+        outlet_headwaters = set(f for f in B_reach_sig[outlet_fid].ancestors) & headwater_fids
+        outlet_headwaters -= headwater_fids_to_remove
+        
+        # Find the most common downstream linkno for these headwaters in GA
+        headwater_linknos = [headwater_fid_to_linkno[f] for f in outlet_headwaters]
+        current_linkno_outlet = headwater_linknos[0]
+        found = False
+        while True:
+            try:
+                current_linkno_outlet = next(GA.successors(current_linkno_outlet))
+            except StopIteration:
+                break
+
+            if all(hdwtr in A_reach_sig[current_linkno_outlet].ancestors for hdwtr in headwater_linknos):
+                found = True
+                break
+
+        if not found and (sum(hdwtr in A_reach_sig[current_linkno_outlet].ancestors for hdwtr in headwater_linknos) / len(headwater_linknos)) > 0.9:
+            # Sometimes, the headwaters might not all connect to the same downstream segment, but if most of them do, we can still use that segment as the outlet
+            # Find the outlet that first connects to the most headwaters
+            best_linkno = None
+            best_count = 0
+            for linkno in nx.descendants(GA, headwater_fid_to_linkno[headwater_fid]):
+                count = sum(hdwtr in A_reach_sig[linkno].ancestors for hdwtr in headwater_linknos)
+                if count > best_count:
+                    best_count = count
+                    best_linkno = linkno
+
+
+            if best_linkno is not None:
+                current_linkno_outlet = best_linkno
+                # Check: is the linkno outlet in the same area as the outlet fid? If not, we should skip this outlet, and remove this headwater FID
+                # This occurs when the headwater FID has been incorrectly matched to an endorheic basin
+                outlet_geom = B_reach_sig[outlet_fid].geom
+                linkno_geom = A_reach_sig[current_linkno_outlet].geom
+                if (max(outlet_geom.length, linkno_geom.length) * 2) < outlet_geom.distance(linkno_geom):
+                    # The outlet and linkno are too far apart, so we should skip this outlet, and remove this headwater FID permanently
+                    headwater_fids_to_remove.add(headwater_fid)
+                    del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
+                    GB.remove_node(headwater_fid)
+                    del B_reach_sig[headwater_fid]
+                    continue
+
+                # The geoms should be within at least 
+                found = True
+
+        if not found:
+            # Remove these headwaters from the best_source_scores, since they don't have a corresponding outlet
+            for headwater_fid in outlet_headwaters:
                 try:
-                    current_linkno_outlet = next(GA.successors(current_linkno_outlet))
-                except StopIteration:
-                    break
+                    del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
+                except KeyError:
+                    pass
+            continue
 
-                if all(hdwtr in A_reach_sig[current_linkno_outlet].ancestors for hdwtr in headwater_linknos):
-                    found = True
-                    break
+        # A check: if we had only 1 headwater or there's still downstream segments, than we will have matched with the immediate downstream. But, we should instead match with the stream segment with the most overlap
+        if len(outlet_headwaters) == 1 or GA.out_degree(current_linkno_outlet) > 0:
+            headwater_fid = next(iter(outlet_headwaters))
+            best_score = 0
+            best_linkno = None
+            fid_buffer = B_reach_sig[outlet_fid].buffer_geom
 
-            if not found and (sum(hdwtr in A_reach_sig[current_linkno_outlet].ancestors for hdwtr in headwater_linknos) / len(headwater_linknos)) > 0.9:
-                # Sometimes, the headwaters might not all connect to the same downstream segment, but if most of them do, we can still use that segment as the outlet
-                # Find the outlet that first connects to the most headwaters
-                best_linkno = None
-                best_count = 0
-                for linkno in nx.descendants(GA, headwater_fid_to_linkno[headwater_fid]):
-                    count = sum(hdwtr in A_reach_sig[linkno].ancestors for hdwtr in headwater_linknos)
-                    if count > best_count:
-                        best_count = count
-                        best_linkno = linkno
+            for linkno in nx.descendants(GA, headwater_fid_to_linkno[headwater_fid]):
+                linkno_buffer = A_reach_sig[linkno].buffer_geom
+                intersection_area = fid_buffer.intersection(linkno_buffer).area
+                score = intersection_area
 
-                if best_linkno is not None:
-                    current_linkno_outlet = best_linkno
-                    found = True
-                    
-            if not found:
-                # Remove these headwaters from the best_source_scores, since they don't have a corresponding outlet
-                for headwater_fid in outlet_headwaters:
-                    try:
-                        del best_source_scores[headwater_fid_to_linkno[headwater_fid]]
-                    except KeyError:
-                        pass
-                    visited.add(headwater_fid)
-                continue
+                if score > best_score:
+                    best_score = score
+                    best_linkno = linkno
 
-            # A check: if we had only 1 headwater or there's still downstream segments, than we will have matched with the immediate downstream. But, we should instead match with the stream segment with the most overlap
-            if len(outlet_headwaters) == 1 or GA.out_degree(current_linkno_outlet) > 0:
-                headwater_fid = next(iter(outlet_headwaters))
-                best_score = 0
-                best_linkno = None
-                fid_buffer = B_reach_sig[outlet_fid].buffer_geom
-
-                for linkno in nx.descendants(GA, headwater_fid_to_linkno[headwater_fid]):
-                    linkno_buffer = A_reach_sig[linkno].buffer_geom
-                    intersection_area = fid_buffer.intersection(linkno_buffer).area
-                    score = intersection_area
-
-                    if score > best_score:
-                        best_score = score
-                        best_linkno = linkno
-
-                if best_linkno is not None:
-                    current_linkno_outlet = best_linkno
+            if best_linkno is not None:
+                current_linkno_outlet = best_linkno
 
 
-            headwater_fids_accounted_for.update(outlet_headwaters)
-            best_outlet_linkno_to_fid[current_linkno_outlet] = outlet_fid
+        headwater_fids_accounted_for.update(outlet_headwaters)
+        best_outlet_linkno_to_fid[current_linkno_outlet] = outlet_fid
 
-        headwater_fids = headwater_fids_accounted_for
+    headwater_fids = headwater_fids_accounted_for
+    headwater_fids -= headwater_fids_to_remove
 
-    pairs = list((fid, linkno) for linkno, fid in best_outlet_linkno_to_fid.items()) + list(best_source_scores.values())
-    final_matches = {}
-    linkno_to_fid = defaultdict(set)
-    for fid, linkno in pairs:
-        final_matches[fid] = linkno
-        linkno_to_fid[linkno].add(fid)
+    return headwater_fids, best_outlet_linkno_to_fid, headwater_fid_to_linkno
 
+def fill_in_paths_between_headwaters_and_outlets(
+    best_outlet_linkno_to_fid: dict[int, int],
+    headwater_fids: set[int],
+    headwater_fid_to_linkno: dict[int, int],
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    GA: nx.DiGraph,
+    GB: nx.DiGraph,
+    final_matches: dict[int, int],
+    linkno_to_fid: dict[int, set[int]]
+):
     for outlet_linkno, outlet_fid in best_outlet_linkno_to_fid.items():
         allowable_linknos = defaultdict(set)
         watershed_fids = set(B_reach_sig[outlet_fid].ancestors) | {outlet_fid}
         # Find common downstream segment for each headwater
         headwaters_of_outlet_that_are_assigned = watershed_fids & headwater_fids
         for fid_source_1, fid_source_2 in combinations(headwaters_of_outlet_that_are_assigned, 2):
-            if fid_source_1 == fid_source_2:
-                continue
-
+            if fid_source_1 in { 604, 570} or fid_source_2 in { 604, 570}:
+                pass
             # Find the first fid which has both as upstream.
             # Do the same for linkno
             confluence_fid = fid_source_1
@@ -1483,53 +1415,80 @@ def _conflate_streams(
             final_matches[fid] = best_linkno
             linkno_to_fid[best_linkno].add(fid)
 
+def fill_in_missing_branches(
+    final_matches: dict[int, int],
+    linkno_to_fid: dict[int, set[int]],
+    A_reach_sig: dict[int, ReachSig],
+    B_reach_sig: dict[int, ReachSig],
+    GB: nx.DiGraph,
+    source_gdf: gpd.GeoDataFrame,
+    source_id_col: str
+):
     # Ok, now check for any fids that have  descendants assigned, but they themselves are not assigned.
+    # This represents headwater-type segments that were not caught, but still can be matched well
     for fid in B_reach_sig:
         if fid in final_matches:
             continue
 
-        ancestors = B_reach_sig[fid].ancestors
         descendants = nx.descendants(GB, fid)
-        if any(d in final_matches for d in descendants):
-            # First off, do we intersect more than 50% with any source stream?
-            fid_buffer = B_reach_sig[fid].buffer_geom
-            best_score = fid_buffer.area * 0.5
-            best_linkno = None
-            sindex = source_gdf.sindex
-            possible_matches_index = list(sindex.intersection(fid_buffer.bounds))
-            for idx in possible_matches_index:
-                source_linkno = source_gdf.iloc[idx][source_id_col]
-                if source_linkno not in A_reach_sig:
-                    continue
-                source_buffer = A_reach_sig[source_linkno].buffer_geom
-                intersection_area = fid_buffer.intersection(source_buffer).area
-                score = intersection_area
-                if score > best_score:
-                    best_score = score
-                    best_linkno = source_linkno
+        if not any(d in final_matches for d in descendants):
+            continue
 
-            if best_linkno is not None:
-                # Ensure that this linkno is either upstream of the same linkno of the linkno of the first matched descenant fid
-                descendant_fid = next(GB.successors(fid))
-                while descendant_fid not in final_matches:
-                    descendant_fid = next(GB.successors(descendant_fid))
-                descendant_linkno = final_matches[descendant_fid]
-                if not (best_linkno in A_reach_sig[descendant_linkno].ancestors or best_linkno == descendant_linkno):
-                    continue
+        # First off, do we intersect more than 50% with any source stream?
+        fid_buffer = B_reach_sig[fid].buffer_geom
+        best_score = fid_buffer.area * 0.5
+        best_linkno = None
+        sindex = source_gdf.sindex
+        possible_matches_index = list(sindex.intersection(fid_buffer.bounds))
+        for idx in possible_matches_index:
+            source_linkno = source_gdf.iloc[idx][source_id_col]
+            if source_linkno not in A_reach_sig:
+                continue
 
-                if linkno_to_fid[best_linkno]:
-                    S = GB.subgraph(linkno_to_fid[best_linkno] | {fid})
-                    if not nx.is_weakly_connected(S):
-                        continue
+            source_buffer = A_reach_sig[source_linkno].buffer_geom
+            intersection_area = fid_buffer.intersection(source_buffer).area
+            score = intersection_area
+            if score > best_score:
+                best_score = score
+                best_linkno = source_linkno
 
-                    # Ensure in and out degree all <= 1
-                    if any(S.in_degree(n) > 1 or S.out_degree(n) > 1 for n in S.nodes):
-                        continue
+        if best_linkno is None:
+            continue
 
-                final_matches[fid] = best_linkno
-                linkno_to_fid[best_linkno].add(fid)
+        # Ensure that this linkno is either upstream of the same linkno of the linkno of the first matched descenant fid
+        descendant_fid = next(GB.successors(fid))
+        while descendant_fid not in final_matches:
+            descendant_fid = next(GB.successors(descendant_fid))
+        descendant_linkno = final_matches[descendant_fid]
+        if not (best_linkno in A_reach_sig[descendant_linkno].ancestors or best_linkno == descendant_linkno):
+            continue
 
-    # Finally assign to the gdf
+        if linkno_to_fid[best_linkno]:
+            S = GB.subgraph(linkno_to_fid[best_linkno] | {fid})
+            if not nx.is_weakly_connected(S):
+                continue
+
+            # Ensure in and out degree all <= 1
+            if any(S.in_degree(n) > 1 or S.out_degree(n) > 1 for n in S.nodes):
+                continue
+
+        final_matches[fid] = best_linkno
+        linkno_to_fid[best_linkno].add(fid)
+
+def update_wtbx_gdf(
+    wtbx_gdf: gpd.GeoDataFrame,
+    final_matches: dict[int, int],
+    source_id_col: str,
+    source_ds_col: str,
+    dem_bbox: tuple[float, float, float, float],
+    buffer_distance: float,
+    GB: nx.DiGraph,
+    source_gdf: gpd.GeoDataFrame,
+    strm_order_col: str,
+    dem_proj: str
+
+):
+     # Finally assign to the gdf
     wtbx_gdf[source_id_col] = wtbx_gdf['FID'].map(lambda x: final_matches.get(x, np.nan))
     wtbx_gdf = wtbx_gdf[wtbx_gdf[source_id_col].notna()].copy()
 
@@ -1574,6 +1533,161 @@ def _conflate_streams(
     wtbx_gdf = wtbx_gdf[cols]
     wtbx_gdf = wtbx_gdf[wtbx_gdf['geometry'].geom_type == 'LineString'].copy()
     wtbx_gdf = wtbx_gdf.set_crs(dem_proj) # Do this again, sometimes it is erased
+    
+    return wtbx_gdf
+
+def _conflate_streams(
+    source_gdf: gpd.GeoDataFrame,
+    streams_vector: os.PathLike,
+    lakes_gdf: gpd.GeoDataFrame | None,
+    buffer_distance: float,
+    dem_proj: str,
+    dem_bbox: tuple[float, float, float, float],
+    source_id_col: str = "LINKNO",
+    source_ds_col: str = "DSLINKNO",
+    wtbx_id_col: str = "FID",
+    wtbx_ds_col: str = "DS_LINK_ID",
+    strm_order_col: str = "strmOrder",
+) -> gpd.GeoDataFrame:
+    """
+    Read files, build graphs, match the stream networks, and return the mapping state.
+    """
+    wtbx_vector = Vector(streams_vector)
+    wtbx_gdf = wtbx_vector.to_geopandas().set_crs(dem_proj)
+    if wtbx_gdf.empty:
+        return wtbx_gdf
+    
+    bounds = wtbx_vector.epsg_4326_bbox
+
+    # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
+    source_gdf = source_gdf[source_gdf.intersects(box(*bounds))].copy()
+    source_gdf = source_gdf.to_crs(dem_proj)
+    if strm_order_col not in source_gdf.columns:
+        raise ValueError(f"Source GeoDataFrame must have a '{strm_order_col}' column.")
+    min_strm_order = source_gdf[strm_order_col].min()
+
+    wtbx_gdf = split_network_at_confluences(wtbx_gdf, source_gdf, buffer_distance, wtbx_id_col, wtbx_ds_col)
+
+    # Ok, so the filled DEM removes any endorheic basins, but the source gdf has them
+    # We need to detect this first and cut any wtbx ids that connect an outlet of an endorheic basin to a headwater in the source gdf
+    # We can do this by first building our own graphs, finding all wtbx outlets, and the checking if any are not close to a source outlet
+    wtbx_gdf = enforce_endorheic_basins(source_gdf, wtbx_gdf, source_id_col, source_ds_col, wtbx_id_col, wtbx_ds_col)
+
+    if lakes_gdf is not None and not lakes_gdf.empty:
+        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
+        # Any ds link ids not in the network are set to -1
+        existing_ids = set(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] > 0, wtbx_id_col])
+        wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].apply(lambda x: x if x in existing_ids else -1)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
+        wtbx_gdf['buffered'] = wtbx_gdf.buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
+        source_gdf['buffered'] = source_gdf.simplify(tolerance=1e-5, preserve_topology=False).buffer(buffer_distance, resolution=1, cap_style='square', join_style='mitre')
+
+    source_gdf['buffered'] = source_gdf["buffered"].make_valid()
+
+    GA, GB = build_graphs(source_gdf, wtbx_gdf, min_strm_order, source_id_col, source_ds_col, wtbx_id_col, wtbx_ds_col)
+
+    # Use a projected CRS for distance/length calculations
+    wtbx_gdf[source_id_col] = np.nan
+
+    A_reach_sig = compute_reach_signatures(GA)
+    B_reach_sig = compute_reach_signatures(GB)
+
+    # Get outlets of source graph
+    source_headwaters = {n for n, sig in A_reach_sig.items() if sig.kind.is_source()}
+    wtbx_headwaters = {n for n, sig in B_reach_sig.items() if sig.kind.is_source()}
+    non_source_headwaters = set(GA.nodes()) - source_headwaters
+
+    # Match headwaters
+    best_source_scores = {}
+    scores = {}
+    match_to_source_headwaters(
+        best_source_scores,
+        scores,
+        source_headwaters,
+        wtbx_headwaters,
+        A_reach_sig,
+        B_reach_sig,
+        wtbx_gdf,
+        wtbx_id_col,
+        min_strm_order,
+        GB
+    )
+
+    match_others_to_source_headwaters(
+        best_source_scores,
+        scores,
+        source_gdf,
+        A_reach_sig,
+        B_reach_sig,
+        non_source_headwaters,
+        source_id_col,
+        GA
+    )
+
+    match_wtbx_headwaters(
+        best_source_scores,
+        scores,
+        source_gdf,
+        A_reach_sig,
+        B_reach_sig,
+        non_source_headwaters,
+        wtbx_headwaters,
+        source_id_col,
+        GB,
+        min_strm_order
+    )
+
+    headwater_fids, best_outlet_linkno_to_fid, headwater_fid_to_linkno = find_outlets_of_headwaters(
+        best_source_scores,
+        A_reach_sig,
+        B_reach_sig,
+        GA,
+        GB
+    )
+
+    pairs = list((fid, linkno) for linkno, fid in best_outlet_linkno_to_fid.items()) + list(best_source_scores.values())
+    final_matches = {}
+    linkno_to_fid = defaultdict(set)
+    for fid, linkno in pairs:
+        final_matches[fid] = linkno
+        linkno_to_fid[linkno].add(fid)
+
+    fill_in_paths_between_headwaters_and_outlets(
+        best_outlet_linkno_to_fid,
+        headwater_fids,
+        headwater_fid_to_linkno,
+        A_reach_sig,
+        B_reach_sig,
+        GA,
+        GB,
+        final_matches,
+        linkno_to_fid
+    )
+
+    fill_in_missing_branches(
+        final_matches,
+        linkno_to_fid,
+        A_reach_sig,
+        B_reach_sig,
+        GB,
+        source_gdf,
+        source_id_col
+    )
+
+    wtbx_gdf = update_wtbx_gdf(
+        wtbx_gdf,
+        final_matches,
+        source_id_col,
+        source_ds_col,
+        dem_bbox,
+        buffer_distance,
+        GB,
+        source_gdf,
+        strm_order_col,
+        dem_proj
+    )
 
     return wtbx_gdf
 
@@ -1619,6 +1733,7 @@ def nearest_stream_cell(streams_array: np.ndarray, dem: np.ndarray, no_data_valu
     return int(rows[nearest]), int(cols[nearest])
 
 def _create_stream_info_table(
+        stream_info_file: str,
         streams_array: np.ndarray, 
         streams_gdf: gpd.GeoDataFrame,
         dem_file: str,
@@ -1640,10 +1755,11 @@ def _create_stream_info_table(
     values, counts = np.unique(streams_array, return_counts=True)
     linkno_counts = dict(zip(values, counts))
 
+    streams_gdf = streams_gdf.set_index(source_id_col)
+
     output_table = []
-    for idx, row in streams_gdf.iterrows():
+    for linkno, row in streams_gdf.iterrows():
         line: LineString = row.geometry
-        linkno = row[source_id_col]
 
         # Get the pixel coordinates of the start and end points
         start_point = Point(line.coords[0])
@@ -1681,13 +1797,13 @@ def _create_stream_info_table(
         if upstream_nodes:          
             # Check if the first point is an endpoint in the upstream node. If not, then the first point is downstream and we need to reverse the line.
             upstream_node = upstream_nodes[0]
-            upstream_geom = streams_gdf.loc[streams_gdf[source_id_col] == upstream_node, 'geometry'].values[0]
+            upstream_geom = streams_gdf.at[upstream_node, 'geometry']
             if not start_point.touches(upstream_geom):
                 start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
         elif downstream_nodes and any(G.successors(downstream_nodes[0])):  # Only check downstream if the downstream node has a successor (i.e., it is not an outlet)
             # Check if the last point is an endpoint in the downstream node. If not, then the last point is upstream and we need to reverse the line.
             downstream_node = downstream_nodes[0]
-            downstream_geom = streams_gdf.loc[streams_gdf[source_id_col] == downstream_node, 'geometry'].values[0]
+            downstream_geom = streams_gdf.at[downstream_node, 'geometry']
             if not end_point.touches(downstream_geom):
                 start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
         else:
@@ -1712,7 +1828,8 @@ def _create_stream_info_table(
 
     stream_info = pd.DataFrame(output_table, 
                  columns=['start_pixel', 'end_pixel', 'length', 'stream_id'])
-    return stream_info
+    stream_info.to_parquet(stream_info_file, index=False)
+
 
 def make_channel_mask(channel_mask: np.ndarray, dem: str, water_mask: str):
     dem_ds: gdal.Dataset = gdal.Open(dem)
