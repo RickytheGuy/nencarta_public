@@ -150,6 +150,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     )
 
     buffer_distance = derive_hydrography_using_whitebox(workspace, dem_raster, fixed_dem)
+    # buffer_distance = (50/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 50 m buffer distance in DEM units
 
     streams_gdf = _conflate_streams(
         source_gdf=source_gdf, 
@@ -213,7 +214,7 @@ def smooth_and_burn_dem(
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
 
-    dem[dem < 1000] = nodata_value # Remove any DEM values that are less than 1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
+    dem[dem < -1000] = nodata_value # Remove any DEM values that are less than -1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
@@ -840,11 +841,6 @@ def split_network_at_confluences(
     geom_col_index = wtbx_gdf.columns.to_list().index('geometry')
     ds_col_index = wtbx_gdf.columns.to_list().index(wtbx_ds_col)
 
-    # upstream_map = defaultdict(list)
-
-    # for fid, ds in zip(wtbx_gdf[wtbx_id_col], wtbx_gdf[wtbx_ds_col]):
-    #     upstream_map[ds].append(fid)
-
     for confluence_point in confluence_points:
         candidate_idx = wtbx_gdf.sindex.query(
             confluence_point,
@@ -863,28 +859,17 @@ def split_network_at_confluences(
 
         d = wtbx_river.project(confluence_point)
 
+        # This is the correct order, since whitebox always makes streamlines from upstream to downstream, so the first part of the split is always upstream and the second part is always downstream.
         new_upstream = substring(wtbx_river, 0, d)
         new_downstream = substring(wtbx_river, d, wtbx_river.length)
+
 
         # Let's not split if it makes a super tiny river segment.
         if min(new_upstream.length, new_downstream.length) < buffer_distance:
             continue
 
-        # current_fid = row[wtbx_id_col]
-        # downstream_fid = row[wtbx_ds_col]
         max_fid += 1
         new_fid = max_fid
-        # upstream_fids = upstream_map[current_fid]
-
-        # Find which segment is upstream and downstream based on which geometry touches    
-        # if downstream_fid > -1:
-        #     if new_upstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == downstream_fid].geometry.values[0]):
-        #         # new_upstream is the downstream segment
-        #         new_upstream, new_downstream = new_downstream, new_upstream
-        # elif upstream_fids:
-        #     if new_downstream.touches(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == upstream_fids[0]].geometry.values[0]):
-        #         # new_downstream is the upstream segment
-        #         new_upstream, new_downstream = new_downstream, new_upstream
 
         # Create a new row for the downstream segment
         new_row = row.copy()
@@ -906,6 +891,7 @@ def enforce_endorheic_basins(
 ):
     GA: nx.DiGraph = nx.from_pandas_edgelist(source_gdf[source_gdf[source_ds_col] > 0], source=source_id_col, target=source_ds_col, create_using=nx.DiGraph())
     GB: nx.DiGraph = nx.from_pandas_edgelist(wtbx_gdf[wtbx_gdf[wtbx_ds_col] > 0], source=wtbx_id_col, target=wtbx_ds_col, create_using=nx.DiGraph())
+    GB.add_nodes_from(wtbx_gdf[wtbx_id_col])
 
     wtbx_outlets = {n for n in GB.nodes() if GB.out_degree(n) == 0}
     source_outlets = {n for n in GA.nodes() if GA.out_degree(n) == 0 or (GA.out_degree(n) == 1 and max(GA.in_degree(d) for d in nx.descendants(GA, n)) <= 1)} # Allow matching to upstream of outlet that are on single line
@@ -916,6 +902,13 @@ def enforce_endorheic_basins(
         wtbx_outlet_geom = wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] == wtbx_outlet, 'geometry'].values[0]
         possible_matches_index = list(source_gdf.sindex.intersection(wtbx_outlet_geom.bounds))
         candidates = source_gdf.iloc[possible_matches_index]
+        # Add to the candidates, up to 3 downstream of the candidate nodes, since sometimes the wtbx outlet is upstream of the source outlet, but the source outlet is not in the AOI. So we need to look downstream only a little to find a match
+        for _ in range(3):
+            next_candidates = source_gdf[source_gdf[source_id_col].isin(candidates[source_ds_col].tolist())]
+            if next_candidates.empty:
+                break
+            candidates = pd.concat([candidates, next_candidates], ignore_index=True)
+        candidates = candidates.drop_duplicates(subset=[source_id_col])
         candidates = candidates[candidates[source_id_col].isin(source_outlets)]  # Only consider source outlets
         if not candidates.empty:
             continue
@@ -1022,6 +1015,8 @@ def match_to_source_headwaters(
     wtbx_potential_headwaters -= wtbx_headwaters
 
     for source_headwater in source_headwaters:
+        if source_headwater == 750080848:
+            pass
         best_score = 0
         best_wtbx = None
         # source_centroid = A_reach_sig[source_headwater].centroid
@@ -1029,6 +1024,27 @@ def match_to_source_headwaters(
 
         nearest_wtbx_headwaters = wtbx_gdf.iloc[wtbx_gdf.sindex.query(source_buffer, predicate="intersects", sort=True)][wtbx_id_col]
         nearest_wtbx_headwaters = nearest_wtbx_headwaters[nearest_wtbx_headwaters.isin(wtbx_headwaters)].tolist()
+
+        # if not nearest_wtbx_headwaters:
+        #     nearest_wtbx_headwaters = sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(A_reach_sig[source_headwater].centroid))[:5]
+
+        # Plot the source, and the wtbx headwaters, and the buffers, for debugging
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(10, 10))
+        # source_geom = A_reach_sig[source_headwater].geom
+        # plt.plot(*source_geom.xy, color='blue', label='Source Headwater')
+        # plt.plot(*source_buffer.exterior.xy, color='blue', linestyle='--', label='Source Buffer')
+        # for wtbx_outlet in nearest_wtbx_headwaters:
+        #     wtbx_geom = B_reach_sig[wtbx_outlet].geom
+        #     wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
+        #     plt.plot(*wtbx_geom.xy, color='red', label='WTBX Headwater')
+        #     plt.plot(*wtbx_buffer.exterior.xy, color='red', linestyle='--', label='WTBX Buffer')
+
+        # plt.legend()
+        # plt.title(f"Source Headwater {source_headwater} and Nearest WTBX Headwaters")
+        # plt.xlabel("Longitude")
+        # plt.ylabel("Latitude")
+        # plt.show()
 
         # for wtbx_outlet in sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
         for wtbx_outlet in nearest_wtbx_headwaters:
@@ -1526,6 +1542,12 @@ def update_wtbx_gdf(
     source_id_to_strm_order = source_gdf.set_index(source_id_col)[strm_order_col].to_dict()
     wtbx_gdf[strm_order_col] = wtbx_gdf[source_id_col].map(source_id_to_strm_order)
 
+    # Map all other columns from the source_gdf to the wtbx_gdf based on the LINKNO
+    source_columns = [col for col in source_gdf.columns if col not in [source_id_col, source_ds_col, strm_order_col, 'geometry', 'buffered']]
+    for col in source_columns:
+        source_col_mapping = source_gdf.set_index(source_id_col)[col].to_dict()
+        wtbx_gdf[col] = wtbx_gdf[source_id_col].map(source_col_mapping)
+
     # Move linkno to the front
     cols = wtbx_gdf.columns.tolist()
     cols.insert(0, cols.pop(cols.index(source_id_col)))
@@ -1565,6 +1587,10 @@ def _conflate_streams(
     if strm_order_col not in source_gdf.columns:
         raise ValueError(f"Source GeoDataFrame must have a '{strm_order_col}' column.")
     min_strm_order = source_gdf[strm_order_col].min()
+
+    # Because we are clipped, let us set any dslinkno in the source that isn't in the source to -1, since it is outside the AOI
+    valid_linknos = set(source_gdf[source_id_col]) | {-1}
+    source_gdf[source_ds_col] = source_gdf[source_ds_col].apply(lambda x: x if x in valid_linknos else -1)
 
     wtbx_gdf = split_network_at_confluences(wtbx_gdf, source_gdf, buffer_distance, wtbx_id_col, wtbx_ds_col)
 

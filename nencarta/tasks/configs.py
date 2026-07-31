@@ -185,6 +185,11 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
     params["reach_id"] = configs.stream_id_field
     params["downstream_reach_id"] = configs.downstream_id_field
+    params["drainage_area_field"] = "DSContArea"
+    params["coefficient_depth"] = 0.27
+    params["exponent_depth"] = 0.21
+    params["coefficient_width"] = 2.44
+    params["exponent_width"] = 0.34
 
     if not configs.disable_bathymetry:
         params["#Mapper Input Data"] = ""

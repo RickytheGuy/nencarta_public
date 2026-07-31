@@ -55,7 +55,7 @@ def run_mapper_floodmaps(model_config: ModelConfig, workspace: Workspace) -> Flo
     for config in model_config.mapper_configs:
         if model_config.vdt_exists and not _mapper_has_required_outputs(config, workspace):
             _run_mapper(config, model_config)
-
+    print(f'finished: {workspace.watershed}')
     return FloodMapperBulkOutput(model_config.mapper_configs)
 
 def run_arc_for_initial_floodmap(config: Path, configs: NencartaConfig) -> Path:
@@ -84,8 +84,15 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         (workspace.fldpln_library.exists() and not workspace.configs.process_stream_network):
         return model_config
     
-    if (not workspace.DEM_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()) and not workspace.configs.raise_errors_if_nothing_in_domain:
-        return model_config
+    if (not workspace.DEM_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()):
+        if not workspace.configs.raise_errors_if_nothing_in_domain:
+            return model_config
+        if not workspace.DEM_StrmShp.exists():
+            raise FileNotFoundError(f"Stream shapefile not found at {workspace.DEM_StrmShp}. Cannot build FLDPLN library.")
+        if not workspace.stream_info_file.exists():
+            raise FileNotFoundError(f"Stream info file not found at {workspace.stream_info_file}. Cannot build FLDPLN library.")
+        if not workspace.VDT_File_Bathy.exists():
+            raise FileNotFoundError(f"VDT file not found at {workspace.VDT_File_Bathy}. Cannot build FLDPLN library.")
     
     if workspace.fldpln_library.exists():
         workspace.fldpln_library.unlink()
