@@ -54,19 +54,23 @@ def _arc_inputs(dem: Path,
     return params
 
 def _fldpln_inputs(workspace: Workspace):
-    return {
+    output = {
         "# FLDPLN_Inputs": "",
         "Flow_Direction_File": workspace.flowdir,
         "Filled_DEM_File": workspace.filled_dem,
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
         "max_wse_rise": workspace.configs.fldpln_max_wse_rise,
-        "FLDPLN_Median_Filter_Size": workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"),
-        "FLDPLN_Missing_FSP_Interpolation": workspace.configs.floodmap_args.get("FLDPLN_Missing_FSP_Interpolation"),
-        "FLDPLN_DoF_Signal": workspace.configs.floodmap_args.get("FLDPLN_DoF_Signal"),
-        "FLDPLN_Threshold_Mode": workspace.configs.floodmap_args.get("FLDPLN_Threshold_Mode"),
-        "": "",
     }
+    if workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"):
+        output.update({
+            "FLDPLN_Median_Filter_Size": workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"),
+            "FLDPLN_Missing_FSP_Interpolation": workspace.configs.floodmap_args.get("FLDPLN_Missing_FSP_Interpolation"),
+            "FLDPLN_DoF_Signal": workspace.configs.floodmap_args.get("FLDPLN_DoF_Signal"),
+            "FLDPLN_Threshold_Mode": workspace.configs.floodmap_args.get("FLDPLN_Threshold_Mode"),
+            "": "",
+        })
+    return output
 
 def _write_config(config_path: Path, params: dict):
     config_path.parent.mkdir(parents=True, exist_ok=True)

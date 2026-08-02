@@ -29,9 +29,6 @@ from nencarta.workspace import Workspace
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from curve2flood import remove_cells_not_connected
 
-wbt = WhiteboxTools()
-wbt.set_compress_rasters(True)
-
 def load_lakes(workspace: Workspace, dem_raster: Raster) -> tuple[np.ndarray, gpd.GeoDataFrame] | None:
     """
     We load the lakes in the DEM's domain. We do not want to include lakes/reservoirs.
@@ -61,6 +58,11 @@ def load_lakes(workspace: Workspace, dem_raster: Raster) -> tuple[np.ndarray, gp
     return lakes, lakes_gdf
 
 def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray) -> float:
+    wbt = WhiteboxTools()
+    wbt.set_compress_rasters(True)
+    wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
+
+
     wbt.fill_depressions(str(workspace.fixed_dem), str(workspace.filled_dem))
     if not workspace.filled_dem.exists():
         raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
@@ -131,9 +133,7 @@ def make_fldpln_inputs(workspace: Workspace) -> Path:
     
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return None
-    
-    wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
-    
+        
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
