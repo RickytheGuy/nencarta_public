@@ -79,7 +79,7 @@ def _write_config(config_path: Path, params: dict):
             stream = io.StringIO()
             # Convert all Paths in params to strings for YAML serialization
             params_serializable = {key: (str(value) if isinstance(value, (Path, Mapper)) else value) for key, value in params.items()}
-            yaml.dump(params_serializable, stream, encoding='utf-8', sort_keys=False)
+            yaml.dump(params_serializable, stream, encoding='utf-8', sort_keys=False, Dumper=yaml.CDumper) # Use CDumper for faster dumping
             # if a line startwith "'#", then strip the quotation and make it a comment
             content = stream.getvalue()
             content = '\n'.join(line if not line.startswith("'#") else f"# {line[2:].split(':')[0][:-1]}" for line in content.split('\n'))
@@ -192,6 +192,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     # params["XS_Out_File"] = workspace.VDT_Folder / f"{workspace.FileName}_XS.csv"
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
     params["reach_id"] = configs.stream_id_field
+    params["downstream_reach_id"] = configs.downstream_id_field
     params["downstream_reach_id"] = configs.downstream_id_field
     params["drainage_area_field"] = "DSContArea"
     params["coefficient_depth"] = 0.27
