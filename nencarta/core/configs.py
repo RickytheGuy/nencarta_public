@@ -84,11 +84,11 @@ class NencartaConfig:
     def validate_specified_depths(self):
         """Validate bathymetry mask depth count for cleaner and non-cleaner runs."""
         if self.use_specified_depth_for_bathy_mask:
-            if not self.specify_depths_for_bathy_mask or not isinstance(self.specify_depths_for_bathy_mask, list) or len(self.specify_depths_for_bathy_mask) not in [1, 2]:
+            if not self.specify_depths_for_bathy_mask or not isinstance(self.specify_depths_for_bathy_mask, list) or len(self.specify_depths_for_bathy_mask) not in {1, 2}:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of 1-2 floats when 'use_specified_depth_for_bathy_mask' is True.")
-            elif len(self.specify_depths_for_bathy_mask) < 2 and self.clean_dem:
+            elif len(self.specify_depths_for_bathy_mask) != 2 and self.clean_dem:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of two floats when 'clean_dem' is True.")
-            elif len(self.specify_depths_for_bathy_mask) > 1 and not self.clean_dem:
+            elif len(self.specify_depths_for_bathy_mask) != 1 and not self.clean_dem:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of one float when 'clean_dem' is False.")
 
     def validate_forecast_date(self):
@@ -212,17 +212,15 @@ class NencartaConfig:
         if not self.dem_filter:
             self.dem_filter = "*"
 
-        self.move_stream_network_to_new_locations: bool = self.get("move_stream_network_to_new_locations", False)
+        self.move_stream_network_to_thalweg: bool = self.get("move_stream_network_to_thalweg", False)
         self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2", 5))  # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
-        if self.move_stream_network_to_new_locations and self.stream_order_threshold is None:
+        if self.move_stream_network_to_thalweg and self.stream_order_threshold is None:
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'new_strm_threshold_km2' must be specified when moving stream network.")
 
         self.mapper: Mapper = Mapper.from_string(self.get('mapper'))
         
-        if self.mapper.is_curve2flood_fldpln_mapper():
-            if not self.move_stream_network_to_new_locations:
-                LOG.warning(f"Move stream network was set to false, but the mapper is set to Curve2Flood-FLDPLNpy. Overriding move_stream_network_to_new_locations to True for watershed '{self.get('name', 'unknown')}'.")
-                self.move_stream_network_to_new_locations = True
+        if self.mapper.is_curve2flood_fldpln_mapper() and not self.move_stream_network_to_thalweg:
+            LOG.warning(f"Move stream network was set to false, but the mapper is set to Curve2Flood-FLDPLNpy. Ensure that the input stream network is properly aligned with the DEM.")
         
         self.streams_as_parquet: bool = self.get("streams_as_parquet", False)
         if self.streams_as_parquet and self.mapper.is_curve2flood_fldpln_mapper():
@@ -262,8 +260,10 @@ class NencartaConfig:
         self.overwrite_floodmaps: bool = self.get("overwrite_floodmaps", True)
         self.remove_old_forecast_files: bool = self.get("remove_old_forecast_files", False)
         self.make_fist_inputs: bool = self.get("make_fist_inputs", True)
+        self.make_vdt: bool = self.get("make_vdt", True)
         self.make_curvefile: bool = self.get("make_curvefile", True)
         self.make_ap_database: bool = self.get("make_ap_database", True)
+        self.make_cross_section_file: bool = self.get("make_cross_section_file", False)
         self.vdt_file_extension: str = self.get("vdt_file_extension", 'txt')
         self.mannings_text_file: str = self.get("mannings_text_file")
         self.bathy_args: dict = self.get("bathy_args", {})
@@ -297,6 +297,10 @@ class NencartaConfig:
         self.fldpln_parallel: bool = self.get("fldpln_parallel", False)
         self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise", 0.01)
         self.project_to_utm: bool = self.get("project_to_utm", False)
+        self.burn_streams: bool = self.get("burn_streams", False)
+        self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry", False)
+        self.area_m2_field: str = self.get("area_m2_field", "DSContArea")
+        self.area_km2_field: str = self.get("area_km2_field", "DSContArea_km2")
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

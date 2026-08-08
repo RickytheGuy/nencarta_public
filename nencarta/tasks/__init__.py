@@ -2,7 +2,7 @@ from .assign_dem import assign_and_validate_dem
 from .create_mannings_n import Create_BaseLine_Manning_n_File_ESA
 from .make_land_cover import make_land_cover
 from .make_stream_geometry import make_stream_geometry
-from .make_fldpln_inputs import make_fldpln_inputs
+from .move_streams import burn_streams_and_move_streams
 from .make_reanalysis_flowfile import make_reanalysis_file
 from .make_stream_raster import make_stream_raster
 from .make_flow_file_from_reanalysis import make_flood_flow_file_from_base_max_file

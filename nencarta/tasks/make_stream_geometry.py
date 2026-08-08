@@ -8,7 +8,6 @@ from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 
 def _filter_streams_with_lake_json(lake_filter_json: str, stream_df: gpd.GeoDataFrame, rivid_field: str) -> gpd.GeoDataFrame:
     # First let's remove the stream reaches that are in the stream_ids_in_lake_list
@@ -94,8 +93,18 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         kwargs['compression'] = 'brotli'
         kwargs['write_covering_bbox'] = True
 
-    workspace.DEM_StrmShp.parent.mkdir(parents=True, exist_ok=True)
+    if configs.use_power_laws_for_bathymetry:
+        if configs.area_km2_field not in gdf.columns:
+            if configs.area_m2_field not in gdf.columns:
+                raise ValueError(f"Area field '{configs.area_m2_field}' not found in stream geometry; cannot use power laws for bathymetry.")
 
+            gdf[configs.area_km2_field] = gdf[configs.area_m2_field] * 1e-6
+
+    existing_river_ids = set(gdf[configs.stream_id_field])
+    # Set the downstream id to -1 for any river that has a downstream id that is not in the existing river ids
+    gdf.loc[~gdf[configs.downstream_id_field].isin(existing_river_ids), configs.downstream_id_field] = -1
+
+    workspace.DEM_StrmShp.parent.mkdir(parents=True, exist_ok=True)
     Vector.save_any_geom(gdf, workspace.DEM_StrmShp, **kwargs)
 
     return workspace.DEM_StrmShp

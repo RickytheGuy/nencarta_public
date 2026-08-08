@@ -6,7 +6,6 @@ import yaml
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 
 def _arc_inputs(dem: Path,
                 stream_raster: Path,
@@ -145,6 +144,7 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     params["FS_ADJUST_FLOW_BY_FRACTION"] = 1.0
     params["Bathy_Use_Banks"] = configs.bathy_use_banks
     if configs.flood_waterlc_and_strm_cells:
+        params["Flood_WaterLC_and_STRM_Cells"] = True
         params["LAND_WaterValue"] = configs.land_watervalue
     if configs.find_banks_based_on_landcover:
         params["FindBanksBasedOnLandCover"] = True
@@ -168,9 +168,24 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         LOG.info(f"Domain {workspace.watershed} has required ARC outputs and bathymetry is disabled, skipping ARC.")
         return workspace.ARC_FileName_Bathy
 
+    if configs.burn_streams:
+        dem = workspace.fixed_dem
+    elif configs.clean_dem:
+        dem = workspace.DEM_File_Clean
+    else:
+        dem = workspace.assigned_dem
+
+    if configs.move_stream_network_to_thalweg:
+        stream_raster = workspace.new_stream_raster
+        stream_vector = workspace.new_StrmShp_matched
+    else: 
+        stream_raster = workspace.STRM_File_Clean
+        stream_vector = workspace.DEM_StrmShp
+
+
     params = _arc_inputs(
-        dem=workspace.assigned_dem,
-        stream_raster=workspace.STRM_File_Clean,
+        dem=dem,
+        stream_raster=stream_raster,
         land_cover=workspace.LAND_File,
         mannings_n_file=workspace.mannings_n_text_file,
         reanalysis_flow_file=workspace.DEM_Reanalsyis_FlowFile,
@@ -181,29 +196,33 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         include_baseflow=not configs.disable_bathymetry,
     )
     
-    params["#VDT_Output_File_and_CurveFile"] = ""
+    params["# VDT_Output_File_and_CurveFile"] = ""
     params["VDT_Database_NumIterations"] = configs.bathy_args.get("VDT_Database_NumIterations", 30)
-    params["Print_VDT_Database"] = workspace.VDT_File_Bathy
+    if configs.make_vdt:
+        params["Print_VDT_Database"] = workspace.VDT_File_Bathy
     if configs.make_curvefile:
         params["Print_Curve_File"] = workspace.Curve_File_Bathy
     if configs.make_ap_database:
         params["Print_AP_Database"] = workspace.AP_File
-        # TODO
-    # params["XS_Out_File"] = workspace.VDT_Folder / f"{workspace.FileName}_XS.csv"
+    if configs.make_cross_section_file:
+        params["XS_Out_File"] = workspace.Cross_Section_File
+
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
-    params["reach_id"] = configs.stream_id_field
-    params["downstream_reach_id"] = configs.downstream_id_field
-    params["downstream_reach_id"] = configs.downstream_id_field
-    params["drainage_area_field"] = "DSContArea"
-    params["coefficient_depth"] = 0.27
-    params["exponent_depth"] = 0.21
-    params["coefficient_width"] = 2.44
-    params["exponent_width"] = 0.34
-    params["StrmShp_File"] = workspace.DEM_StrmShp
 
     if not configs.disable_bathymetry:
-        params["#Mapper Input Data"] = ""
+        params["StrmShp_File"] = stream_vector
+        params["reach_id"] = configs.stream_id_field
+        params["downstream_reach_id"] = configs.downstream_id_field
+        if configs.use_power_laws_for_bathymetry:
+            params["drainage_area_field"] = configs.area_km2_field
+            params["coefficient_depth"] = 0.27
+            params["exponent_depth"] = 0.21
+            params["coefficient_width"] = 2.44
+            params["exponent_width"] = 0.34
+
+        params["# Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File
+        # Use kernel method for bathymetry creation
         params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
         params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.bathy_args.get("FS_ADJUST_FLOW_BY_FRACTION", 1.0)
         params["TopWidthDistanceFactor"] = configs.bathy_args.get("TopWidthDistanceFactor", 1.5)
@@ -219,7 +238,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
                 raise ValueError("Bathy water mask is required when not using specified depth for bathy mask.")
             params["BathyWaterMask"] = workspace.bathy_water_mask
 
-        params["#Bathymetry_Information"] = ""
+        params["# Bathymetry_Information"] = ""
         params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", 0.2)
         params["Bathy_Use_Banks"] = configs.bathy_use_banks
 
@@ -245,20 +264,25 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     configs = workspace.configs
     params = {'#ARC_Inputs': ''}
     if configs.disable_bathymetry:
-        params["DEM_File"] = workspace.assigned_dem
+        if configs.burn_streams:
+            params["DEM_File"] = workspace.fixed_dem
+        elif configs.clean_dem:
+            params["DEM_File"] = workspace.DEM_File_Clean
+        else:
+            params["DEM_File"] = workspace.assigned_dem
     else:
         params["DEM_File"] = workspace.FS_BathyFile
-    params["Stream_File"] = workspace.STRM_File_Clean
+    params["Stream_File"] = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
     params["LU_Manning_n"] = workspace.mannings_n_text_file
 
-    params["#VDT_Output_File_and_CurveFile"] = ""
+    params["# VDT_Output_File_and_CurveFile"] = ""
     
     params["Print_VDT_Database"] = workspace.VDT_File_Bathy
     if configs.make_curvefile:
         params["Print_Curve_File"] = workspace.Curve_File_Bathy
     
-    params["#Mapper Input Data"] = ""
-    params["StrmShp_File"] = workspace.DEM_StrmShp
+    params["# Mapper Input Data"] = ""
+    params["StrmShp_File"] = workspace.new_StrmShp_matched if configs.move_stream_network_to_thalweg else workspace.DEM_StrmShp
     params["Comid_Flow_File"] = flow_file
     params["mapper"] = configs.mapper
     if configs.mapper.is_curve2flood_fldpln_mapper():
@@ -266,13 +290,11 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.floodmap_args.get("FS_ADJUST_FLOW_BY_FRACTION", 1.0)
     params["TW_MultFact"] = configs.floodmap_args.get("TW_MultFact", 1.5)
     params["TopWidthPlausibleLimit"] = configs.floodmap_args.get("TopWidthPlausibleLimit", 6000)
-    params["percentile"] = configs.floodmap_args.get("percentile", 0.5)
 
-    if configs.flood_waterlc_and_strm_cells or configs.make_velocity_maps or True: # TODO
+    if configs.flood_waterlc_and_strm_cells or configs.make_velocity_maps:
         params["Flood_WaterLC_and_STRM_Cells"] = configs.flood_waterlc_and_strm_cells
         params["LU_Raster_SameRes"] = workspace.LAND_File
         params["LAND_WaterValue"] = configs.land_watervalue
-
 
     if configs.floodmap_mode == FloodMapMode.FORECAST:
         if configs.streamflow_source.is_nwm():

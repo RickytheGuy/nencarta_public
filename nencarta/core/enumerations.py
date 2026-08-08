@@ -91,12 +91,9 @@ class Mapper(NencartaEnum):
         
         return super().from_string_exact_case(value)
     
-    def is_curve2flood_mapper(self) -> bool:
-        return self in {
-            self.CURVE2FLOOD_KERNEL_WEIGHTED,
-            self.CURVE2FLOOD_FLDPLNPY,
-            self.CURVE2FLOOD_MULTI_POINT_INTERPOLATION,
-        }
+    @classmethod
+    def list_names(cls):
+        return [m.value for m in cls]
     
     def is_curve2flood_fldpln_mapper(self) -> bool:
         return self == self.CURVE2FLOOD_FLDPLNPY

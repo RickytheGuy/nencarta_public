@@ -6,7 +6,7 @@ import logging
 import traceback
 
 # third-party imports
-import json          # <-- add this
+import json
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLineEdit, QLabel, QPushButton, QCheckBox, QComboBox,
@@ -18,9 +18,9 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon
 
 # local imports
-from . import main as flood_main
-from .processing_tracker import Timer
-from .logger import LOG
+from nencarta.logger import LOG
+from nencarta.main import process_json_input_serial
+from nencarta.core.enumerations import Mapper
 
 FLOW_FIELD_OPTIONS = (
     [f"p_exceed_{i}" for i in [0] + list(range(5, 101, 5))]
@@ -97,7 +97,7 @@ class QtLogHandler(logging.Handler):
 
 class WorkerThread(QThread):
     """Worker thread to run main.py via its JSON interface without blocking the GUI."""
-    finished_signal = pyqtSignal(str, Timer)
+    finished_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
 
@@ -227,12 +227,9 @@ class WorkerThread(QThread):
 
             # 3) Direct call instead of subprocess
             LOG.info("Running main.process_json_input_serial() ...")
-            result = flood_main.process_json_input_serial(json_file)
+            result = process_json_input_serial(json_file)
 
-            if isinstance(result, Timer):
-                self.finished_signal.emit(watershed_dict['name'], result)
-            else:
-                self.finished_signal.emit((watershed_dict['name'], None))
+            self.finished_signal.emit((watershed_dict['name'], None))
 
         except Exception as e:
             context = "Error running simulation"
@@ -495,8 +492,8 @@ class FloodSimulationGUI(QMainWindow):
         group_wf_layout.addWidget(self.estimate_consequences, i, 0, 1, 2); self.input_fields['estimate_consequences'] = self.estimate_consequences; i+=1
 
         self.mapper = QComboBox()
-        self.mapper.addItems(flood_main.ALL_MAPPERS)
-        saved_mapper = flood_main.normalize_mapper_name(settings.value("mapper", "Curve2Flood-Kernel Weighted"))
+        self.mapper.addItems(Mapper.list_names())
+        saved_mapper = str(Mapper.from_string(settings.value("mapper", "Curve2Flood-Kernel Weighted")))
         self.mapper.setCurrentText(saved_mapper)
         group_wf_layout.addWidget(QLabel("Mapper Method"), i+1, 0); group_wf_layout.addWidget(self.mapper, i+1, 1); self.input_fields['mapper'] = self.mapper; i+=2
 
@@ -825,18 +822,11 @@ class FloodSimulationGUI(QMainWindow):
         self.log_text.append(message)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
-    def display_results(self, watershed_name: str, timer: Timer):
+    def display_results(self, watershed_name: str):
         """Formats and displays the simulation time results."""
         self.log_message("[COMPLETED] Simulation finished.")
         self.run_button.setEnabled(True)
         self.run_button.setText("Start Simulation")
-
-        if timer is None:
-            self.results_text.setText(f"No timing data returned for watershed {watershed_name}.")
-            return
-
-        time_text = flood_main.simulation_times_to_strings(watershed_name, timer)
-        self.results_text.setText("\n".join(time_text))
 
     def show_error(self, message):
         """Displays an error in the log and a pop-up with expandable technical details."""

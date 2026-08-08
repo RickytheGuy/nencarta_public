@@ -38,6 +38,15 @@ class Workspace:
         self.floodmap_mode = configs.floodmap_mode
 
         self.setup_dem(dem)
+        self.fixed_dem = self.dem_updated_folder / (self.FileName + '_fixed.tif')
+        self.filled_dem = self.dem_updated_folder / (self.FileName + '_filled.tif') 
+        self.flowdir = self.Flow_Direction_Folder / (self.FileName + '_flowdir.tif')
+        self.flowacc = self.Flow_Direction_Folder / (self.FileName + '_flowacc.tif')
+        self.new_StrmShp = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.shp')
+        self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
+        self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
+        self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
+        self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
 
         # currently the land file will be the same regardless of the streamflow source
         self.LAND_File = self.land_folder / (self.FileName + '_LAND_Raster.tif')
@@ -53,22 +62,22 @@ class Workspace:
         # these will only vary based upon if they are NWM or GEOGLOWS
         self.ARC_FileName_Bathy = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{self.config_end}"
         self.ARC_FileName_for_DEM_Cleaner = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_InitialFlood.txt"
-        self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif" if configs.clean_dem else Path(self.assigned_dem)
-        self.VDT_Test_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_FS.csv"
-        self.VDT_Test_File_Bathy = self.VDT_Test_File.with_name(self.VDT_Test_File.stem + '_Bathy.csv')
+        self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif"
         self.STRM_File = self.strm_folder / f"{strm_source}_{self.FileName}_STRM_Raster.tif"
         self.STRM_File_Clean = self.STRM_File.with_name(self.STRM_File.stem + '_Clean.tif')
 
         vdt_ext = configs.vdt_file_extension
-        self.VDT_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_Database.{vdt_ext}"
-        self.VDT_File_Initial = self.VDT_File.with_name(self.VDT_File.stem + f"_Initial.{vdt_ext}")
-        self.VDT_File_Bathy = self.VDT_File.with_name(self.VDT_File.stem + f"_Bathy.{vdt_ext}")
+        VDT_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_VDT_Database.{vdt_ext}"
+        self.VDT_File_Initial = VDT_File.with_name(VDT_File.stem + f"_Initial.{vdt_ext}")
+        self.VDT_File_Bathy = VDT_File.with_name(VDT_File.stem + f"_Bathy.{vdt_ext}")
 
         self.AP_File =  self.VDT_Folder / f"{strm_source}_{self.FileName}_AP_Database_Bathy.{vdt_ext}"
 
         self.Curve_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_CurveFile.csv"
         self.Curve_File_Initial = self.Curve_File.with_name(self.Curve_File.stem + '_Initial.csv')
         self.Curve_File_Bathy = self.Curve_File.with_name(self.Curve_File.stem + '_Bathy.csv')
+
+        self.Cross_Section_File = self.VDT_Folder / f"{strm_source}_{self.FileName}_XS.txt"
 
         # self.LU_and_Streams_Water_Map = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_Flood_Initial.tif"
         self.bathy_water_mask = self.bathy_file_folder / f"{strm_source}_{self.FileName}_water_mask.tif"
@@ -127,15 +136,6 @@ class Workspace:
 
     def setup_fldpln_files(self):
         """Add FLDPLN-specific working files to the workspace."""
-        self.fixed_dem = self.dem_updated_folder / (self.FileName + '_fixed.tif')
-        self.filled_dem = self.Flow_Direction_Folder / (self.FileName + '_filled.tif') 
-        self.flowdir = self.Flow_Direction_Folder / (self.FileName + '_flowdir.tif')
-        self.flowacc = self.Flow_Direction_Folder / (self.FileName + '_flowacc.tif')
-        self.new_StrmShp = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.shp')
-        self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
-        self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
-        self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
-        self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
         self.fldpln_library = self.VDT_Folder / 'fldpln_library.parquet'
 
     def __repr__(self):

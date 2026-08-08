@@ -1,3 +1,10 @@
+"""
+This package exists to speed up reading properties of raster or vector files by caching metadata in a local LMDB database. 
+This is optional and will only be used if the LMDB package is installed and the cache can be created. 
+The cache is stored in the user's home directory under .cache/nencarta.lmdb by default, 
+but this can be overridden by setting the NENCARTA_CACHE_DIR environment variable to a different path.
+"""
+
 import os
 import pickle
 import threading

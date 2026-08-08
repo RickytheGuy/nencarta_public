@@ -13,12 +13,11 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import geopandas as gpd
+from numba import njit
 from osgeo import gdal, ogr
-from numba import njit, prange
-from whitebox import WhiteboxTools
-from scipy.interpolate import griddata
 from shapely.ops import substring
-from shapely import reverse, line_merge, prepare, make_valid
+from whitebox import WhiteboxTools
+from shapely import line_merge, prepare
 from scipy.ndimage import binary_dilation, distance_transform_edt, label, minimum_filter
 from shapely.geometry import box, Point, LineString, Polygon, MultiLineString, GeometryCollection
 
@@ -26,15 +25,14 @@ from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from curve2flood import remove_cells_not_connected
 
-def load_lakes(workspace: Workspace, dem_raster: Raster) -> tuple[np.ndarray, gpd.GeoDataFrame] | None:
+def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
     """
     We load the lakes in the DEM's domain. We do not want to include lakes/reservoirs.
     """
     if not workspace.configs.lakes:
-        return None, None
+        return None
 
     lakes_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte)
     lakes_ds.SetGeoTransform(dem_raster.geotransform)
@@ -50,20 +48,26 @@ def load_lakes(workspace: Workspace, dem_raster: Raster) -> tuple[np.ndarray, gp
 
     lakes_ds.FlushCache()
     lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
+    return lakes
+
+def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame | None:
+    if not workspace.configs.lakes:
+        return None
 
     lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
     if 'Area_PW' in lakes_gdf.columns:
         lakes_gdf = lakes_gdf[lakes_gdf['Area_PW'] > 1] # Filter to about this size lake
 
-    return lakes, lakes_gdf
+    return lakes_gdf
 
-def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray) -> float:
+def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float:
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
     wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
+    workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
+    workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
-
-    wbt.fill_depressions(str(workspace.fixed_dem), str(workspace.filled_dem))
+    wbt.fill_depressions(str(dem_for_conflation_path), str(workspace.filled_dem))
     if not workspace.filled_dem.exists():
         raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
     wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
@@ -117,82 +121,102 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
 
     return buffer_distance
 
-def make_fldpln_inputs(workspace: Workspace) -> Path:
-    if workspace.stream_info_file.exists() and \
-        workspace.filled_dem.exists() and \
-        workspace.new_stream_raster.exists() and \
-        workspace.new_StrmShp_matched.exists() and \
-        workspace.flowdir.exists() and \
-        workspace.fixed_dem.exists() and \
-        not workspace.configs.process_stream_network:
-        LOG.info(f"{workspace.stream_info_file} already exists and we aren't making it again...")
-        workspace.assigned_dem = workspace.fixed_dem
-        workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-        workspace.STRM_File_Clean = workspace.new_stream_raster
-        return workspace.stream_info_file
-    
+def burn_streams_and_move_streams(workspace: Workspace) -> Path:
+    """
+    This function burns streams into the DEM and/or moves the streams to the correct location.
+    """
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return None
-        
-    workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
-    workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
-    dem_raster = Raster(workspace.assigned_dem)
-    lakes, lakes_gdf = load_lakes(workspace, dem_raster)
+    configs = workspace.configs
+    should_burn_streams = configs.burn_streams and (not workspace.fixed_dem.exists() or configs.process_stream_network)
+    should_move_streams = configs.move_stream_network_to_thalweg and \
+        (not workspace.new_StrmShp_matched.exists() or not workspace.new_stream_raster.exists() or configs.process_stream_network or 
+         (configs.mapper.is_curve2flood_fldpln_mapper() and (
+            not workspace.stream_info_file.exists() or not workspace.filled_dem.exists() or not workspace.flowdir.exists()
+         )))
 
-    source_gdf = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas().to_crs(dem_raster.projection)
-    channel_mask, fixed_dem = smooth_and_burn_dem(
-        workspace, 
-        source_gdf, 
-        lakes,
-        workspace.configs.streamflow_source.upstream_id, 
-        workspace.configs.streamflow_source.downstream_id
-    )
+    if configs.clean_dem:
+        assigned_dem = Raster(workspace.DEM_File_Clean)
+    else:
+        assigned_dem = Raster(workspace.assigned_dem)
 
-    buffer_distance = derive_hydrography_using_whitebox(workspace, dem_raster, fixed_dem)
-    # buffer_distance = (50/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 50 m buffer distance in DEM units
+    if should_burn_streams:
+        workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
 
-    streams_gdf = _conflate_streams(
-        source_gdf=source_gdf, 
-        streams_vector=workspace.new_StrmShp, 
-        lakes_gdf=lakes_gdf,
-        buffer_distance=buffer_distance,
-        dem_proj=dem_raster.projection, 
-        dem_bbox=dem_raster.bbox,
-        source_id_col=workspace.configs.streamflow_source.upstream_id,
-        source_ds_col=workspace.configs.streamflow_source.downstream_id,
-        strm_order_col=workspace.configs.StrmOrder_Field,
-    )
-    if streams_gdf.empty:
-        if workspace.configs.raise_errors_if_nothing_in_domain:
-            raise ValueError("No stream geometries remain after conflation.")
+        lakes = load_lake_array(workspace, assigned_dem)
+
+        source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
+        channel_mask, dem_for_conflation = smooth_and_burn_dem(
+            workspace, 
+            source_gdf, 
+            lakes,
+            configs.streamflow_source.upstream_id, 
+            configs.streamflow_source.downstream_id
+        )
+        dem_for_conflation_path = workspace.fixed_dem
+    elif should_move_streams:
+        dem_for_conflation = assigned_dem.read_array()
+        channel_mask = Raster(workspace.bathy_water_mask).read_array()
+        if configs.clean_dem:
+            dem_for_conflation_path = workspace.DEM_File_Clean
         else:
-            workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-            return None
-        
-    Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
-    _rasterize_streams(str(workspace.new_stream_raster), str(workspace.fixed_dem), str(workspace.new_StrmShp_matched), attribute=workspace.configs.streamflow_source.upstream_id)
+            dem_for_conflation_path = workspace.assigned_dem
+        source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
 
-    final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
-    channel_mask |= (final_streams > 0)
-    channel_mask = remove_cells_not_connected(channel_mask, final_streams)
+    if should_move_streams:
+        lakes_gdf = load_lake_gdf(workspace, assigned_dem)
+        buffer_distance = derive_hydrography_using_whitebox(workspace, assigned_dem, dem_for_conflation, dem_for_conflation_path)
 
-    workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
-    make_channel_mask(channel_mask, str(workspace.fixed_dem), str(workspace.bathy_water_mask))
+        streams_gdf = _conflate_streams(
+            source_gdf=source_gdf, 
+            streams_vector=workspace.new_StrmShp, 
+            lakes_gdf=lakes_gdf,
+            buffer_distance=buffer_distance,
+            dem_proj=assigned_dem.projection, 
+            dem_bbox=assigned_dem.bbox,
+            source_id_col=configs.streamflow_source.upstream_id,
+            source_ds_col=configs.streamflow_source.downstream_id,
+            strm_order_col=configs.StrmOrder_Field,
+        )
+        if streams_gdf.empty:
+            if configs.raise_errors_if_nothing_in_domain:
+                raise ValueError("No stream geometries remain after conflation.")
+            else:
+                workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+                return None
+            
+        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
+        _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.streamflow_source.upstream_id)
 
-    _create_stream_info_table(
-        workspace.stream_info_file,
-        streams_array=final_streams, 
-        streams_gdf=streams_gdf, 
-        dem_file=workspace.filled_dem,
-        source_id_col=workspace.configs.streamflow_source.upstream_id,
-        source_ds_col=workspace.configs.streamflow_source.downstream_id,
-        no_data_value=dem_raster.nodata_value
-    )
+        final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
+        channel_mask |= (final_streams > 0)
+        channel_mask = remove_cells_not_connected(channel_mask, final_streams)
 
-    workspace.assigned_dem = workspace.fixed_dem
-    workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-    workspace.STRM_File_Clean = workspace.new_stream_raster
+        workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
+        make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask))
+        dem_for_stream_info = workspace.filled_dem
+
+    if configs.mapper.is_curve2flood_fldpln_mapper():
+        if not should_move_streams:
+            final_streams = Raster(workspace.STRM_File_Clean).read_array()
+            streams_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
+            if configs.burn_streams:
+                dem_for_stream_info = workspace.fixed_dem
+            elif configs.clean_dem:
+                dem_for_stream_info = workspace.DEM_File_Clean
+            else:
+                dem_for_stream_info = workspace.assigned_dem
+
+        _create_stream_info_table(
+            workspace.stream_info_file,
+            streams_array=final_streams, 
+            streams_gdf=streams_gdf, 
+            dem_file=dem_for_stream_info,
+            source_id_col=configs.streamflow_source.upstream_id,
+            source_ds_col=configs.streamflow_source.downstream_id,
+            no_data_value=assigned_dem.nodata_value
+        )
 
 def smooth_and_burn_dem(
         workspace: Workspace, 
@@ -1015,38 +1039,13 @@ def match_to_source_headwaters(
     wtbx_potential_headwaters -= wtbx_headwaters
 
     for source_headwater in source_headwaters:
-        if source_headwater == 750080848:
-            pass
         best_score = 0
         best_wtbx = None
-        # source_centroid = A_reach_sig[source_headwater].centroid
         source_buffer = A_reach_sig[source_headwater].buffer_geom
 
         nearest_wtbx_headwaters = wtbx_gdf.iloc[wtbx_gdf.sindex.query(source_buffer, predicate="intersects", sort=True)][wtbx_id_col]
         nearest_wtbx_headwaters = nearest_wtbx_headwaters[nearest_wtbx_headwaters.isin(wtbx_headwaters)].tolist()
 
-        # if not nearest_wtbx_headwaters:
-        #     nearest_wtbx_headwaters = sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(A_reach_sig[source_headwater].centroid))[:5]
-
-        # Plot the source, and the wtbx headwaters, and the buffers, for debugging
-        # import matplotlib.pyplot as plt
-        # plt.figure(figsize=(10, 10))
-        # source_geom = A_reach_sig[source_headwater].geom
-        # plt.plot(*source_geom.xy, color='blue', label='Source Headwater')
-        # plt.plot(*source_buffer.exterior.xy, color='blue', linestyle='--', label='Source Buffer')
-        # for wtbx_outlet in nearest_wtbx_headwaters:
-        #     wtbx_geom = B_reach_sig[wtbx_outlet].geom
-        #     wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
-        #     plt.plot(*wtbx_geom.xy, color='red', label='WTBX Headwater')
-        #     plt.plot(*wtbx_buffer.exterior.xy, color='red', linestyle='--', label='WTBX Buffer')
-
-        # plt.legend()
-        # plt.title(f"Source Headwater {source_headwater} and Nearest WTBX Headwaters")
-        # plt.xlabel("Longitude")
-        # plt.ylabel("Latitude")
-        # plt.show()
-
-        # for wtbx_outlet in sorted(wtbx_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
         for wtbx_outlet in nearest_wtbx_headwaters:
             wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
@@ -1059,7 +1058,6 @@ def match_to_source_headwaters(
         nearest_wtbx_potential_headwaters = wtbx_gdf.iloc[wtbx_gdf.sindex.query(source_buffer, predicate="intersects", sort=True)][wtbx_id_col]
         nearest_wtbx_potential_headwaters = nearest_wtbx_potential_headwaters[nearest_wtbx_potential_headwaters.isin(wtbx_potential_headwaters)].tolist()
 
-        # for wtbx_outlet in sorted(wtbx_potential_headwaters, key=lambda x: B_reach_sig[x].geom.distance(source_centroid))[:5]:
         for wtbx_outlet in nearest_wtbx_potential_headwaters:
             wtbx_buffer = B_reach_sig[wtbx_outlet].buffer_geom
             intersection_area = source_buffer.intersection(wtbx_buffer).area
@@ -1127,9 +1125,9 @@ def match_wtbx_headwaters(
         if wtbx_headwater in best_source_scores.values():
             continue
 
-        best_score = 0
-        best_source = None
         wtbx_buffer = B_reach_sig[wtbx_headwater].buffer_geom
+        best_score = wtbx_buffer.area * 0.33  # Only consider matches that are at least 33% of the wtbx headwater area
+        best_source = None
 
         downstream_wtbx = next(iter(GB.successors(wtbx_headwater)), None)
         siblings = set(GB.predecessors(downstream_wtbx)) - {wtbx_headwater} if downstream_wtbx is not None else set()

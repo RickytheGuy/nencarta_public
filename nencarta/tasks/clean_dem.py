@@ -3,7 +3,6 @@ from pathlib import Path
 from nencarta.logger import LOG
 from nencarta import DEM_Cleaner
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 from nencarta.tasks.run_models import _run_mapper, run_arc_for_initial_floodmap
 from nencarta.tasks.make_flow_file_from_reanalysis import _make_flood_flow_file_from_base_max_file
 
@@ -71,5 +70,3 @@ def make_clean_dem(workspace: Workspace) -> Path:
                                     TopWidthPlausibleLimit, 
                                     search_dist_for_min_elev, 
                                     search_dist_perp_cells)
-    
-    workspace.assigned_dem = workspace.DEM_File_Clean

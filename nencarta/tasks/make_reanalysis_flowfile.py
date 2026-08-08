@@ -1,7 +1,7 @@
 import io
-from functools import cache
 import os
 from pathlib import Path
+from functools import cache
 
 import requests
 import numpy as np
@@ -11,7 +11,6 @@ import xarray as xr
 from nencarta.logger import LOG
 from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 from nencarta.core.enumerations import StreamflowSource
 from nencarta.exceptions import NoStreamsFoundException
 from nencarta._constants import GEOGLOWS_RETURN_PERIODS_URL, GEOGLOWS_FDC_URL, GEOGLOWS_DAILY_URL, NWM_RP_URL
