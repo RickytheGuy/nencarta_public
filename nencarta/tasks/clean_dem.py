@@ -45,7 +45,6 @@ def make_clean_dem(workspace: Workspace) -> Path:
     OutputID = 'COMID'
     Q_Fraction = 0.10
     TopWidthPlausibleLimit = 600
-    search_dist_for_min_elev = 10
     search_dist_perp_cells = 10 # this was 40
     FlowFileName = workspace.FLOW_Folder / f"{workspace.FileName}_Flow_COMID_Q.txt"
     _make_flood_flow_file_from_base_max_file(
@@ -68,5 +67,5 @@ def make_clean_dem(workspace: Workspace) -> Path:
                                     workspace.bathy_water_mask, 
                                     Q_Fraction, 
                                     TopWidthPlausibleLimit, 
-                                    search_dist_for_min_elev, 
+                                    workspace.configs.compression, 
                                     search_dist_perp_cells)
