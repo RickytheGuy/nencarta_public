@@ -70,7 +70,7 @@ The JSON should look like what's provided below. Multiple watersheds can be prov
             "clean_dem": true,
             "mapper": "FloodSpreader",
             "output_dir": "C:/Users/follumm/Desktop/CHL_MultiModel/Yellowstone_2022_Flood/Results",
-            "process_stream_network": true,
+            "overwrite": true,
             "use_specified_depth_for_bathy_mask": true,
             "age_of_forecast_days": 7,
             "find_banks_based_on_landcover": true,
@@ -106,11 +106,11 @@ And your NenCarta simulation will commense with the JSON file.
 The second option is to run an indivdual watershed straight from the command line. This can be done by issuing the following command:
 
 ```
-flood-mapping cli ExampleWatershed "C:\path\to\flowline.shp" "C:\path\to\dem_dir" "C:\path\to\output" --bathy_use_banks --clean_dem --process_stream_network --mapper FloodSpreader --use_specified_depth_for_bathy_mask --specify_depths_for_bathy_mask 1.0 2.0 --age_of_forecast_days 7 --find_banks_based_on_landcover --create_reach_average_curve_file --forensic_forecast_date "20250807" --specified_bathyflow_field 'p_exceed_50' --specified_highflow_field "rp100_premium" --use_warning_flags_to_download_dem --geoglows_vpu 15 --lake_filter_json "C:\path\to\lake_filter_json" 
+flood-mapping cli ExampleWatershed "C:\path\to\flowline.shp" "C:\path\to\dem_dir" "C:\path\to\output" --bathy_use_banks --clean_dem --overwrite --mapper FloodSpreader --use_specified_depth_for_bathy_mask --specify_depths_for_bathy_mask 1.0 2.0 --age_of_forecast_days 7 --find_banks_based_on_landcover --create_reach_average_curve_file --forensic_forecast_date "20250807" --specified_bathyflow_field 'p_exceed_50' --specified_highflow_field "rp100_premium" --use_warning_flags_to_download_dem --geoglows_vpu 15 --lake_filter_json "C:\path\to\lake_filter_json" 
 --estimate_consequences --streamflow_source "NWM_short_range" --nwm_api_key "YOUR_NWM_API_KEY"
 ```
 
-The arguments `--bathy_use_banks`, `--clean_dem`, `--process_stream_network`, `--use_specified_depth_for_bathy_mask`,`--find_banks_based_on_landcover`, `--create_reach_average_curve_file`, `use_warning_flags_to_download_dem`, and `--estimate_consequences` are issued when you intend setting those options as True.
+The arguments `--bathy_use_banks`, `--clean_dem`, `--overwrite`, `--use_specified_depth_for_bathy_mask`,`--find_banks_based_on_landcover`, `--create_reach_average_curve_file`, `use_warning_flags_to_download_dem`, and `--estimate_consequences` are issued when you intend setting those options as True.
 
 The argument `--specify_depths_for_bathy_mask` requires two float arguments if `clean_dem` is True and one float argument if `clean_dem` is False.
 

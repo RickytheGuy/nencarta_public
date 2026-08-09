@@ -1,0 +1,100 @@
+from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+
+
+VALID_RETURN_PERIODS = (2, 5, 10, 25, 50, 100)
+
+FLOW_FIELD_OPTIONS = (
+    [f"p_exceed_{i}" for i in [0] + list(range(5, 101, 5))]
+    + ["p_exceed_0_premium"]
+    + ["rp2", "rp5", "rp10", "rp25", "rp50", "rp100", "rp100_premium"]
+)
+
+DEFAULT_BATHY_ARGS = {
+    "VDT_Database_NumIterations": 30,
+    "Make_Output_GPKG": True,
+    "FS_ADJUST_FLOW_BY_FRACTION": 1.0,
+    "TW_MultFact": 1.5,
+    "TopWidthPlausibleLimit": 2000,
+    "Bathy_Trap_H": 0.2,
+    "X_Section_Dist": 5000.0,
+    "Degree_Manip": 6.1,
+    "Degree_Interval": 1.5,
+    "Low_Spot_Range": 2,
+    "Str_Limit_Val": 1,
+    "Gen_Dir_Dist": 10,
+    "Gen_Slope_Dist": 10,
+    "Stream_Slope_Method": "local_average_corrected",
+}
+
+DEFAULT_FLOODMAP_ARGS = {
+    "Make_Output_GPKG": True,
+    "FS_ADJUST_FLOW_BY_FRACTION": 1.0,
+    "TW_MultFact": 1.5,
+    "TopWidthPlausibleLimit": 6000,
+}
+
+DEFAULT_CONFIG = {
+    "age_of_forecast_days": 7,
+    "area_km2_field": "DSContArea_km2",
+    "area_m2_field": "DSContArea",
+    "bathy_args": DEFAULT_BATHY_ARGS,
+    "bathy_use_banks": False,
+    "buffer": False,
+    "buffer_distance": 0.1,
+    "burn_streams": False,
+    "clean_dem": False,
+    "compression": "LZW",
+    "create_reach_average_curve_file": False,
+    "dem_filter": "*",
+    "disable_bathymetry": False,
+    "estimate_consequences": False,
+    "exclude": [],
+    "find_banks_based_on_landcover": True,
+    "fldpln_dh": 0.5,
+    "fldpln_keep_spilling": False,
+    "fldpln_max_depth": 25.0,
+    "fldpln_max_wse_rise": 0.01,
+    "fldpln_min_depth": 0.1,
+    "fldpln_parallel": False,
+    "flood_waterlc_and_strm_cells": False,
+    "floodmap_args": DEFAULT_FLOODMAP_ARGS,
+    "floodmap_identifier": "",
+    "floodmap_mode": FloodMapMode.FORECAST.value,
+    "land_cover_cache": [],
+    "land_watervalue": 80,
+    "make_ap_database": True,
+    "make_cross_section_file": False,
+    "make_curvefile": True,
+    "make_depth_maps": True,
+    "make_fist_inputs": True,
+    "make_vdt": True,
+    "make_velocity_maps": True,
+    "make_wse_maps": True,
+    "mapper": Mapper.CURVE2FLOOD_KERNEL_WEIGHTED.value,
+    "move_stream_network_to_thalweg": False,
+    "new_strm_threshold_km2": 25,
+    "overwrite_floodmaps": True,
+    "parallel": False,
+    "overwrite": False,
+    "profile": True,
+    "project_to_utm": False,
+    "quiet": False,
+    "raise_errors_if_nothing_in_domain": True,
+    "remove_old_forecast_files": False,
+    "return_periods": [],
+    "source_dems": [],
+    "source_flowlines": [],
+    "specified_bathyflow_field": "p_exceed_50",
+    "specified_highflow_field": "rp100_premium",
+    "specify_depths_for_bathy_mask": [0.1],
+    "streamflow_source": str(StreamflowSource.GEOGLOWS),
+    "streams_as_parquet": False,
+    "use_parquet": False,
+    "use_power_laws_for_bathymetry": False,
+    "use_specified_depth_for_bathy_mask": True,
+    "use_vrt": False,
+    "use_warning_flags_to_download_dem": False,
+    "use_yaml": False,
+    "user_flow_files": [],
+    "vdt_file_extension": "txt",
+}

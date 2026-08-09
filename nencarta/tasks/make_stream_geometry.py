@@ -38,7 +38,7 @@ def _filter_streams_by_stream_order(stream_df: gpd.GeoDataFrame, strm_order_fiel
 
 def make_stream_geometry(workspace: Workspace,) -> Path:
     configs = workspace.configs
-    if workspace.DEM_StrmShp.exists() and not configs.process_stream_network:
+    if workspace.DEM_StrmShp.exists() and not configs.overwrite:
         LOG.info(f"{workspace.DEM_StrmShp} already exists and we aren't making it again...")
         return workspace.DEM_StrmShp
     

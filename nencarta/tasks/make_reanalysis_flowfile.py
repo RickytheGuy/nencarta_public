@@ -156,7 +156,7 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
         workspace.DEM_Reanalsyis_FlowFile = Path(configs.reanalysis_file)
         return workspace.DEM_Reanalsyis_FlowFile
 
-    if workspace.DEM_Reanalsyis_FlowFile.exists() and not configs.process_stream_network:
+    if workspace.DEM_Reanalsyis_FlowFile.exists() and not configs.overwrite:
         return workspace.DEM_Reanalsyis_FlowFile
     
     if not workspace.DEM_StrmShp.exists() and not configs.raise_errors_if_nothing_in_domain:

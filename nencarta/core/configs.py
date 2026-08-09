@@ -1,8 +1,10 @@
 import os
+from copy import deepcopy
 from datetime import datetime
 from collections.abc import Sequence
 
 from nencarta.logger import LOG
+from nencarta.core.defaults import DEFAULT_CONFIG, VALID_RETURN_PERIODS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
 def normalize_mapper_name(mapper: str | None) -> str:
@@ -124,6 +126,15 @@ class NencartaConfig:
         if not any(key in self.config_dict for key in ["flowline", "source_flowlines"]):
             raise KeyError(f"Watershed '{self.get('name', 'unknown')}' must have at least one of the following keys: 'flowline', or 'source_flowlines'.")
 
+    def warn_if_multiple_primary_dems(self):
+        """Warn when both primary DEM input modes are supplied."""
+        if self.get_path("dem") and self.get_path("dem_dir"):
+            LOG.warning(
+                f"Watershed '{self.watershed_name}' has both 'dem' and 'dem_dir'. "
+                "'dem_dir' takes precedence in process_watershed; provide only one "
+                "to avoid ambiguity."
+            )
+
     def validate_user_floodmaps(self):
         """Validate and normalize user-supplied flood map flow files."""
         floodmap_mode = self.get("floodmap_mode", "forecast")
@@ -155,39 +166,56 @@ class NencartaConfig:
     
     def validate_return_periods(self):
         """Validate requested return periods for return-period mode."""
-        VALID_RETURN_PERIODS = {2, 5, 10, 25, 50, 100}
         return_periods = self.get("return_periods")
         if return_periods and self.floodmap_mode == FloodMapMode.RETURN_PERIOD:
-            if not isinstance(return_periods, Sequence):
-                raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has invalid 'return_periods': {return_periods}. Must be a sequence of numeric values.")
+            if isinstance(return_periods, str):
+                return_periods = [return_periods]
+            elif not isinstance(return_periods, Sequence):
+                return_periods = [return_periods]
             try:
                 return_periods = [int(rp) for rp in return_periods]
             except ValueError:
                 raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has non-numeric values in 'return_periods': {return_periods}. All return periods must be convertible to float.")
         
             assert all(rp in VALID_RETURN_PERIODS for rp in return_periods), \
-                f"Invalid return periods. Must be a subset of {VALID_RETURN_PERIODS}. Received: {return_periods}"
+                f"Invalid return periods. Must be a subset of {set(VALID_RETURN_PERIODS)}. Received: {return_periods}"
             
         return return_periods
         
     def get(self, key: str, default=None):
         """Return a config value, treating None as missing when a default exists."""
+        if default is None and key in DEFAULT_CONFIG:
+            default = DEFAULT_CONFIG[key]
         value = self.config_dict.get(key, default)
         if value is None and default is not None:
-            return default
-        return value
+            return deepcopy(default)
+        return deepcopy(value)
     
     def get_path(self, key: str, default=None):
         """Return a normalized path string or None."""
         value = self.get(key, default)
         return norm_or_none(value)
+
+    def get_num_workers(self):
+        """Return the number of workers for parallel processing."""
+        num_workers = self.get("num_workers")
+        if num_workers is None:
+            return None
+        try:
+            num_workers = int(num_workers)
+            if num_workers < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid 'num_workers' value: {num_workers}. Must be a positive integer.")
+        return num_workers
         
     def setup(self):
         """Populate validated attributes used by the processing pipeline."""
         self.verify_required_keys()
         self.watershed_name: str = self.get("name")
+        self.warn_if_multiple_primary_dems()
 
-        self.streamflow_source: StreamflowSource = StreamflowSource.from_string(self.get("streamflow_source", "GEOGLOWS"))
+        self.streamflow_source: StreamflowSource = StreamflowSource.from_string(self.get("streamflow_source"))
         self.stream_id_field, self.downstream_id_field = get_streamids_from_source(self.streamflow_source)
         self.forensic_forecast_date: str | None = self.validate_forecast_date()
         self.forensic_forecast_hour: int = self.validate_forecast_hour()
@@ -196,24 +224,24 @@ class NencartaConfig:
         self.nwm_api_key: str = self.get("nwm_api_key")
         self.validate_nwm_api_key()
 
-        self.use_specified_depth_for_bathy_mask: bool = self.get("use_specified_depth_for_bathy_mask", True)
+        self.use_specified_depth_for_bathy_mask: bool = self.get("use_specified_depth_for_bathy_mask")
         self.specify_depths_for_bathy_mask: list[float] = self.get("specify_depths_for_bathy_mask")
-        self.clean_dem: bool = self.get("clean_dem", False)
+        self.clean_dem: bool = self.get("clean_dem")
         self.validate_specified_depths()
 
         self.floodmap_mode, self.user_flow_files = self.validate_user_floodmaps()
         self.return_periods = self.validate_return_periods()
 
-        if not self.get("make_depth_maps", True) and self.get('estimate_consequences', False):
+        if not self.get("make_depth_maps") and self.get('estimate_consequences'):
             LOG.warning(f"Watershed '{self.get('name', 'unknown')}': 'make_depth_maps' is False but 'estimate_consequences' is True. Setting 'make_depth_maps' to True.")
             self.config_dict['make_depth_maps'] = True
 
-        self.dem_filter: str = self.get("dem_filter", "*")
+        self.dem_filter: str = self.get("dem_filter")
         if not self.dem_filter:
             self.dem_filter = "*"
 
-        self.move_stream_network_to_thalweg: bool = self.get("move_stream_network_to_thalweg", False)
-        self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2", 5))  # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
+        self.move_stream_network_to_thalweg: bool = self.get("move_stream_network_to_thalweg")
+        self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2"))  # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
         if self.move_stream_network_to_thalweg and self.stream_order_threshold is None:
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'new_strm_threshold_km2' must be specified when moving stream network.")
 
@@ -222,11 +250,11 @@ class NencartaConfig:
         if self.mapper.is_curve2flood_fldpln_mapper() and not self.move_stream_network_to_thalweg:
             LOG.warning(f"Move stream network was set to false, but the mapper is set to Curve2Flood-FLDPLNpy. Ensure that the input stream network is properly aligned with the DEM.")
         
-        self.streams_as_parquet: bool = self.get("streams_as_parquet", False)
+        self.streams_as_parquet: bool = self.get("streams_as_parquet")
         if self.streams_as_parquet and self.mapper.is_curve2flood_fldpln_mapper():
             raise ValueError("The Curve2Flood-FLDPLNpy mapper is not currently compatible with stream networks stored as parquet files. Please set streams_as_parquet to false in order to proceed...")
         
-        self.floodmap_id: str = self.get('floodmap_identifier', '')
+        self.floodmap_id: str = self.get('floodmap_identifier')
         if self.floodmap_id:
             self.floodmap_id = f"_{self.floodmap_id}"if not self.floodmap_id.startswith("_") else self.floodmap_id
         else:
@@ -234,73 +262,74 @@ class NencartaConfig:
 
         self.bbox: tuple[float, ...] = self.validate_bbox()
         self.flowline: str = self.get_path("flowline")
-        self.source_flowlines: list[str] = self.get("source_flowlines", [])
+        self.source_flowlines: list[str] = self.get("source_flowlines")
         self.dem: str = self.get_path("dem")
         self.dem_dir: str = self.get_path("dem_dir")
         self.output_dir: str = self.get_path("output_dir")
-        self.disable_bathymetry: bool = self.get("disable_bathymetry", False)
-        self.bathy_use_banks: bool = self.get("bathy_use_banks", False)
-        self.flood_waterlc_and_strm_cells: bool = self.get("flood_waterlc_and_strm_cells", False)
-        self.land_watervalue: int = self.get("land_watervalue", 80)
-        self.process_stream_network: bool = self.get("process_stream_network", False)
-        self.age_of_forecast_days: int = self.get("age_of_forecast_days", 7)
-        self.find_banks_based_on_landcover: bool = self.get("find_banks_based_on_landcover", True)
-        self.create_reach_average_curve_file: bool = self.get("create_reach_average_curve_file", False)
-        self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem", False)
+        self.disable_bathymetry: bool = self.get("disable_bathymetry")
+        self.bathy_use_banks: bool = self.get("bathy_use_banks")
+        self.flood_waterlc_and_strm_cells: bool = self.get("flood_waterlc_and_strm_cells")
+        self.land_watervalue: int = self.get("land_watervalue")
+        self.overwrite: bool = self.get("overwrite")
+        self.age_of_forecast_days: int = self.get("age_of_forecast_days")
+        self.find_banks_based_on_landcover: bool = self.get("find_banks_based_on_landcover")
+        self.create_reach_average_curve_file: bool = self.get("create_reach_average_curve_file")
+        self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem")
         self.geoglows_vpu: str = self.get("geoglows_vpu")
-        self.specified_bathyflow_field: str = self.get("specified_bathyflow_field", "p_exceed_50")
-        self.specified_highflow_field: str = self.get("specified_highflow_field", "rp100_premium")
+        self.specified_bathyflow_field: str = self.get("specified_bathyflow_field")
+        self.specified_highflow_field: str = self.get("specified_highflow_field")
         self.StrmOrder_Field: str = self.get("StrmOrder_Field")
         self.StrmOrder_Lower: int = self.get("StrmOrder_Lower")
         self.StrmOrder_Upper: int = self.get("StrmOrder_Upper")
         self.q_baseflow_threshold: float = self.get("q_baseflow_threshold")
         self.lake_filter_json: str = self.get_path("lake_filter_json")
         self.lakes: str = self.get_path("lakes")
-        self.estimate_consequences: bool = self.get("estimate_consequences", False)
-        self.overwrite_floodmaps: bool = self.get("overwrite_floodmaps", True)
-        self.remove_old_forecast_files: bool = self.get("remove_old_forecast_files", False)
-        self.make_fist_inputs: bool = self.get("make_fist_inputs", True)
-        self.make_vdt: bool = self.get("make_vdt", True)
-        self.make_curvefile: bool = self.get("make_curvefile", True)
-        self.make_ap_database: bool = self.get("make_ap_database", True)
-        self.make_cross_section_file: bool = self.get("make_cross_section_file", False)
-        self.vdt_file_extension: str = self.get("vdt_file_extension", 'txt')
+        self.estimate_consequences: bool = self.get("estimate_consequences")
+        self.overwrite_floodmaps: bool = self.get("overwrite_floodmaps")
+        self.remove_old_forecast_files: bool = self.get("remove_old_forecast_files")
+        self.make_fist_inputs: bool = self.get("make_fist_inputs")
+        self.make_vdt: bool = self.get("make_vdt")
+        self.make_curvefile: bool = self.get("make_curvefile")
+        self.make_ap_database: bool = self.get("make_ap_database")
+        self.make_cross_section_file: bool = self.get("make_cross_section_file")
+        self.vdt_file_extension: str = self.get("vdt_file_extension")
         self.mannings_text_file: str = self.get("mannings_text_file")
-        self.bathy_args: dict = self.get("bathy_args", {})
-        self.floodmap_args: dict = self.get("floodmap_args", {})
-        self.make_depth_maps: bool = self.get("make_depth_maps", True)
-        self.make_velocity_maps: bool = self.get("make_velocity_maps", True)
-        self.make_wse_maps: bool = self.get("make_wse_maps", True)
-        self.floodmap_identifier: str = self.get("floodmap_identifier", "")
-        self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2", 5 ** 2) # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
+        self.bathy_args: dict = self.get("bathy_args")
+        self.floodmap_args: dict = self.get("floodmap_args")
+        self.make_depth_maps: bool = self.get("make_depth_maps")
+        self.make_velocity_maps: bool = self.get("make_velocity_maps")
+        self.make_wse_maps: bool = self.get("make_wse_maps")
+        self.floodmap_identifier: str = self.get("floodmap_identifier")
+        self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2") # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
         self.min_match_score: float = self.get("min_match_score")
-        self.quiet: bool = self.get("quiet", False)
-        self.source_dems: list = self.get("source_dems", [])
-        self.buffer: bool = self.get("buffer", False)
-        self.buffer_distance: float = self.get("buffer_distance", 0.1)
-        self.use_vrt: bool = self.get("use_vrt", False)
-        self.raise_errors_if_nothing_in_domain: bool = self.get("raise_errors_if_nothing_in_domain", True)
-        self.land_cover_cache: list[str] = self.get("land_cover_cache", [])
-        self.use_parquet: bool = self.get("use_parquet", False)
-        self.use_yaml: bool = self.get("use_yaml", False)
+        self.quiet: bool = self.get("quiet")
+        self.source_dems: list = self.get("source_dems")
+        self.buffer: bool = self.get("buffer")
+        self.buffer_distance: float = self.get("buffer_distance")
+        self.use_vrt: bool = self.get("use_vrt")
+        self.raise_errors_if_nothing_in_domain: bool = self.get("raise_errors_if_nothing_in_domain")
+        self.land_cover_cache: list[str] = self.get("land_cover_cache")
+        self.use_parquet: bool = self.get("use_parquet")
+        self.use_yaml: bool = self.get("use_yaml")
         self.forecastdate: str = None
         self.forecasthour: str = None
-        self.profile: bool = self.get("profile", True)
-        self.parallel: bool = self.get("parallel", False)
-        self.compression: str = self.get("compression", "LZW")
-        self.exclude: list[int] = self.get("exclude", [])
+        self.profile: bool = self.get("profile")
+        self.parallel: bool = self.get("parallel")
+        self.compression: str = self.get("compression")
+        self.exclude: list[int] = self.get("exclude")
         self.reanalysis_file: str = self.get("reanalysis_file")
-        self.fldpln_dh: float = self.get("fldpln_dh", 0.5)
-        self.fldpln_min_depth: float = self.get("fldpln_min_depth", 0.1)
-        self.fldpln_max_depth: float = self.get("fldpln_max_depth", 25.0)
-        self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling", False)
-        self.fldpln_parallel: bool = self.get("fldpln_parallel", False)
-        self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise", 0.01)
-        self.project_to_utm: bool = self.get("project_to_utm", False)
-        self.burn_streams: bool = self.get("burn_streams", False)
-        self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry", False)
-        self.area_m2_field: str = self.get("area_m2_field", "DSContArea")
-        self.area_km2_field: str = self.get("area_km2_field", "DSContArea_km2")
+        self.fldpln_dh: float = self.get("fldpln_dh")
+        self.fldpln_min_depth: float = self.get("fldpln_min_depth")
+        self.fldpln_max_depth: float = self.get("fldpln_max_depth")
+        self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")
+        self.fldpln_parallel: bool = self.get("fldpln_parallel")
+        self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise")
+        self.project_to_utm: bool = self.get("project_to_utm")
+        self.burn_streams: bool = self.get("burn_streams")
+        self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry")
+        self.area_m2_field: str = self.get("area_m2_field")
+        self.area_km2_field: str = self.get("area_km2_field")
+        self.num_workers = self.get_num_workers()
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

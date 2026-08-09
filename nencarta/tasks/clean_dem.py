@@ -9,10 +9,10 @@ from nencarta.tasks.make_flow_file_from_reanalysis import _make_flood_flow_file_
 def make_clean_dem(workspace: Workspace) -> Path:
     # Run the DEM Cleaner Program, if you wanna
     configs = workspace.configs
-    if workspace.DEM_File_Clean.exists() and not configs.process_stream_network:
+    if workspace.DEM_File_Clean.exists() and not configs.overwrite:
         return workspace.DEM_File_Clean
 
-    if configs.process_stream_network:
+    if configs.overwrite:
         # Ensure we regenerate ARC + DEM cleaner products when overwriting, so the
         # outputs match a fresh legacy run (important for ignore/*_original fixtures).
         for path in (

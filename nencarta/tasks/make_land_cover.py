@@ -1,7 +1,10 @@
+import os
 import time
 import urllib
 from pathlib import Path
 from typing import Literal
+
+os.environ["AWS_NO_SIGN_REQUEST"] = "YES"  # for s3 access to ESA WorldCover data
 
 from osgeo import gdal
 import geopandas as gpd
@@ -50,7 +53,7 @@ def _download_grid_with_retry(url, max_retries=10, wait_seconds=10):
 
 def make_land_cover(workspace: Workspace,
                     year: Literal[2020, 2021] = 2021):
-    if workspace.LAND_File.exists() and not workspace.configs.process_stream_network:
+    if workspace.LAND_File.exists() and not workspace.configs.overwrite:
         LOG.info(f"Land cover file already exists at {workspace.LAND_File}, skipping generation.")
         return workspace.LAND_File
     

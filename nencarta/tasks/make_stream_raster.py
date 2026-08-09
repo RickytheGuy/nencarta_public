@@ -94,7 +94,7 @@ def _clean_stream_raster(stream_ds: gdal.Dataset) -> None:
 
 def make_stream_raster(workspace: Workspace) -> Path:
     configs = workspace.configs
-    if workspace.STRM_File_Clean.exists() and not configs.process_stream_network:
+    if workspace.STRM_File_Clean.exists() and not configs.overwrite:
         LOG.info(f"{workspace.STRM_File_Clean} already exists and we aren't making it again...")
         return workspace.STRM_File_Clean
     

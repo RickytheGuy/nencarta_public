@@ -35,7 +35,7 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
             
         try:
             ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
-            if not ForecastFlowFile.exists() or configs.process_stream_network:
+            if not ForecastFlowFile.exists() or configs.overwrite:
                 ForecastFlows.Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, ForecastFlowFile, configs.streamflow_source, configs.nwm_api_key)
         except Exception as e:
             LOG.error('Could not process forensic forecast streamflow download, please check your date or try again later...')
@@ -56,7 +56,7 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
                         flow_file_name = f'{workspace.FileName}_{str(forecastdate)}_{configs.streamflow_source}_forecast.csv'
 
                     ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
-                    if not ForecastFlowFile.exists() or configs.process_stream_network:
+                    if not ForecastFlowFile.exists() or configs.overwrite:
                         ForecastFlows.Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, ForecastFlowFile, configs.streamflow_source, configs.nwm_api_key)
 
                     if configs:
@@ -129,7 +129,7 @@ def make_return_period_flow_file(workspace: Workspace) -> list[Path]:
         return_period_flow_file = workspace.FLOW_Folder / f'{workspace.FileName}_rp{rp}.csv'
         files.append(return_period_flow_file)
 
-        if return_period_flow_file.exists() and not configs.process_stream_network:
+        if return_period_flow_file.exists() and not configs.overwrite:
             LOG.info(f"{return_period_flow_file} already exists and we aren't making it again...")
             continue
         

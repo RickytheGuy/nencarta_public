@@ -115,7 +115,7 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
 
     configs = workspace.configs
-    if workspace.ARC_FileName_for_DEM_Cleaner.exists() and not configs.process_stream_network:
+    if workspace.ARC_FileName_for_DEM_Cleaner.exists() and not configs.overwrite:
         return workspace.ARC_FileName_for_DEM_Cleaner
 
     params = _arc_inputs(
@@ -164,7 +164,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
 
     configs = workspace.configs
-    if configs.disable_bathymetry and _has_required_arc_outputs(workspace) and not configs.process_stream_network:
+    if configs.disable_bathymetry and _has_required_arc_outputs(workspace) and not configs.overwrite:
         LOG.info(f"Domain {workspace.watershed} has required ARC outputs and bathymetry is disabled, skipping ARC.")
         return workspace.ARC_FileName_Bathy
 

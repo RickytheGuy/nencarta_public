@@ -129,9 +129,9 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         return None
 
     configs = workspace.configs
-    should_burn_streams = configs.burn_streams and (not workspace.fixed_dem.exists() or configs.process_stream_network)
+    should_burn_streams = configs.burn_streams and (not workspace.fixed_dem.exists() or configs.overwrite)
     should_move_streams = configs.move_stream_network_to_thalweg and \
-        (not workspace.new_StrmShp_matched.exists() or not workspace.new_stream_raster.exists() or configs.process_stream_network or 
+        (not workspace.new_StrmShp_matched.exists() or not workspace.new_stream_raster.exists() or configs.overwrite or 
          (configs.mapper.is_curve2flood_fldpln_mapper() and (
             not workspace.stream_info_file.exists() or not workspace.filled_dem.exists() or not workspace.flowdir.exists()
          )))

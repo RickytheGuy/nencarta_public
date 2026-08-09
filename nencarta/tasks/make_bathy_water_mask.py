@@ -9,7 +9,7 @@ from nencarta.workspace import Workspace
 
 def make_water_mask(workspace: Workspace) -> Path:
     configs = workspace.configs
-    if workspace.bathy_water_mask.exists() and not configs.process_stream_network:
+    if workspace.bathy_water_mask.exists() and not configs.overwrite:
         LOG.info(f"{workspace.bathy_water_mask} already exists and we aren't making it again...")
         return workspace.bathy_water_mask
     

@@ -25,7 +25,7 @@ def _run_mapper(config_file: Path, model_config: ModelConfig) -> None:
         Curve2Flood_MainFunction(str(config_file), quiet=model_config.quiet)
 
 def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
-    if model_config.vdt_exists and not workspace.configs.process_stream_network:
+    if model_config.vdt_exists and not workspace.configs.overwrite:
         return model_config
     
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
@@ -39,7 +39,7 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
 def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not model_config.vdt_exists or\
           workspace.configs.disable_bathymetry or \
-            (model_config.burned_dem_exists and not workspace.configs.process_stream_network):
+            (model_config.burned_dem_exists and not workspace.configs.overwrite):
         return model_config
     
     LOG.info("Running flood mapper to generate bathymetry...")
@@ -81,7 +81,7 @@ def _mapper_has_required_outputs(config: Path, workspace: Workspace) -> bool:
 
 def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not workspace.mapper.is_curve2flood_fldpln_mapper() or \
-        (workspace.fldpln_library.exists() and not workspace.configs.process_stream_network):
+        (workspace.fldpln_library.exists() and not workspace.configs.overwrite):
         return model_config
     
     if (not workspace.DEM_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()):

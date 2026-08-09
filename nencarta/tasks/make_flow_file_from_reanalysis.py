@@ -4,7 +4,6 @@ import pandas as pd
     
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 
 def _make_flood_flow_file_from_base_max_file(reanalysis_flow_file: Path,
                                             out_file: Path,
@@ -15,7 +14,7 @@ def _make_flood_flow_file_from_base_max_file(reanalysis_flow_file: Path,
 
 
 def make_flood_flow_file_from_base_max_file(workspace: Workspace) -> Path:
-    if workspace.COMID_Q_File.exists() and not workspace.configs.process_stream_network:
+    if workspace.COMID_Q_File.exists() and not workspace.configs.overwrite:
         LOG.info(f"{workspace.COMID_Q_File} already exists and we aren't making it again...")
         return workspace.COMID_Q_File
     

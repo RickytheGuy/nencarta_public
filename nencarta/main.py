@@ -4,7 +4,6 @@ import json
 import pprint
 import argparse
 from pathlib import Path
-import multiprocessing as mp
 from contextlib import redirect_stdout, redirect_stderr
 
 # local imports
@@ -14,34 +13,6 @@ from nencarta.pipeline import build_pipeline
 from nencarta.core.enumerations import Mapper
 from nencarta.core.configs import NencartaConfig
 from nencarta.Download_Process_ForecastData import Download_USGS_DEM_Data_Using_WarningFlag_Data
-
-
-def _resolve_parallel_settings(data, cli_parallel=None, cli_num_workers=None):
-    """
-    Resolve (parallel: bool, num_workers: int) from JSON content and optional
-    CLI overrides. CLI overrides win when provided. Defaults to serial.
-    """
-    # Support both 'parallel' and legacy 'run_parallel' in JSON
-    json_parallel = data.get("parallel", data.get("run_parallel"))
-    json_workers = data.get("num_workers", data.get("workers"))
-
-    # Choose final parallel flag
-    parallel = cli_parallel if cli_parallel is not None else json_parallel
-    if parallel is None:
-        parallel = False  # safer, deterministic default
-
-    # Choose final worker count
-    num_workers = cli_num_workers if cli_num_workers is not None else json_workers
-    if parallel:
-        try:
-            num_workers = int(num_workers) if num_workers is not None else (os.cpu_count() or 1)
-        except (TypeError, ValueError):
-            num_workers = os.cpu_count() or 1
-        num_workers = max(1, num_workers)
-    else:
-        num_workers = 1
-
-    return bool(parallel), num_workers
     
 def process_json_input_serial(json_file):
     """Process input from a JSON file."""
@@ -51,11 +22,10 @@ def process_json_input_serial(json_file):
         LOG.info(f"{os.linesep}{pprint.pformat(data)}")
     
     watersheds: list[dict] = data.get("watersheds", [])
-    timer = Timer()
     for watershed in watersheds:
-        process_watershed(watershed, timer)
+        process_watershed(watershed)
 
-    return timer
+    return None
 
 def process_single_watershed(watershed: dict):
     """Run a single watershed processing job and log to a file."""
@@ -67,11 +37,11 @@ def process_single_watershed(watershed: dict):
 
     with open(log_path, 'w') as log_file, redirect_stdout(log_file), redirect_stderr(log_file):
         try:
-            timer = Timer()
-            process_watershed(watershed, timer)
-            return timer
+            process_watershed(watershed)
+            return watershed_name
         except Exception as e:
             LOG.error(f"Exception during processing {watershed_name}: {e}")
+            raise
 
 def _resolve_workspace_dems(configs: NencartaConfig) -> list:
     """Return DEM inputs that should become workspaces."""
@@ -91,12 +61,7 @@ def _resolve_workspace_dems(configs: NencartaConfig) -> list:
 
     return []
 
-def process_watershed(input_dict: dict):
-    """Process one watershed dictionary through the workspace pipeline.
-
-    The ``timer`` argument is kept for compatibility with older callers. The
-    current pipeline manages timing through task-level profiling.
-    """
+def _setup_workspace(input_dict: dict) -> list[Workspace]:
     configs = NencartaConfig(input_dict)
     dem_list = _resolve_workspace_dems(configs)
     
@@ -108,15 +73,36 @@ def process_watershed(input_dict: dict):
             return
         
     workspaces = [Workspace(configs, dem) for dem in dem_list]
+    return workspaces
+
+def process_watershed(input_dict: dict):
+    """Process one watershed dictionary through the workspace pipeline.
+
+    The current pipeline manages timing through task-level profiling.
+    """
+    workspaces = _setup_workspace(input_dict)
     run_pipeline(workspaces)
     return
+
+def process_many_watersheds(input_dicts: list[dict]):
+    workspaces = []
+    for input_dict in input_dicts:
+        workspaces.extend(_setup_workspace(input_dict))
+
+    run_pipeline(workspaces)
 
 def run_pipeline(workspaces: list[Workspace], executor=None):
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
+    num_workers = workspaces[0].configs.num_workers
     pipeline = build_pipeline(profile)
 
-    # pipeline.visualize_graphviz(filename='test.png', hide_default_args=True, orient='TB')
+    if executor is not None and num_workers is not None:
+        LOG.warning(f"Ignoring num_workers={num_workers} because an executor was provided.")
+    elif executor is None and num_workers is not None:
+        from concurrent.futures import ProcessPoolExecutor
+        executor = ProcessPoolExecutor(max_workers=num_workers)
+        LOG.info(f"Using ProcessPoolExecutor with {num_workers} workers.")
 
     try:
         pipeline.map(
@@ -158,27 +144,15 @@ def process_json_input(json_file, parallel=None, num_workers=None):
         LOG.warning("No watersheds found.")
         return
 
-    # Resolve final parallel settings (JSON + optional CLI override)
-    parallel, num_workers = _resolve_parallel_settings(
-        data,
-        cli_parallel=parallel,
-        cli_num_workers=num_workers
-    )
-    LOG.info(f"Parallel: {parallel} | Workers: {num_workers}")
-    if parallel and len(watersheds) > 1:
-        # Parallel path: one process per watershed, logging handled by process_single_watershed
-        with mp.Pool(processes=num_workers) as pool:
-            pool.imap_unordered(process_single_watershed, watersheds)
-    else:
-        # Serial path: reuse existing serial routine (retains your validation flow)
-        process_json_input_serial(json_file)
+    process_many_watersheds(watersheds)
 
 def rename_cli_keys(input_dict: dict) -> dict:
     """Rename CLI argument keys to match watershed dictionary keys."""
     key_mapping = {
         "watershed":"name",
     }
-    return {key_mapping.get(key, key): value for key, value in input_dict.items()}
+    skipped_keys = {"command"}
+    return {key_mapping.get(key, key): value for key, value in input_dict.items() if key not in skipped_keys}
 
 def process_cli_arguments(args):
     """Process input from CLI arguments."""
@@ -210,10 +184,6 @@ def main():
     json_parser.add_argument("--num_workers", type=int, default=None,
                              help="Number of workers when running in parallel (overrides JSON).")
 
-    # # Subcommand for JSON input
-    # json_parser = subparsers.add_parser("json", help="Process watersheds from a JSON file")
-    # json_parser.add_argument("json_file", type=str, help="Path to the JSON file")
-
     # Subcommand for CLI input
     cli_parser = subparsers.add_parser("cli", help="Process watershed parameters via CLI")
     cli_parser.add_argument("watershed", type=str, help="Watershed name")
@@ -227,7 +197,7 @@ def main():
     cli_parser.add_argument("--land_watervalue", type=int, action=RequiredIfFloodWaterAction,
                         help="Land water value in the land cover raster (Required if --flood_waterlc_and_strm_cells is True)")
     cli_parser.add_argument("--clean_dem", action="store_true", help="Clean DEM data before processing")
-    cli_parser.add_argument("--process_stream_network", action="store_true", help="Clean DEM data before processing")
+    cli_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing intermediate products")
     cli_parser.add_argument("--mapper", type=str, default="Curve2Flood-Kernel Weighted", choices=Mapper.list_names(), help="Mapping method")
     cli_parser.add_argument("--use_specified_depth_for_bathy_mask", action="store_true", help="Specify a depth for FloodSprederPy to use for bathymetry masking")
     cli_parser.add_argument("--age_of_forecast_days", type=int, default=7, help="Age of forecast in days")

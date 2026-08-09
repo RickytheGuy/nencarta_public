@@ -74,7 +74,7 @@ def _validate_dem_coordinate_system(dem: Path):
 
 def assign_and_validate_dem(workspace: Workspace) -> Path:
     configs = workspace.configs
-    if workspace.original_dem == workspace.assigned_dem and workspace.assigned_dem.exists() and not configs.process_stream_network:
+    if workspace.original_dem == workspace.assigned_dem and workspace.assigned_dem.exists() and not configs.overwrite:
         LOG.info(f"{workspace.assigned_dem} exists")
         return workspace.assigned_dem
 

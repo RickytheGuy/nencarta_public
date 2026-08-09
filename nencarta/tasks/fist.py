@@ -19,7 +19,7 @@ def get_fist_inputs(workspace: Workspace, flow_file: Path) -> tuple:
     elif configs.floodmap_mode == FloodMapMode.USER:
         SEED_File = workspace.FIST_Folder / f"{workspace.FileName}_{flow_file.name.rsplit('.', 1)[0]}_Seed.parquet"
 
-    if SEED_File.exists() and not configs.process_stream_network:
+    if SEED_File.exists() and not configs.overwrite:
         LOG.info(f"Seed file {SEED_File} already exists for domain {workspace.watershed}, skipping FIST GeoJSON generation.")
         return tasks
 
