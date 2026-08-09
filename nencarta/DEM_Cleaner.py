@@ -1464,7 +1464,6 @@ def DEM_Cleaner_Program(OutputID,
         ModifiedDEM_Name = ModifiedDEM_Name.replace('.tif','_Clean.tif')
         ModifiedDEM_Name = ModifiedDEM_Name.replace('.img','_Clean.tif')
         ModifiedDEM = MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, ncols, nrows, TopWidthMax, dx, dy, COMID_to_ID, MinCOMID, COMID_Unique_TW, WeightBox, ElipseMask, TW)
-        exit()
         Write_Output_Raster(ModifiedDEM_Name, ModifiedDEM[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Float32, compression)
 
 def Create_Folder(F):
