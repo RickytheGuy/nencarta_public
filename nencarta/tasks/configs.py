@@ -208,9 +208,9 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["XS_Out_File"] = workspace.Cross_Section_File
 
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
+    params["StrmShp_File"] = stream_vector
 
     if not configs.disable_bathymetry:
-        params["StrmShp_File"] = stream_vector
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
         if configs.use_power_laws_for_bathymetry:

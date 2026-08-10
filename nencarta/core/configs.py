@@ -246,10 +246,7 @@ class NencartaConfig:
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'new_strm_threshold_km2' must be specified when moving stream network.")
 
         self.mapper: Mapper = Mapper.from_string(self.get('mapper'))
-        
-        if self.mapper.is_curve2flood_fldpln_mapper() and not self.move_stream_network_to_thalweg:
-            LOG.warning(f"Move stream network was set to false, but the mapper is set to Curve2Flood-FLDPLNpy. Ensure that the input stream network is properly aligned with the DEM.")
-        
+
         self.streams_as_parquet: bool = self.get("streams_as_parquet")
         if self.streams_as_parquet and self.mapper.is_curve2flood_fldpln_mapper():
             raise ValueError("The Curve2Flood-FLDPLNpy mapper is not currently compatible with stream networks stored as parquet files. Please set streams_as_parquet to false in order to proceed...")

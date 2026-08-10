@@ -38,7 +38,7 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     if not configs.move_stream_network_to_thalweg or not configs.disable_bathymetry:
         make_stream_raster(workspace)
 
-    if configs.clean_dem or not configs.disable_bathymetry or configs.burn_streams:
+    if configs.clean_dem or not configs.disable_bathymetry or configs.burn_streams or configs.move_stream_network_to_thalweg:
         make_water_mask(workspace)
 
     if configs.clean_dem:

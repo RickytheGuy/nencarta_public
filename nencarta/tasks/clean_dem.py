@@ -50,7 +50,7 @@ def make_clean_dem(workspace: Workspace) -> Path:
     _make_flood_flow_file_from_base_max_file(
         reanalysis_flow_file=workspace.DEM_Reanalsyis_FlowFile,
         out_file=FlowFileName,
-        columns=[OutputID, 'p_exceed_50'],
+        columns=[OutputID, workspace.configs.specified_bathyflow_field],
     )
 
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)

@@ -69,7 +69,7 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
 
     wbt.fill_depressions(str(dem_for_conflation_path), str(workspace.filled_dem))
     if not workspace.filled_dem.exists():
-        raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully.")
+        raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully using {dem_for_conflation_path}.")
     wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
     if not workspace.flowdir.exists():
         raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
@@ -1320,7 +1320,10 @@ def fill_in_paths_between_headwaters_and_outlets(
             while True:
                 if fid_source_2 in B_reach_sig[confluence_fid].ancestors:
                     break
-                confluence_fid = next(GB.successors(confluence_fid))
+                try:
+                    confluence_fid = next(GB.successors(confluence_fid))
+                except StopIteration:
+                    break
 
             confluence_linkno = headwater_fid_to_linkno[fid_source_1]
             do_these_headwaters_connect = True
@@ -1783,7 +1786,9 @@ def _create_stream_info_table(
 
     output_table = []
     for linkno, row in streams_gdf.iterrows():
-        line: LineString = row.geometry
+        line = row.geometry
+        if isinstance(line, MultiLineString):
+            line = max(line.geoms, key=lambda l: l.length)  # Choose the longest line if there are multiple parts
 
         # Get the pixel coordinates of the start and end points
         start_point = Point(line.coords[0])
