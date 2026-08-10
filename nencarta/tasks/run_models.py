@@ -97,12 +97,20 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     if workspace.fldpln_library.exists():
         workspace.fldpln_library.unlink()
 
-    LOG.info("Building FLDPLN library...")
+    if not workspace.configs.disable_bathymetry:
+        dem = workspace.FS_BathyFile
+    elif workspace.configs.burn_streams:
+        dem = workspace.fixed_dem
+    elif workspace.configs.clean_dem:
+        dem = workspace.DEM_File_Clean
+    else:
+        dem = workspace.assigned_dem
 
+    LOG.info("Building FLDPLN library...")
     from curve2flood import build_fldpln_library
 
     build_fldpln_library(
-        dem = workspace.assigned_dem,
+        dem = dem,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,
