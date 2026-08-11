@@ -234,6 +234,7 @@ def smooth_and_burn_dem(
 
     ocean_mask = (dem == 0)
     dem[ocean_mask] = nodata_value
+    dem[lakes] = nodata_value
 
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)
