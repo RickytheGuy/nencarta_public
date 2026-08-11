@@ -64,6 +64,16 @@ def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame 
 
     return lakes_gdf
 
+def whitebox_callback(message: str) -> None:
+    """
+    Callback function for WhiteboxTools to log messages.
+    We only want to log errors and warnings, so we filter out other messages.
+    """
+    if "warning" in message.lower():
+        LOG.warning(message)
+    if "error" in message.lower():
+        LOG.error(message) 
+
 def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float:
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
@@ -71,13 +81,13 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
-    wbt.fill_depressions(str(dem_for_conflation_path), str(workspace.filled_dem))
+    wbt.fill_depressions(str(dem_for_conflation_path), str(workspace.filled_dem), callback=whitebox_callback)
     if not workspace.filled_dem.exists():
         raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully using {dem_for_conflation_path}.")
-    wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir))
+    wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir), callback=whitebox_callback)
     if not workspace.flowdir.exists():
         raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
-    wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area')
+    wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area', callback=whitebox_callback)
     if not workspace.flowacc.exists():
         raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
 
@@ -92,7 +102,7 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
         if file.stem.startswith(workspace.new_StrmShp.stem):
             file.unlink()
 
-    wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True)
+    wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True, callback=whitebox_callback)
     if not workspace.whitebox_stream_raster.exists():
         raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
             
@@ -104,8 +114,8 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     streams_ds.WriteArray(streams)
     streams_ds = None
 
-    wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True)
-    wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
+    wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True, callback=whitebox_callback)
+    wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp), callback=whitebox_callback)
     if not workspace.new_StrmShp.exists():
         if workspace.configs.raise_errors_if_nothing_in_domain:
             raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
@@ -115,8 +125,8 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
             workspace.DEM_StrmShp = workspace.new_StrmShp_matched
             return
 
-    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
-    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance)
+    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance, callback=whitebox_callback)
+    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance, callback=whitebox_callback)
 
     # Whitebox does not insert the projection into the shapefile, so we need to do that here.
     prj_file = workspace.new_StrmShp.with_suffix('.prj')
