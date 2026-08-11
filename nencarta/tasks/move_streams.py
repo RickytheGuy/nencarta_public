@@ -249,8 +249,10 @@ def smooth_and_burn_dem(
     ocean_mask = (dem == 0)
     dem[ocean_mask] = nodata_value
 
-    channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
-    dem = smooth_burned_dem(dem, channel_mask, pbar=False)
+    streams = _get_stream_raster(dem, dem_ds, workspace.DEM_StrmShp, id_col)
+
+    channel_mask = burn_streams_into_dem(dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
+    dem = smooth_burned_dem(dem, channel_mask, streams, pbar=False)
 
     dem[dem < -1000] = nodata_value # Remove any DEM values that are less than -1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
@@ -316,10 +318,10 @@ def elevation_components_nx(G: nx.Graph, elevations: dict) -> list[set]:
 
     return components
 
-def smooth_burned_dem(array: np.ndarray, mask: np.ndarray = None, pbar: bool = True, max_difference: float = 0.5) -> np.ndarray:
-    array = array.astype(np.float32, copy=False)
+def smooth_burned_dem(dem: np.ndarray, mask: np.ndarray = None, streams: np.ndarray = None, pbar: bool = True, max_difference: float = 0.5) -> np.ndarray:
+    dem = dem.astype(np.float32, copy=False)
     if mask is None:
-        mask = (array % max_difference) == 0
+        mask = (dem % max_difference) == 0
 
     banks = binary_dilation(mask, structure=np.ones((3, 3), dtype=int)).astype(np.bool_)
     banks[mask] = False  # Banks are the cells adjacent to the mask, but not in the mask
@@ -327,7 +329,7 @@ def smooth_burned_dem(array: np.ndarray, mask: np.ndarray = None, pbar: bool = T
     # Get a distance raster for the mask, where the distance is highest in the center, but smallest at the edges
     distance_to_banks = distance_transform_edt(mask)
 
-    G = build_mask_graph(array, mask)
+    G = build_mask_graph(dem, mask)
     elevations = nx.get_node_attributes(G, "elevation")
     components = elevation_components_nx(G, elevations)
     final_node_elevations = {}
@@ -401,31 +403,21 @@ def smooth_burned_dem(array: np.ndarray, mask: np.ndarray = None, pbar: bool = T
                     new_elevation -= (0.1 * (max(min(distance_to_banks[node], max_distance_to_banks), min_distance_to_banks) - min_distance_to_banks) / (max_distance_to_banks - min_distance_to_banks))
 
             # Ensure that the new elevation does not exceed the banks, by raising the banks a bit
+            dem_mask = (dem[node[0]-1:node[0]+2, node[1]-1:node[1]+2] <= new_elevation)
             rows, cols = np.nonzero(
-                (array[node[0]-1:node[0]+2, node[1]-1:node[1]+2] <= new_elevation) & 
-                banks[node[0]-1:node[0]+2, node[1]-1:node[1]+2]
+                dem_mask & banks[node[0]-1:node[0]+2, node[1]-1:node[1]+2]
             )
             if len(rows) > 0:
-                array[rows + node[0]-1, cols + node[1]-1] = new_elevation + 0.5
+                dem[rows + node[0]-1, cols + node[1]-1] = new_elevation + 0.5
 
             final_node_elevations[node] = new_elevation
 
     for node, new_elevation in final_node_elevations.items():
-        array[node] = new_elevation
+        dem[node] = new_elevation
 
-    return array
+    return dem
 
-def burn_streams_into_dem(
-        dem: np.ndarray,
-        streamlines: np.ndarray,
-        dem_ds: gdal.Dataset,
-        streams_gdf: gpd.GeoDataFrame,
-        lakes: np.ndarray | None,
-        id_col: str = 'LINKNO',
-        ds_col: str = 'DSLINKNO',
-        nodata_value: float = -9999,
-        min_feature_size: int = 5
-):
+def _get_stream_raster(dem: np.ndarray, dem_ds: gdal.Dataset, streamlines: str, id_col: str = 'LINKNO'):
     # Rasterize streamlines on the fly
     mem_ds = gdal.GetDriverByName('MEM').Create('', dem.shape[1], dem.shape[0], 1, gdal.GDT_Int32)
     mem_ds.SetGeoTransform(dem_ds.GetGeoTransform())
@@ -436,6 +428,19 @@ def burn_streams_into_dem(
     mem_ds.FlushCache()
     streams = mem_ds.ReadAsArray()
 
+    return streams
+
+def burn_streams_into_dem(
+        dem: np.ndarray,
+        streams: np.ndarray,
+        dem_ds: gdal.Dataset,
+        streams_gdf: gpd.GeoDataFrame,
+        lakes: np.ndarray | None,
+        id_col: str = 'LINKNO',
+        ds_col: str = 'DSLINKNO',
+        nodata_value: float = -9999,
+        min_feature_size: int = 5
+):
     G = nx.from_pandas_edgelist(
         streams_gdf[streams_gdf[ds_col] > 0],
         source=id_col,
@@ -698,6 +703,29 @@ def _burn_linestring(
 
         dem[row2, col2] = downstream_elev
         last_elevation = downstream_elev
+
+        # Suppose that there are two+ neighbors, with an elevation <= new_elevation.
+        # If one is in the stream raster but the other is not, let us bump the elevation of the other up
+        minr = max(0, row1 - 1)
+        maxr = min(nrows - 1, row1 + 1)
+        minc = max(0, col1 - 1)
+        maxc = min(ncols - 1, col1 + 1)
+        rs, cs = np.nonzero(dem[minr:maxr+1, minc:maxc+1] <= upstream_elev)
+        rs += minr
+        cs += minc
+        instream_neighbors = []
+        outstream_neighbors = []
+        for r, c in zip(rs, cs):
+            if r == row1 and c == col1:
+                continue
+            if streams[r, c] > 0:
+                instream_neighbors.append((r, c))
+            else:
+                outstream_neighbors.append((r, c))
+
+        if instream_neighbors and outstream_neighbors:
+            for r, c in outstream_neighbors:
+                dem[r, c] = upstream_elev + 0.5
 
     # One more thing: check if the last (row2, col2) is on the border of the dem. If so, drop by 0.5 (helps filled dem step route out of the DEM)
     if row2 == 0 or row2 == nrows - 1 or col2 == 0 or col2 == ncols - 1:
