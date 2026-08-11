@@ -83,7 +83,7 @@ def _write_config(config_path: Path, params: dict):
             content = stream.getvalue()
             content = '\n'.join(line if not line.startswith("'#") else f"# {line[2:].split(':')[0][:-1]}" for line in content.split('\n'))
             # Replace lines starting with : or ? with ''
-            content = '\n'.join(line if (not line.startswith(':') and not line.startswith('?')) else '' for line in content.split('\n'))
+            content = '\n'.join(line if (not line.startswith((':', '?', "'"))) else '' for line in content.split('\n'))
             f.write(content)
         else:
             first_line = True
@@ -237,6 +237,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
             if not workspace.bathy_water_mask:
                 raise ValueError("Bathy water mask is required when not using specified depth for bathy mask.")
             params["BathyWaterMask"] = workspace.bathy_water_mask
+            params["ARC_Use_BathyWaterMask"] = True
 
         params["# Bathymetry_Information"] = ""
         params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", 0.2)
