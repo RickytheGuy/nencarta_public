@@ -1547,6 +1547,10 @@ def update_wtbx_gdf(
     source_id_to_strm_order = source_gdf.set_index(source_id_col)[strm_order_col].to_dict()
     wtbx_gdf[strm_order_col] = wtbx_gdf[source_id_col].map(source_id_to_strm_order)
 
+    # If there are any single streams (no upstream, no downstream), we should remove them
+    single_streams = (wtbx_gdf[source_ds_col] == -1) & ~(wtbx_gdf[source_id_col].isin(source_gdf[source_ds_col]))
+    wtbx_gdf = wtbx_gdf[~single_streams]
+
     # Map all other columns from the source_gdf to the wtbx_gdf based on the LINKNO
     source_columns = [col for col in source_gdf.columns if col not in [source_id_col, source_ds_col, strm_order_col, 'geometry', 'buffered']]
     for col in source_columns:
