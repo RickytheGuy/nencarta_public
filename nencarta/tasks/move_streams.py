@@ -1567,6 +1567,37 @@ def update_wtbx_gdf(
     
     return wtbx_gdf
 
+def remove_select_lake_streams(
+    wtbx_gdf: gpd.GeoDataFrame,
+    lakes_gdf: gpd.GeoDataFrame,
+    wtbx_id_col: str = "FID",
+    wtbx_ds_col: str = "DS_LINK_ID"
+):
+    intersecting_streams = wtbx_gdf.geometry.intersects(lakes_gdf.union_all())
+    # We only want to remove streams that also have downstream and upstream segments outside the lake
+    # Let's find those, and remove them from the intersecting_streams mask
+    fids = set(wtbx_gdf[intersecting_streams][wtbx_id_col].tolist())
+    if fids:
+        GB: nx.DiGraph = nx.from_pandas_edgelist(wtbx_gdf, source=wtbx_id_col, target=wtbx_ds_col, create_using=nx.DiGraph)
+        GB.remove_node(-1)
+        for fid in fids:
+            # Do any of descendants and ancestors of this fid exist outside the lake?
+            descendants = nx.descendants(GB, fid)
+            # See if any descendants are not in fids
+            if not any(d not in fids for d in descendants):
+                continue
+            ancestors = nx.ancestors(GB, fid)
+            if not any(a not in fids for a in ancestors):
+                continue
+
+            intersecting_streams[wtbx_gdf[wtbx_id_col] == fid] = False  # Keep this stream, since it has upstream and downstream segments outside the lake
+
+    fids_to_remove = set(wtbx_gdf[intersecting_streams][wtbx_id_col].tolist())
+    wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].apply(lambda x: x if x not in fids_to_remove else -1)
+    wtbx_gdf = wtbx_gdf[~intersecting_streams]  # Remove streams that intersect lakes
+
+    return wtbx_gdf
+
 def _conflate_streams(
     source_gdf: gpd.GeoDataFrame,
     streams_vector: os.PathLike,
@@ -1587,6 +1618,8 @@ def _conflate_streams(
     wtbx_gdf = wtbx_vector.to_geopandas().set_crs(dem_proj)
     if wtbx_gdf.empty:
         return wtbx_gdf
+
+    wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].clip(lower=-1)  # Ensure no outlet is -1
     
     bounds = wtbx_vector.epsg_4326_bbox
 
@@ -1609,10 +1642,7 @@ def _conflate_streams(
     wtbx_gdf = enforce_endorheic_basins(source_gdf, wtbx_gdf, source_id_col, source_ds_col, wtbx_id_col, wtbx_ds_col)
 
     if lakes_gdf is not None and not lakes_gdf.empty:
-        wtbx_gdf = wtbx_gdf[~wtbx_gdf.geometry.intersects(lakes_gdf.union_all())]  # Remove streams that intersect lakes
-        # Any ds link ids not in the network are set to -1
-        existing_ids = set(wtbx_gdf.loc[wtbx_gdf[wtbx_id_col] > 0, wtbx_id_col])
-        wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].apply(lambda x: x if x in existing_ids else -1)
+        wtbx_gdf = remove_select_lake_streams(wtbx_gdf, lakes_gdf, wtbx_id_col, wtbx_ds_col)
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")

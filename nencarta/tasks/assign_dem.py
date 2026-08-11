@@ -93,7 +93,7 @@ def assign_and_validate_dem(workspace: Workspace) -> Path:
     elif workspace.original_dem:
         if not _validate_dem_coordinate_system(workspace.assigned_dem):
             raise ValueError("Original DEM has invalid coordinate system. See log for details.")
-        LOG.info("Using original DEM as the assigned DEM without moving the stream network.")
+        LOG.info("Using original DEM as the assigned DEM.")
         return workspace.assigned_dem
     else:
         raise ValueError(
