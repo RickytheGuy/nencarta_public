@@ -42,6 +42,10 @@ def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | No
     bbox = dem_raster.bbox
     lakes_layer.SetSpatialFilterRect(*bbox)
 
+    # Check if there are any features in the lakes_layer after applying the spatial filter
+    if lakes_layer.GetFeatureCount() == 0:
+        return None
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
@@ -234,7 +238,6 @@ def smooth_and_burn_dem(
 
     ocean_mask = (dem == 0)
     dem[ocean_mask] = nodata_value
-    dem[lakes] = nodata_value
 
     channel_mask = burn_streams_into_dem(dem, workspace.DEM_StrmShp, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
     dem = smooth_burned_dem(dem, channel_mask, pbar=False)

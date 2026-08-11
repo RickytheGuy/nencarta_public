@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+from nencarta.core.raster import Raster
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
 from nencarta.core.enumerations import Mapper
@@ -9,6 +10,7 @@ from nencarta._constants import FLOODSPREADER_PATH
 from nencarta.core.inspect_config import inspect_config
 from nencarta.core.floodmapper_output import FloodMapperBulkOutput, FloodMapperOutput
 from nencarta.core.model_config import ModelConfig
+from nencarta.tasks.move_streams import load_lake_array
 
 def _run_arc(config: Path, model_config: ModelConfig) -> None:
     from arc import Arc # Lazy import helps load faster
@@ -106,6 +108,10 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     else:
         dem = workspace.assigned_dem
 
+    bg_mask = None
+    if workspace.configs.lakes:
+        bg_mask = load_lake_array(workspace, Raster(dem))
+
     LOG.info("Building FLDPLN library...")
     from curve2flood import build_fldpln_library
 
@@ -122,6 +128,7 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         vdt_file = workspace.VDT_File_Bathy,
         parallel = workspace.configs.fldpln_parallel,
         pbar = not workspace.configs.quiet,
+        bg_mask=bg_mask
     )
 
     return model_config
