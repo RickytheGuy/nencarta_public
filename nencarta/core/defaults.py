@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "specify_depths_for_bathy_mask": [0.1],
     "streamflow_source": str(StreamflowSource.GEOGLOWS),
     "streams_as_parquet": False,
+    "use_bathy_water_mask": False,
     "use_parquet": False,
     "use_power_laws_for_bathymetry": False,
     "use_specified_depth_for_bathy_mask": True,

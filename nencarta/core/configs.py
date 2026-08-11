@@ -257,6 +257,10 @@ class NencartaConfig:
         else:
             self.floodmap_id = ''
 
+        self.use_bathy_water_mask: bool = self.get("use_bathy_water_mask")
+        if self.use_bathy_water_mask and self.use_specified_depth_for_bathy_mask:
+            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'use_bathy_water_mask' and 'use_specified_depth_for_bathy_mask' cannot both be True. Please choose one method for bathymetry masking.")
+
         self.bbox: tuple[float, ...] = self.validate_bbox()
         self.flowline: str = self.get_path("flowline")
         self.source_flowlines: list[str] = self.get("source_flowlines")

@@ -237,7 +237,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
             if not workspace.bathy_water_mask:
                 raise ValueError("Bathy water mask is required when not using specified depth for bathy mask.")
             params["BathyWaterMask"] = workspace.bathy_water_mask
-            params["ARC_Use_BathyWaterMask"] = True
+            params["ARC_Use_BathyWaterMask"] = configs.use_bathy_water_mask
 
         params["# Bathymetry_Information"] = ""
         params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", 0.2)
