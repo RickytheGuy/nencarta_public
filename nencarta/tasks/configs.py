@@ -213,6 +213,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     if not configs.disable_bathymetry:
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
+        params["Monotonic_Bankfull_WSE"] = configs.monotonic_bankfull_wse
         if configs.use_power_laws_for_bathymetry:
             params["drainage_area_field"] = configs.area_km2_field
             params["coefficient_depth"] = 0.27

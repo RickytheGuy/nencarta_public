@@ -331,6 +331,7 @@ class NencartaConfig:
         self.area_m2_field: str = self.get("area_m2_field")
         self.area_km2_field: str = self.get("area_km2_field")
         self.num_workers = self.get_num_workers()
+        self.monotonic_bankfull_wse: bool = self.get("monotonic_bankfull_wse")
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

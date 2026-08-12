@@ -66,18 +66,21 @@ def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame 
 
 def whitebox_callback(message: str) -> None:
     """
-    Callback function for WhiteboxTools to log messages.
+    Callback function for WhiteboxTools to log messa`ges.
     We only want to log errors and warnings, so we filter out other messages.
     """
-    if "warning" in message.lower():
+    lowered = message.lower()
+    if "warning" in lowered and not lowered.endswith("It appears that the input data is in"):
         LOG.warning(message)
-    if "error" in message.lower():
+    if "error" in lowered or "panic" in lowered:
         LOG.error(message) 
 
 def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float:
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
     wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
+    if workspace.configs.parallel:
+        wbt.set_max_procs(1)
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
