@@ -3,18 +3,18 @@ import math
 import warnings
 from enum import Enum
 from pathlib import Path
-from functools import partial
 from dataclasses import dataclass
 from itertools import combinations
 from collections import defaultdict
+from functools import partial, cache
 
 import tqdm
 import numpy as np
 import pandas as pd
 import networkx as nx
-import geopandas as gpd
 from numba import njit
-from osgeo import gdal, ogr
+import geopandas as gpd
+from osgeo import gdal, ogr, osr
 from shapely.ops import substring
 from whitebox import WhiteboxTools
 from shapely import line_merge, prepare
@@ -27,6 +27,13 @@ from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
 
+@cache
+def get_lake_ds(path: Path) -> gdal.Dataset:
+    ds = ogr.Open(str(path))
+    if ds is None:
+        raise FileNotFoundError(f"Lake shapefile not found at {path}. Please ensure it is included in the nencarta package.")
+    return ds
+
 def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
     """
     We load the lakes in the DEM's domain. We do not want to include lakes/reservoirs.
@@ -34,17 +41,26 @@ def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | No
     if not workspace.configs.lakes:
         return None
 
-    lakes_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte)
+    if workspace.lake_raster.exists() and not workspace.configs.overwrite:
+        lakes = gdal.Open(str(workspace.lake_raster)).ReadAsArray().astype(np.uint8, copy=False)
+        return lakes
+
+    lakes_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(str(workspace.lake_raster), dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte, options=[f'COMPRESS={workspace.configs.compression}'])
     lakes_ds.SetGeoTransform(dem_raster.geotransform)
     lakes_ds.SetProjection(dem_raster.projection)
-    ds: gdal.Dataset = ogr.Open(workspace.configs.lakes)
+    ds: gdal.Dataset = get_lake_ds(workspace.configs.lakes)
     lakes_layer: ogr.Layer = ds.GetLayer()
     bbox = dem_raster.bbox
-    lakes_layer.SetSpatialFilterRect(*bbox)
+    # If the lake shapefile is in a different projection than the DEM, we need to transform the bbox to the lake shapefile's projection
+    lake_srs: osr.SpatialReference = lakes_layer.GetSpatialRef()
+    if lake_srs is not None and lake_srs.ExportToWkt() != dem_raster.projection:
+        source_srs: osr.SpatialReference = osr.SpatialReference(dem_raster.projection)
+        transform = osr.CoordinateTransformation(source_srs, lake_srs)
+        min_x, min_y, _ = transform.TransformPoint(bbox[0], bbox[1])
+        max_x, max_y, _ = transform.TransformPoint(bbox[2], bbox[3])
+        bbox = (min_x, min_y, max_x, max_y)
 
-    # Check if there are any features in the lakes_layer after applying the spatial filter
-    if lakes_layer.GetFeatureCount() == 0:
-        return None
+    lakes_layer.SetSpatialFilterRect(*bbox)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -59,8 +75,6 @@ def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame 
         return None
 
     lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
-    if 'Area_PW' in lakes_gdf.columns:
-        lakes_gdf = lakes_gdf[lakes_gdf['Area_PW'] > 1] # Filter to about this size lake
 
     return lakes_gdf
 
@@ -108,6 +122,9 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True, callback=whitebox_callback)
     if not workspace.whitebox_stream_raster.exists():
         raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
+
+    # Remove flow accumulation for space
+    workspace.flowacc.unlink()
             
     # Remove in the newly created stream raster streams where the dem == 0 (ocean) or where the dem is nodata. This is important for the stream extraction step, which uses the flow accumulation raster to determine where streams are.
     streams_ds: gdal.Dataset = gdal.Open(str(workspace.whitebox_stream_raster), gdal.GA_Update)
@@ -117,7 +134,6 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     streams_ds.WriteArray(streams)
     streams_ds = None
 
-    wbt.stream_link_identifier(str(workspace.flowdir), str(workspace.whitebox_stream_raster), str(workspace.whitebox_stream_raster), zero_background=True, callback=whitebox_callback)
     wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp), callback=whitebox_callback)
     if not workspace.new_StrmShp.exists():
         if workspace.configs.raise_errors_if_nothing_in_domain:
@@ -130,6 +146,11 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
 
     wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance, callback=whitebox_callback)
     wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance, callback=whitebox_callback)
+
+    # Remove the other vectors that were created
+    for file in workspace.new_StrmShp.parent.glob("*"):
+        if file.stem.startswith(workspace.new_StrmShp.stem) and file.stem != workspace.new_StrmShp.stem:
+            file.unlink()
 
     # Whitebox does not insert the projection into the shapefile, so we need to do that here.
     prj_file = workspace.new_StrmShp.with_suffix('.prj')
@@ -326,7 +347,7 @@ def smooth_burned_dem(dem: np.ndarray, mask: np.ndarray = None, streams: np.ndar
     if mask is None:
         mask = (dem % max_difference) == 0
 
-    banks = binary_dilation(mask, structure=np.ones((3, 3), dtype=int)).astype(np.bool_)
+    banks = binary_dilation(mask, structure=np.ones((3, 3), dtype=int)).astype(np.uint8, copy=False)
     banks[mask] = False  # Banks are the cells adjacent to the mask, but not in the mask
 
     # Get a distance raster for the mask, where the distance is highest in the center, but smallest at the edges
@@ -476,7 +497,7 @@ def burn_streams_into_dem(
     labels, num_features = label(channel_mask, structure=structure)
     
     # Buffer the stream raster as a new mask
-    channel_border = binary_dilation(streams > 0, structure=structure).astype(np.bool_)
+    channel_border = binary_dilation(streams > 0, structure=structure).astype(np.uint8, copy=False)
     channel_border &= (streams == 0) & (dem > -9998)
 
     streams_gdf = streams_gdf.set_index(id_col)
@@ -902,8 +923,14 @@ def split_network_at_confluences(
     buffer_distance: float, 
     wtbx_id_col: str, 
     wtbx_ds_col: str):
-    confluence_points = set(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[-1]) if isinstance(x, LineString) else None).dropna())
-    confluence_points.update(source_gdf.geometry.apply(line_merge).apply(lambda x: Point(x.coords[0]) if isinstance(x, LineString) else None).dropna())
+    confluence_points = set()
+
+    for geom in source_gdf.geometry:
+        geom = line_merge(geom)
+        if isinstance(geom, LineString):
+            coords = geom.coords
+            confluence_points.add(Point(coords[0]))
+            confluence_points.add(Point(coords[-1]))
 
     # If the confluence point is within the buffer distance, let us split the wtbx stream at that point and create a new reach. This will help with matching the streams better.
     max_fid = wtbx_gdf[wtbx_id_col].max()
@@ -944,6 +971,8 @@ def split_network_at_confluences(
         new_row = row.copy()
         new_row[wtbx_id_col] = new_fid
         new_row['geometry'] = new_downstream
+
+        # I know this is not the most efficient way but it works and idk how to do it faster
         wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame([new_row])], ignore_index=True)
         wtbx_gdf.iat[idx, geom_col_index] = new_upstream
         wtbx_gdf.iat[idx, ds_col_index] = new_fid

@@ -47,6 +47,7 @@ class Workspace:
         self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
         self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
         self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
+        self.lake_raster = self.strm_folder / (self.FileName + '_lakes.tif')
 
         # currently the land file will be the same regardless of the streamflow source
         self.LAND_File = self.land_folder / (self.FileName + '_LAND_Raster.tif')
