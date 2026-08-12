@@ -209,6 +209,8 @@ def define_arc_configs(workspace: Workspace,) -> Path:
 
     params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
     params["StrmShp_File"] = stream_vector
+    params["Slope_Low_Percentile"] = configs.slope_low_percentile
+    params["Slope_High_Percentile"] = configs.slope_high_percentile
 
     if not configs.disable_bathymetry:
         params["reach_id"] = configs.stream_id_field
