@@ -601,6 +601,7 @@ class FloodSimulationGUI(QMainWindow):
         group_adv_layout.addWidget(QLabel("Forensic Forecast Hour"), i+1, 0); group_adv_layout.addWidget(self.forensic_forecast_hour, i+1, 1); self.input_fields['forensic_forecast_hour'] = self.forensic_forecast_hour; i+=2
 
         self.specified_bathyflow_field = QComboBox()
+        self.specified_bathyflow_field.addItem("")
         self.specified_bathyflow_field.addItems(FLOW_FIELD_OPTIONS)
         self.specified_bathyflow_field.setEditable(True)
         self.specified_bathyflow_field.setCurrentText("p_exceed_50")
@@ -612,6 +613,35 @@ class FloodSimulationGUI(QMainWindow):
         self.specified_highflow_field.setEditable(True)
         self.specified_highflow_field.setCurrentText(settings.value("specified_highflow_field", "rp100_premium"))
         group_adv_layout.addWidget(QLabel("High Flow Field"), i+1, 0); group_adv_layout.addWidget(self.specified_highflow_field, i+1, 1); self.input_fields['specified_highflow_field'] = self.specified_highflow_field; i+=2
+
+        # These optional inputs expose ARC's drainage-area bathymetry mode. When
+        # all five are supplied together, NenCarta writes them into the ARC MIF
+        # and intentionally omits Flow_File_BF so ARC estimates bathymetry from
+        # drainage area instead of discharge.
+        self.drainage_area_field = QLineEdit()
+        self.drainage_area_field.setPlaceholderText("Optional drainage-area field")
+        self.drainage_area_field.setText(settings.value("drainage_area_field", ""))
+        group_adv_layout.addWidget(QLabel("Drainage Area Field"), i+1, 0); group_adv_layout.addWidget(self.drainage_area_field, i+1, 1); self.input_fields['drainage_area_field'] = self.drainage_area_field; i+=2
+
+        self.coefficient_depth = QLineEdit()
+        self.coefficient_depth.setPlaceholderText("Optional float")
+        self.coefficient_depth.setText(settings.value("coefficient_depth", ""))
+        group_adv_layout.addWidget(QLabel("Depth Coefficient"), i+1, 0); group_adv_layout.addWidget(self.coefficient_depth, i+1, 1); self.input_fields['coefficient_depth'] = self.coefficient_depth; i+=2
+
+        self.exponent_depth = QLineEdit()
+        self.exponent_depth.setPlaceholderText("Optional float")
+        self.exponent_depth.setText(settings.value("exponent_depth", ""))
+        group_adv_layout.addWidget(QLabel("Depth Exponent"), i+1, 0); group_adv_layout.addWidget(self.exponent_depth, i+1, 1); self.input_fields['exponent_depth'] = self.exponent_depth; i+=2
+
+        self.coefficient_width = QLineEdit()
+        self.coefficient_width.setPlaceholderText("Optional float")
+        self.coefficient_width.setText(settings.value("coefficient_width", ""))
+        group_adv_layout.addWidget(QLabel("Width Coefficient"), i+1, 0); group_adv_layout.addWidget(self.coefficient_width, i+1, 1); self.input_fields['coefficient_width'] = self.coefficient_width; i+=2
+
+        self.exponent_width = QLineEdit()
+        self.exponent_width.setPlaceholderText("Optional float")
+        self.exponent_width.setText(settings.value("exponent_width", ""))
+        group_adv_layout.addWidget(QLabel("Width Exponent"), i+1, 0); group_adv_layout.addWidget(self.exponent_width, i+1, 1); self.input_fields['exponent_width'] = self.exponent_width; i+=2
 
         self.move_stream_network_to_new_locations = QCheckBox("Move Stream Network to Match DEM (Optional)")
         self.move_stream_network_to_new_locations.setChecked(settings.value("move_stream_network_to_new_locations", False, type=bool))

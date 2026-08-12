@@ -29,10 +29,11 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 .. _json-bathy_use_banks:
 
 * ``bathy_use_banks`` (Bool, optional): Setting this to True will allow the system
-  to use estimated bank elevations to estimate bathymetry using the streamflow
-  specified in specified_bathyflow_field. Setting this value to False will allow the
-  system to use the estimated water surface elevation to estimate bathymetry the using
-  the streamflow specified in specified_bathyflow_field. Default False.
+  to use estimated bank elevations to estimate bathymetry using either the
+  streamflow specified in ``specified_bathyflow_field`` or the optional
+  drainage-area power-law depth relationship. Setting this value to False will
+  allow the system to use the estimated water surface elevation to estimate
+  bathymetry using that same bathymetry target. Default False.
 
 .. _json-clean_dem:
 
@@ -269,6 +270,43 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   a baseflow (from ``specified_bathyflow_field``) that are less than the specified
   value. Default is None.
 
+.. _json-drainage_area_field:
+
+* ``drainage_area_field`` (String, optional): The drainage-area field in the
+  flowline/stream vector that NenCarta should pass to ARC when estimating
+  bathymetry from drainage-area power laws. This value must be supplied
+  together with ``coefficient_depth``, ``exponent_depth``,
+  ``coefficient_width``, and ``exponent_width``.
+
+.. _json-coefficient_depth:
+
+* ``coefficient_depth`` (Float, optional): Coefficient in the drainage-area
+  power-law relationship used to estimate bankfull depth:
+  ``depth = coefficient_depth * drainage_area ^ exponent_depth``. This value
+  must be supplied together with the other four drainage-area bathymetry
+  parameters.
+
+.. _json-exponent_depth:
+
+* ``exponent_depth`` (Float, optional): Exponent in the drainage-area power-law
+  relationship used to estimate bankfull depth. This value must be supplied
+  together with the other four drainage-area bathymetry parameters.
+
+.. _json-coefficient_width:
+
+* ``coefficient_width`` (Float, optional): Coefficient in the drainage-area
+  power-law relationship used to estimate bankfull width:
+  ``width = coefficient_width * drainage_area ^ exponent_width``. ARC only uses
+  this estimated width if direct bank finding fails. This value must be
+  supplied together with the other four drainage-area bathymetry parameters.
+
+.. _json-exponent_width:
+
+* ``exponent_width`` (Float, optional): Exponent in the drainage-area power-law
+  relationship used to estimate bankfull width when direct bank finding fails.
+  This value must be supplied together with the other four drainage-area
+  bathymetry parameters.
+
 .. _json-quiet:
 
 * ``quiet`` (Bool, optional): Setting this value to True will suppress ARC and
@@ -291,7 +329,11 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   "p_exceed_95", "p_exceed_100", "rp2", "rp5", "rp10", "rp25", "rp50",
   "rp100","p_exceed_0_premium", or "rp100_premium". For "NWM" it must be one of
   "rp2", "rp5", "rp10", "rp25", "rp50", "rp100", or "rp100_premium". Default is
-  "p_exceed_50".
+  "p_exceed_50". If the five drainage-area bathymetry parameters are supplied,
+  NenCarta omits ``Flow_File_BF`` from the ARC input file and uses the
+  drainage-area relationship for ARC bathymetry instead. In that case,
+  ``specified_bathyflow_field`` is only still relevant if you also use
+  ``q_baseflow_threshold`` to filter streams before the ARC run.
 
 .. _json-specify_depths_for_bathy_mask:
 
@@ -441,6 +483,11 @@ These options control bathymetry estimation generation. They are defined in
 
 * :ref:`disable_bathymetry <json-disable_bathymetry>`
 * :ref:`bathy_use_banks <json-bathy_use_banks>`
+* :ref:`drainage_area_field <json-drainage_area_field>`
+* :ref:`coefficient_depth <json-coefficient_depth>`
+* :ref:`exponent_depth <json-exponent_depth>`
+* :ref:`coefficient_width <json-coefficient_width>`
+* :ref:`exponent_width <json-exponent_width>`
 * :ref:`use_specified_depth_for_bathy_mask <json-use_specified_depth_for_bathy_mask>`
 * :ref:`specify_depths_for_bathy_mask <json-specify_depths_for_bathy_mask>`
 * :ref:`find_banks_based_on_landcover <json-find_banks_based_on_landcover>`
@@ -734,6 +781,11 @@ Advanced Parameters
 * ``Forensic Forecast Hour`` -> ``forensic_forecast_hour``
 * ``Bathy Flow Field`` -> ``specified_bathyflow_field``
 * ``High Flow Field`` -> ``specified_highflow_field``
+* ``Drainage Area Field`` -> ``drainage_area_field``
+* ``Depth Coefficient`` -> ``coefficient_depth``
+* ``Depth Exponent`` -> ``exponent_depth``
+* ``Width Coefficient`` -> ``coefficient_width``
+* ``Width Exponent`` -> ``exponent_width``
 * ``Move Stream Network to Match DEM (Optional)`` -> ``move_stream_network_to_new_locations``
 * ``Stream Threshold for New Stream Network`` -> ``new_strm_threshold_km2``
 * ``Minimum Match Score`` -> ``min_match_score``

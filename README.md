@@ -79,6 +79,11 @@ The JSON should look like what's provided below. Multiple watersheds can be prov
             "forensic_forecast_date":"20250807",
             "specified_bathyflow_field":"qout_median",
             "specified_highflow_field":"rp100_premium",
+            "drainage_area_field":"TotDASqKm",
+            "coefficient_depth":0.12,
+            "exponent_depth":0.42,
+            "coefficient_width":1.75,
+            "exponent_width":0.55,
             "lake_filter_json":"C:/Users/follumm/Desktop/CHL_MultiModel/Yellowstone_2022_Flood/StrmShp/Yellowstone_flood_2022_stream_reaches_for_ARC_that_are_in_lakes.json",
             "streamflow_source": "NWM",
             "geoglows_vpu":715,
@@ -109,6 +114,11 @@ The second option is to run an indivdual watershed straight from the command lin
 flood-mapping cli ExampleWatershed "C:\path\to\flowline.shp" "C:\path\to\dem_dir" "C:\path\to\output" --bathy_use_banks --clean_dem --process_stream_network --mapper FloodSpreader --use_specified_depth_for_bathy_mask --specify_depths_for_bathy_mask 1.0 2.0 --age_of_forecast_days 7 --find_banks_based_on_landcover --create_reach_average_curve_file --forensic_forecast_date "20250807" --specified_bathyflow_field 'p_exceed_50' --specified_highflow_field "rp100_premium" --use_warning_flags_to_download_dem --geoglows_vpu 15 --lake_filter_json "C:\path\to\lake_filter_json" 
 --estimate_consequences --streamflow_source "NWM_short_range" --nwm_api_key "YOUR_NWM_API_KEY"
 ```
+
+If you want ARC bathymetry to be estimated from drainage-area power laws instead
+of ``specified_bathyflow_field``, provide all five optional parameters together:
+``drainage_area_field``, ``coefficient_depth``, ``exponent_depth``,
+``coefficient_width``, and ``exponent_width``.
 
 The arguments `--bathy_use_banks`, `--clean_dem`, `--process_stream_network`, `--use_specified_depth_for_bathy_mask`,`--find_banks_based_on_landcover`, `--create_reach_average_curve_file`, `use_warning_flags_to_download_dem`, and `--estimate_consequences` are issued when you intend setting those options as True.
 

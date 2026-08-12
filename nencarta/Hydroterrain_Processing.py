@@ -414,6 +414,7 @@ def match_new_streams_to_old_streams(
     remove_detached_upstream: bool = True,
     connectivity_tolerance_m: float = 30.0,
     buffer_distance_m: float = 50.0,
+    drainage_area_field: str | None = "drainage_area_sq_km"
 ):
     """
     Match new stream segments to an old reference stream network and transfer
@@ -573,6 +574,7 @@ def match_new_streams_to_old_streams(
                     "LINKNO": orow[old_linkno_col],
                     "DSLINKNO": orow[old_dslinkno_col],
                     "stream_order": (orow[old_stream_order_col] if old_stream_order_col is not None else None),
+                    "drainage_area_field": (orow[drainage_area_field] if drainage_area_field is not None else None),
                     "centroid_dist_m": cdist,
                     "line_dist_m": ldist,
                     "overlap_area_m2": overlap_area,
@@ -592,6 +594,8 @@ def match_new_streams_to_old_streams(
         out["DSLINKNO"] = best["DSLINKNO"]
         if old_stream_order_col is not None:
             out[old_stream_order_col] = best["stream_order"]
+        if drainage_area_field is not None:
+            out[drainage_area_field] = float(best["drainage_area_field"])
         out["match_score"] = float(best["score"])
         out["centroid_dist_m"] = float(best["centroid_dist_m"])
         out["line_dist_m"] = float(best["line_dist_m"])
@@ -688,6 +692,7 @@ def match_new_streams_to_old_streams(
                         "LINKNO",
                         "DSLINKNO",
                         old_stream_order_col,
+                        drainage_area_field,
                         "match_score",
                         "centroid_dist_m",
                         "line_dist_m",

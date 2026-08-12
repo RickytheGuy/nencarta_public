@@ -44,6 +44,13 @@ CURVE2FLOOD_MAPPERS = [
     "Curve2Flood-Multi-Point Interpolation",
 ]
 ALL_MAPPERS = ["FloodSpreader"] + CURVE2FLOOD_MAPPERS
+BATHYMETRY_POWERLAW_KEYS = (
+    "drainage_area_field",
+    "coefficient_depth",
+    "exponent_depth",
+    "coefficient_width",
+    "exponent_width",
+)
 
 
 def normalize_mapper_name(mapper: str | None) -> str:
@@ -65,6 +72,100 @@ def is_curve2flood_fldpln_mapper(mapper: str | None) -> bool:
 
 def is_bathymetry_disabled(watershed_dict: dict | None) -> bool:
     return bool(watershed_dict and watershed_dict.get("disable_bathymetry", False))
+
+
+def text_or_none(value):
+    """Normalize optional text inputs so blank strings behave like missing values.
+
+    NenCarta accepts configuration from JSON, CLI arguments, and the GUI. Those
+    sources do not all represent "unset" values the same way, so this helper
+    collapses blank strings and whitespace-only strings to ``None`` before the
+    rest of the bathymetry validation logic runs.
+    """
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value if value else None
+
+
+def float_or_none(value, field_name: str = "value"):
+    """Convert an optional numeric setting into ``float`` or ``None``.
+
+    Parameters
+    ----------
+    value : object
+        Raw value from CLI/JSON/GUI input.
+    field_name : str, optional
+        Human-readable name used in error messages.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {field_name}: {value}") from exc
+
+
+def build_bathymetry_powerlaw_config(input_dict: dict, watershed_name: str | None = None) -> dict:
+    """Normalize and validate the optional drainage-area bathymetry settings.
+
+    NenCarta exposes ARC's new drainage-area bathymetry mode at the top level
+    of the watershed configuration. All five settings must be supplied together
+    because ARC needs both a depth relationship and a fallback width
+    relationship to reproduce the intended behavior.
+
+    Parameters
+    ----------
+    input_dict : dict
+        Raw watershed configuration from JSON, CLI, or GUI.
+    watershed_name : str, optional
+        Friendly watershed name used to make validation errors easier to trace.
+
+    Returns
+    -------
+    dict
+        Normalized configuration with an ``enabled`` flag plus parsed values.
+    """
+    config = {
+        "drainage_area_field": text_or_none(input_dict.get("drainage_area_field")),
+        "coefficient_depth": float_or_none(input_dict.get("coefficient_depth"), "coefficient_depth"),
+        "exponent_depth": float_or_none(input_dict.get("exponent_depth"), "exponent_depth"),
+        "coefficient_width": float_or_none(input_dict.get("coefficient_width"), "coefficient_width"),
+        "exponent_width": float_or_none(input_dict.get("exponent_width"), "exponent_width"),
+    }
+    provided_flags = {key: config[key] is not None for key in BATHYMETRY_POWERLAW_KEYS}
+    any_provided = any(provided_flags.values())
+    all_provided = all(provided_flags.values())
+
+    if any_provided and not all_provided:
+        missing = [key for key, supplied in provided_flags.items() if not supplied]
+        watershed_label = watershed_name or input_dict.get("name", "unknown")
+        raise ValueError(
+            f"Watershed '{watershed_label}' must provide all drainage-area "
+            f"bathymetry parameters together. Missing: {', '.join(missing)}."
+        )
+
+    config["enabled"] = all_provided
+    return config
+
+
+def is_bathymetry_powerlaw_enabled(watershed_dict: dict | None) -> bool:
+    """Return ``True`` when ARC should estimate bathymetry from drainage area."""
+    return bool(watershed_dict and watershed_dict.get("bathymetry_powerlaw", {}).get("enabled", False))
+
+
+def should_write_arc_baseflow_field(watershed_dict: dict, include_flow_file_bf: bool = True) -> bool:
+    """Decide whether the ARC MIF should include ``Flow_File_BF``.
+
+    When the drainage-area power-law mode is enabled, NenCarta intentionally
+    omits ``Flow_File_BF`` from the ARC model-input file so ARC follows the new
+    bathymetry path instead of the legacy discharge-driven one.
+    """
+    return (
+        include_flow_file_bf
+        and not is_bathymetry_powerlaw_enabled(watershed_dict)
+        and text_or_none(watershed_dict.get("specified_bathyflow_field")) is not None
+    )
 
 
 def get_floodmap_dem_file(folder: FloodFolder, watershed_dict: dict) -> str:
@@ -316,7 +417,8 @@ def Process_Geospatial_Data(folder: FloodFolder, watershed_dict: dict, DEM: str)
                                                                             require_overlap = False,
                                                                             remove_detached_upstream = True,
                                                                             connectivity_tolerance_m = 30.0,
-                                                                            buffer_distance_m =1000.0
+                                                                            buffer_distance_m =1000.0,
+                                                                            drainage_area_field = watershed_dict['bathymetry_powerlaw']['drainage_area_field']
                                                                         )
                 # Update what things are since we've decided to use Curve2Flood-FLDPLNpy or to move the stream network.
                 original_dem_file = folder.DEM_File
@@ -375,16 +477,42 @@ def Process_Geospatial_Data(folder: FloodFolder, watershed_dict: dict, DEM: str)
     if watershed_dict['process_stream_network'] is True:
         #Create a Starting AutoRoute Input File
         LOG.info('Creating ARC Input File: ' + folder.ARC_FileName_Initial)
-        #Create the Initial Flow
-        LOG.info(f"Using the field '{watershed_dict['specified_bathyflow_field']}' for bathymetry estimation and '{watershed_dict['specified_highflow_field']}' for flood mapping...\n")
+        # Summarize which ARC bathymetry target NenCarta is about to write. This
+        # makes it obvious in the logs whether the run is using the legacy
+        # discharge field or the new drainage-area power-law path.
+        if is_bathymetry_powerlaw_enabled(watershed_dict):
+            LOG.info(
+                "Using the drainage-area bathymetry relationship "
+                f"'{watershed_dict['bathymetry_powerlaw']['drainage_area_field']}' "
+                "for ARC bathymetry estimation and "
+                f"'{watershed_dict['specified_highflow_field']}' for flood mapping...\n"
+            )
+        else:
+            LOG.info(
+                f"Using the field '{watershed_dict['specified_bathyflow_field']}' "
+                "for bathymetry estimation and "
+                f"'{watershed_dict['specified_highflow_field']}' for flood mapping...\n"
+            )
 
         Create_FlowFile(folder.DEM_Reanalsyis_FlowFile, folder.COMID_Q_File, 'COMID', 'rp2')
 
         # Create the Initial input file which is only used if cleaning the DEM
         if watershed_dict['clean_dem']: 
-            Create_ARC_Model_Input_File_Initial_for_cleaning_dem(folder, watershed_dict, 'COMID')
+            Create_ARC_Model_Input_File_Initial_for_cleaning_dem(
+                folder,
+                watershed_dict,
+                'COMID',
+                stream_id_field,
+                ds_stream_id_field,
+            )
 
-        Create_ARC_Model_Input_File_Bathy(folder, watershed_dict, 'COMID')
+        Create_ARC_Model_Input_File_Bathy(
+            folder,
+            watershed_dict,
+            'COMID',
+            stream_id_field,
+            ds_stream_id_field,
+        )
 
     if watershed_dict['floodmap_mode'] == 'forecast':
         Forecast_Flood_Map, Forecast_Flood_Depth_Raster = Create_ARC_Model_Input_File_FloodForecast(FlowFile, folder, watershed_dict)
@@ -430,20 +558,40 @@ def _write_arc_input_section(
     folder: FloodFolder,
     watershed_dict: dict,
     COMID_Param: str,
+    stream_id_field: str,
+    ds_stream_id_field: str,
     maybe_use_clean_dem: bool,
     include_flow_file_bf: bool = True
 ):
+    """Write the ARC input-file section shared by NenCarta's ARC workflows.
+
+    This helper centralizes the MIF fields that are common to the DEM-cleaning
+    ARC run and the bathymetry ARC run. It also decides whether ARC should
+    receive the legacy ``Flow_File_BF`` discharge field or the new
+    drainage-area bathymetry parameters.
+    """
     bathy_args: dict = watershed_dict['bathy_args']
+    bathymetry_powerlaw: dict = watershed_dict["bathymetry_powerlaw"]
     out_file.write('#ARC_Inputs')
     out_file.write(f'\nDEM_File\t{folder.DEM_File_Clean if maybe_use_clean_dem else folder.DEM_File}') # use_clean_dem will auto pick the cleaned DEM if it was created, else we force using the original DEM
     out_file.write(f'\nStream_File\t{folder.STRM_File_Clean}')
+    out_file.write(f'\nreach_id\t{stream_id_field}')
+    out_file.write(f'\ndownstream_reach_id\t{ds_stream_id_field}')
     out_file.write(f'\nLU_Raster_SameRes\t{folder.LAND_File}')
     out_file.write(f'\nLU_Manning_n\t{folder.mannings_n_text_file}')
     out_file.write(f'\nFlow_File\t{folder.DEM_Reanalsyis_FlowFile}')
     out_file.write(f'\nFlow_File_ID\t{COMID_Param}')
-    if include_flow_file_bf:
+    if should_write_arc_baseflow_field(watershed_dict, include_flow_file_bf):
         out_file.write(f"\nFlow_File_BF\t{watershed_dict['specified_bathyflow_field']}")
     out_file.write(f'\nFlow_File_QMax\t{watershed_dict["specified_highflow_field"]}')
+    if bathymetry_powerlaw["enabled"]:
+        # ARC expects these lower-case parameter names in the model-input file
+        # because they map directly to the new optional parser path added in ARC.
+        out_file.write(f'\ndrainage_area_field\t{bathymetry_powerlaw["drainage_area_field"]}')
+        out_file.write(f'\ncoefficient_depth\t{bathymetry_powerlaw["coefficient_depth"]}')
+        out_file.write(f'\nexponent_depth\t{bathymetry_powerlaw["exponent_depth"]}')
+        out_file.write(f'\ncoefficient_width\t{bathymetry_powerlaw["coefficient_width"]}')
+        out_file.write(f'\nexponent_width\t{bathymetry_powerlaw["exponent_width"]}')
     out_file.write(f'\nSpatial_Units\tdeg')
     out_file.write(f'\nX_Section_Dist\t{bathy_args["X_Section_Dist"]}')
     out_file.write(f'\nDegree_Manip\t{bathy_args["Degree_Manip"]}')
@@ -463,9 +611,23 @@ def _write_curve2flood_mapper_line(out_file: TextIO, watershed_dict: dict):
     mapper = normalize_mapper_name(watershed_dict['mapper'])
     out_file.write(f'\nmapper\t{mapper}')
 
-def Create_ARC_Model_Input_File_Initial_for_cleaning_dem(folder: FloodFolder, watershed_dict: dict, COMID_Param: str):
+def Create_ARC_Model_Input_File_Initial_for_cleaning_dem(
+    folder: FloodFolder,
+    watershed_dict: dict,
+    COMID_Param: str,
+    stream_id_field: str,
+    ds_stream_id_field: str,
+):
     with open(folder.ARC_FileName_Initial, 'w') as out_file:
-        _write_arc_input_section(out_file, folder, watershed_dict, COMID_Param, False)
+        _write_arc_input_section(
+            out_file,
+            folder,
+            watershed_dict,
+            COMID_Param,
+            stream_id_field,
+            ds_stream_id_field,
+            False,
+        )
 
         out_file.write('\n\n#VDT_Output_File_and_CurveFile')
         out_file.write(f'\nVDT_Database_NumIterations\t30')
@@ -492,7 +654,13 @@ def Create_ARC_Model_Input_File_Initial_for_cleaning_dem(folder: FloodFolder, wa
             out_file.write(f'\nFloodSpreader_SpecifyDepth\t{watershed_dict["specify_depths_for_bathy_mask"][0]}')    
 
 
-def Create_ARC_Model_Input_File_Bathy(folder: FloodFolder, watershed_dict: dict, COMID_Param: str):
+def Create_ARC_Model_Input_File_Bathy(
+    folder: FloodFolder,
+    watershed_dict: dict,
+    COMID_Param: str,
+    stream_id_field: str,
+    ds_stream_id_field: str,
+):
     LOG.info('Creating ARC Input File: ' + folder.ARC_FileName_Bathy)
 
     with  open(folder.ARC_FileName_Bathy,'w') as out_file:
@@ -502,6 +670,8 @@ def Create_ARC_Model_Input_File_Bathy(folder: FloodFolder, watershed_dict: dict,
             folder,
             watershed_dict,
             COMID_Param,
+            stream_id_field,
+            ds_stream_id_field,
             True,
             include_flow_file_bf=not disable_bathymetry
         )
@@ -1458,8 +1628,8 @@ def run_one_dem(DEM: str, folder: FloodFolder, watershed_dict: dict, timer: Time
         Flood_WaterLC_and_STRM_Cells_in_Flood_Map_OutputTIFF(folder, watershed_dict['land_watervalue'])
         run_dem_cleaner(folder, watershed_dict, timer, DEM)
 
-    if is_bathymetry_disabled(watershed_dict) or not watershed_dict['use_specified_depth_for_bathy_mask'] or watershed_dict['clean_dem']:
-        create_bathymetry(folder, watershed_dict, timer)
+
+    create_bathymetry(folder, watershed_dict, timer)
 
     if watershed_dict['floodmap_mode'] == 'forecast':
         run_forecast_floodmapping(folder, watershed_dict, timer)
@@ -1754,14 +1924,6 @@ def validate_user_floodmaps(watershed_dict: dict):
 def norm_or_none(path: str):
     return os.path.normpath(path) if path else None
 
-def float_or_none(value):
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid q_baseflow_threshold: {value}") from exc
-
 def process_watershed(input_dict: dict, timer: Timer = None):
     """The core logic for processing a watershed."""
     verify_required_keys(input_dict)
@@ -1790,9 +1952,17 @@ def process_watershed(input_dict: dict, timer: Timer = None):
         dem_filter = "*"
 
     move_stream_network_to_new_locations = input_dict.get("move_stream_network_to_new_locations", False)
-    stream_order_threshold = float_or_none(input_dict.get("new_strm_threshold_km2"))
+    stream_order_threshold = float_or_none(input_dict.get("new_strm_threshold_km2"), "new_strm_threshold_km2")
     if move_stream_network_to_new_locations is True and stream_order_threshold is None:
         raise ValueError(f"Watershed '{watershed_name}': 'stream_order_threshold' must be specified when moving stream network.")
+
+    bathymetry_powerlaw = build_bathymetry_powerlaw_config(input_dict, watershed_name)
+    specified_bathyflow_field = text_or_none(input_dict.get("specified_bathyflow_field", "p_exceed_50"))
+    if not input_dict.get("disable_bathymetry", False) and not bathymetry_powerlaw["enabled"] and specified_bathyflow_field is None:
+        raise ValueError(
+            f"Watershed '{watershed_name}': provide either 'specified_bathyflow_field' "
+            "or the full drainage-area bathymetry parameter set."
+        )
 
     watershed_dict = {
         "name": watershed_name,
@@ -1815,12 +1985,13 @@ def process_watershed(input_dict: dict, timer: Timer = None):
         "geoglows_vpu": input_dict.get("geoglows_vpu"),
         "forensic_forecast_date": validate_forecast_date(input_dict.get("forensic_forecast_date"), streamflow_source),
         "forensic_forecast_hour": forensic_forecast_hour,
-        "specified_bathyflow_field":input_dict.get("specified_bathyflow_field", "p_exceed_50"),
+        "specified_bathyflow_field": specified_bathyflow_field,
         "specified_highflow_field":input_dict.get("specified_highflow_field", "rp100_premium"),
+        "bathymetry_powerlaw": bathymetry_powerlaw,
         "StrmOrder_Field": input_dict.get("StrmOrder_Field"),
         "StrmOrder_Lower": input_dict.get("StrmOrder_Lower"),
         "StrmOrder_Upper": input_dict.get("StrmOrder_Upper"),
-        "q_baseflow_threshold": float_or_none(input_dict.get("q_baseflow_threshold")),
+        "q_baseflow_threshold": float_or_none(input_dict.get("q_baseflow_threshold"), "q_baseflow_threshold"),
         "lake_filter_json": norm_or_none(input_dict.get("lake_filter_json")),
         "estimate_consequences": input_dict.get("estimate_consequences", False),
         "streamflow_source": streamflow_source,
@@ -1842,8 +2013,8 @@ def process_watershed(input_dict: dict, timer: Timer = None):
         "make_wse_maps": input_dict.get("make_wse_maps", True),
         "floodmap_identifier": input_dict.get("floodmap_identifier", ""),
         "move_stream_network_to_new_locations": input_dict.get("move_stream_network_to_new_locations", False),
-        "new_strm_threshold_km2": float_or_none(input_dict.get("new_strm_threshold_km2")),
-        "min_match_score": float_or_none(input_dict.get("min_match_score")),
+        "new_strm_threshold_km2": float_or_none(input_dict.get("new_strm_threshold_km2"), "new_strm_threshold_km2"),
+        "min_match_score": float_or_none(input_dict.get("min_match_score"), "min_match_score"),
         "quiet": input_dict.get("quiet", False),
     }
 
@@ -1955,6 +2126,11 @@ def main():
     cli_parser.add_argument("--forensic_forecast_hour", type=int, default=0, choices=[i for i in range (0,24)], help="Forensic forecast hour (defaults to 0) unless this argument is provided")
     cli_parser.add_argument("--specified_bathyflow_field", type=str, default="p_exceed_50", help="Specify the streamflow field in the streamflow reanalysis file that will be used for bathymetry estimation  (defaults to 'p_exceed_50') ")
     cli_parser.add_argument("--specified_highflow_field", type=str, default="rp100_premium", help="Specify the highflow field in the streamflow reanalysis file that will be used by ARC as the highest flow for the VDT database and curvefile creation (defaults to 'rp100_premium')")
+    cli_parser.add_argument("--drainage_area_field", type=str, default=None, help="Optional drainage-area field in the flowline/stream vector used to estimate ARC bathymetry depth and fallback width from power laws")
+    cli_parser.add_argument("--coefficient_depth", type=float, default=None, help="Optional coefficient for the ARC bathymetry depth power law")
+    cli_parser.add_argument("--exponent_depth", type=float, default=None, help="Optional exponent for the ARC bathymetry depth power law")
+    cli_parser.add_argument("--coefficient_width", type=float, default=None, help="Optional coefficient for the ARC bathymetry width power law used when bank finding fails")
+    cli_parser.add_argument("--exponent_width", type=float, default=None, help="Optional exponent for the ARC bathymetry width power law used when bank finding fails")
     cli_parser.add_argument("--StrmOrder_Field", type=str, default=None, help="Stream order field in the stream shapefile (optional)")
     cli_parser.add_argument("--StrmOrder_Lower", type=int, default=None, help="Upper bound for stream order (optional)")
     cli_parser.add_argument("--StrmOrder_Upper", type=int, default=None, help="Upper bound for stream order (optional)")

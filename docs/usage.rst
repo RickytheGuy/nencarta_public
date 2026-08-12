@@ -33,7 +33,12 @@ Example:
          "dem_dir": "C:/path/to/dem_dir",
          "output_dir": "C:/path/to/output",
          "process_stream_network": true,
-         "mapper": "FloodSpreader",
+          "mapper": "FloodSpreader",
+         "drainage_area_field": "TotDASqKm",
+         "coefficient_depth": 0.12,
+         "exponent_depth": 0.42,
+         "coefficient_width": 1.75,
+         "exponent_width": 0.55,
          "streamflow_source": "NWM_short_range",
          "nwm_api_key": "YOUR_NWM_API_KEY"
        }
@@ -60,6 +65,11 @@ Use the ``cli`` subcommand to run a single watershed directly from the terminal:
 .. code-block:: bash
 
    flood-mapping cli ExampleWatershed "C:\path\to\flowline.shp" "C:\path\to\dem_dir" "C:\path\to\output" --process_stream_network --mapper FloodSpreader --streamflow_source NWM_short_range --nwm_api_key "YOUR_NWM_API_KEY"
+
+If you want ARC bathymetry estimated from drainage-area power laws instead of a
+baseflow field, provide all five optional parameters together:
+``--drainage_area_field``, ``--coefficient_depth``, ``--exponent_depth``,
+``--coefficient_width``, and ``--exponent_width``.
 
 Forecast sources
 ----------------
