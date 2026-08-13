@@ -5,7 +5,7 @@ import yaml
 
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.core.defaults import DEFAULT_BATHY_ARGS, DEFAULT_FLOODMAP_ARGS
+from nencarta.core.defaults import DEFAULT_BATHY_ARGS, DEFAULT_CONFIG, DEFAULT_FLOODMAP_ARGS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
 def _arc_inputs(dem: Path,
@@ -237,10 +237,10 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["downstream_reach_id"] = configs.downstream_id_field
         if configs.use_power_laws_for_bathymetry:
             params["drainage_area_field"] = configs.area_km2_field
-            params["coefficient_depth"] = 0.27
-            params["exponent_depth"] = 0.21
-            params["coefficient_width"] = 2.44
-            params["exponent_width"] = 0.34
+            params["coefficient_depth"] = configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]
+            params["exponent_depth"] = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
+            params["coefficient_width"] = configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"]
+            params["exponent_width"] = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
 
         params["# Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File

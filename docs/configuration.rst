@@ -359,6 +359,13 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 * ``use_power_laws_for_bathymetry`` (Bool, optional): Whether to use drainage
   area power laws for bathymetry parameters when supported. Default False.
 
+.. _json-use_dem_derived_channel_mask:
+
+* ``use_dem_derived_channel_mask`` (Bool, optional): Whether stream burning uses
+  a channel mask derived from half-meter DEM elevations instead of the existing
+  bathymetry water mask. Used by the stream burning path in ``move_streams``.
+  Default False.
+
 .. _json-area_m2_field:
 
 * ``area_m2_field`` (String, optional): Drainage area field in square meters.
@@ -368,6 +375,28 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 * ``area_km2_field`` (String, optional): Drainage area field in square
   kilometers. Default ``DSContArea_km2``.
+
+.. _json-coefficient_depth:
+
+* ``coefficient_depth`` (Float, optional): Coefficient for power-law bathymetry
+  depth estimation when ``use_power_laws_for_bathymetry`` is enabled. Default
+  0.27.
+
+.. _json-exponent_depth:
+
+* ``exponent_depth`` (Float, optional): Exponent for power-law bathymetry depth
+  estimation when ``use_power_laws_for_bathymetry`` is enabled. Default 0.21.
+
+.. _json-coefficient_width:
+
+* ``coefficient_width`` (Float, optional): Coefficient for power-law bathymetry
+  width estimation when ``use_power_laws_for_bathymetry`` is enabled. Default
+  2.44.
+
+.. _json-exponent_width:
+
+* ``exponent_width`` (Float, optional): Exponent for power-law bathymetry width
+  estimation when ``use_power_laws_for_bathymetry`` is enabled. Default 0.34.
 
 .. _json-make_vdt:
 
@@ -919,6 +948,12 @@ Advanced Parameters
 * ``Forensic Forecast Hour`` -> ``forensic_forecast_hour``
 * ``Bathy Flow Field`` -> ``specified_bathyflow_field``
 * ``High Flow Field`` -> ``specified_highflow_field``
+* ``Use DEM-derived Channel Mask`` -> ``use_dem_derived_channel_mask``
+* ``Use Power Laws for Bathymetry`` -> ``use_power_laws_for_bathymetry``
+* ``Depth Coefficient`` -> ``coefficient_depth``
+* ``Depth Exponent`` -> ``exponent_depth``
+* ``Width Coefficient`` -> ``coefficient_width``
+* ``Width Exponent`` -> ``exponent_width``
 * ``Move Stream Network to Thalweg`` -> ``move_stream_network_to_thalweg``
 * ``Stream Threshold for New Stream Network`` -> ``new_strm_threshold_km2``
 * ``Slope Low Percentile`` -> ``slope_low_percentile``

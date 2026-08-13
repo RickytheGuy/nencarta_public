@@ -115,6 +115,7 @@ DEFAULT_CONFIG = {
     "StrmOrder_Lower": None,
     "StrmOrder_Upper": None,
     "use_parquet": False,
+    "use_dem_derived_channel_mask": False,
     "use_power_laws_for_bathymetry": False,
     "use_specified_depth_for_bathy_mask": True,
     "use_vrt": False,

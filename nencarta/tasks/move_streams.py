@@ -232,7 +232,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         channel_mask = remove_cells_not_connected(channel_mask, final_streams)
 
         workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
-        make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask))
+        make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask), configs.compression)
         dem_for_stream_info = workspace.filled_dem
 
     if configs.mapper.is_curve2flood_fldpln_mapper():
@@ -273,7 +273,12 @@ def smooth_and_burn_dem(
 
     streams = _get_stream_raster(dem, dem_ds, workspace.DEM_StrmShp, id_col)
 
-    channel_mask = burn_streams_into_dem(dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
+    if workspace.configs.use_dem_derived_channel_mask:
+        channel_mask = (dem % 0.5 == 0)
+    else:
+        channel_mask = Raster(workspace.bathy_water_mask).read_array()
+
+    channel_mask = burn_streams_into_dem(channel_mask, dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col, nodata_value)
     dem = smooth_burned_dem(dem, channel_mask, streams, pbar=False)
 
     dem[dem < -1000] = nodata_value # Remove any DEM values that are less than -1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
@@ -453,6 +458,7 @@ def _get_stream_raster(dem: np.ndarray, dem_ds: gdal.Dataset, streamlines: str, 
     return streams
 
 def burn_streams_into_dem(
+        channel_mask: np.ndarray,
         dem: np.ndarray,
         streams: np.ndarray,
         dem_ds: gdal.Dataset,
@@ -469,7 +475,6 @@ def burn_streams_into_dem(
         target=ds_col,
         create_using=nx.DiGraph
     )
-    channel_mask = (dem % 0.5 == 0)
     # Remove any cells that have less than 5 connected neighbors in the mask, as they are likely to be noise or small artifacts
     structure = np.ones((3, 3), dtype=int)
     labels, _ = label(channel_mask, structure=structure)
@@ -1966,9 +1971,9 @@ def _create_stream_info_table(
     stream_info.to_parquet(stream_info_file, index=False)
 
 
-def make_channel_mask(channel_mask: np.ndarray, dem: str, water_mask: str):
+def make_channel_mask(channel_mask: np.ndarray, dem: str, water_mask: str, compression: str):
     dem_ds: gdal.Dataset = gdal.Open(dem)
-    out_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(water_mask, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Byte)
+    out_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(water_mask, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Byte, options=[f'COMPRESS={compression}'])
     out_ds.WriteArray(channel_mask)
     out_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     out_ds.SetProjection(dem_ds.GetProjection())
