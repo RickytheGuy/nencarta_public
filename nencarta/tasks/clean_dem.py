@@ -55,12 +55,24 @@ def make_clean_dem(workspace: Workspace) -> Path:
 
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
 
+    if workspace.configs.burn_streams:
+        dem = workspace.fixed_dem
+    else:
+        dem = workspace.assigned_dem
+
+    if workspace.configs.move_stream_network_to_thalweg:
+        streamlines = workspace.new_StrmShp_matched
+        stream_raster = workspace.new_stream_raster
+    else:
+        streamlines = workspace.DEM_StrmShp
+        stream_raster = workspace.STRM_File_Clean
+
     # start time for the simulation
     DEM_Cleaner.DEM_Cleaner_Program(OutputID, 
-                                    workspace.DEM_StrmShp, 
-                                    workspace.assigned_dem.parent, 
-                                    [workspace.assigned_dem.name], 
-                                    [workspace.STRM_File_Clean], 
+                                    streamlines, 
+                                    dem.parent, 
+                                    [dem.name], 
+                                    [stream_raster], 
                                     workspace.dem_updated_folder, 
                                     FlowFileName, 
                                     workspace.Curve_File_Initial, 

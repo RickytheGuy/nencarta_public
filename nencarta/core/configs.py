@@ -257,10 +257,6 @@ class NencartaConfig:
         else:
             self.floodmap_id = ''
 
-        self.use_bathy_water_mask: bool = self.get("use_bathy_water_mask")
-        if self.use_bathy_water_mask and self.use_specified_depth_for_bathy_mask:
-            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'use_bathy_water_mask' and 'use_specified_depth_for_bathy_mask' cannot both be True. Please choose one method for bathymetry masking.")
-
         self.bbox: tuple[float, ...] = self.validate_bbox()
         self.flowline: str = self.get_path("flowline")
         self.source_flowlines: list[str] = self.get("source_flowlines")
@@ -331,9 +327,20 @@ class NencartaConfig:
         self.area_m2_field: str = self.get("area_m2_field")
         self.area_km2_field: str = self.get("area_km2_field")
         self.num_workers = self.get_num_workers()
-        self.monotonic_bankfull_wse: bool = self.get("monotonic_bankfull_wse")
-        self.slope_low_percentile: float = self.get("slope_low_percentile")
-        self.slope_high_percentile: float = self.get("slope_high_percentile")
+        self.slope_low_percentile: int = int(self.get("slope_low_percentile"))
+        self.slope_high_percentile: int = int(self.get("slope_high_percentile"))
+        self.coefficient_depth = self.get("coefficient_depth")
+        self.coefficient_width = self.get("coefficient_width")
+        self.exponent_depth = self.get("exponent_depth")
+        self.exponent_width = self.get("exponent_width")
+
+        if self.parallel and self.fldpln_parallel:
+            LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
+            raise ValueError("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
+
+        if self.use_power_laws_for_bathymetry and not all([self.coefficient_depth, self.coefficient_width, self.exponent_depth, self.exponent_width]):
+            LOG.error("When 'use_power_laws_for_bathymetry' is True, all of 'coefficient_depth', 'coefficient_width', 'exponent_depth', and 'exponent_width' must be provided.")
+            raise ValueError("When 'use_power_laws_for_bathymetry' is True, all of 'coefficient_depth', 'coefficient_width', 'exponent_depth', and 'exponent_width' must be provided.")
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

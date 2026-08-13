@@ -88,10 +88,11 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         
         return None
     
-    kwargs = {}
+    kwargs = {'index': False}
     if workspace.DEM_StrmShp.suffix.lower().endswith('.parquet'):
         kwargs['compression'] = 'brotli'
         kwargs['write_covering_bbox'] = True
+        kwargs['geometry_encoding'] = 'geoarrow'
 
     if configs.use_power_laws_for_bathymetry:
         if configs.area_km2_field not in gdf.columns:

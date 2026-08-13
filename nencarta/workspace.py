@@ -63,7 +63,10 @@ class Workspace:
         # these will only vary based upon if they are NWM or GEOGLOWS
         self.ARC_FileName_Bathy = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{self.config_end}"
         self.ARC_FileName_for_DEM_Cleaner = self.ARC_Folder / f"{strm_source}_ARC_Input_{self.FileName}_InitialFlood.txt"
-        self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif"
+        if configs.burn_streams:
+            self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_fixed_Clean.tif"
+        else:
+            self.DEM_File_Clean = self.dem_updated_folder / f"{self.FileName}_Clean.tif"
         self.STRM_File = self.strm_folder / f"{strm_source}_{self.FileName}_STRM_Raster.tif"
         self.STRM_File_Clean = self.STRM_File.with_name(self.STRM_File.stem + '_Clean.tif')
 

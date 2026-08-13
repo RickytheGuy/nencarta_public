@@ -53,7 +53,7 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 * ``dem_dir`` (String): A full filepath to the directory containing one or more DEMs
   that you will be using as input in NenCarta. If 
-  :ref:`move_stream_network_to_new_locations <json-move_stream_network_to_new_locations>`
+  :ref:`move_stream_network_to_thalweg <json-move_stream_network_to_thalweg>`
   is ``true``, and a DEM is stored in geographic coordinates
   (latitude/longitude), NenCarta first creates a projected GeoTIFF copy in the
   watershed ``FlowDirection`` folder using ``WGS 84 / NSIDC EASE-Grid 2.0
@@ -112,9 +112,10 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-floodmap_mode:
 
-* ``floodmap_mode`` (Bool, optional): Either "forecast" or "user". Forecast mode
-  will run either a GEOGLOWS or NWM forecast flows. User mode allows the option
-  ``user_flow_files`` to be populated and used instead. Default "forecast".
+* ``floodmap_mode`` (String, optional): Either ``forecast``, ``user``, or
+  ``return_period``. Forecast mode runs GEOGLOWS or NWM forecast flows. User
+  mode uses ``user_flow_files``. Return-period mode uses ``return_periods``.
+  Default ``forecast``.
 
 .. _json-flowline:
 
@@ -206,14 +207,14 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 * ``min_match_score`` (Float, optional): This is the threshold value that is used to
   determine if a good match is made when using the
-  ``move_stream_network_to_new_locations`` option. NenCarta scores the match between
+  ``move_stream_network_to_thalweg`` option. NenCarta scores the match between
   each terrain-derived stream segment and nearby segments from the original stream
   network using buffered corridor overlap. The best candidate is retained for each
   new segment and any match with a score below ``min_match_score`` is discarded.
 
-.. _json-move_stream_network_to_new_locations:
+.. _json-move_stream_network_to_thalweg:
 
-* ``move_stream_network_to_new_locations`` (Bool, optional): If True, this option
+* ``move_stream_network_to_thalweg`` (Bool, optional): If True, this option
   directs NenCarta to build a terrain-derived stream network from the DEM, delineate
   threshold-based catchments, and then transfer stream IDs from the original
   flowline dataset onto the new network. Default is False. This is required if using
@@ -234,7 +235,13 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   terrain threshold used when NenCarta extracts a new stream mask, vector flowlines,
   and catchments from the DEM-derived flow direction and accumulation rasters. The
   value is in square km and is required when
-  ``move_stream_network_to_new_locations`` is True.
+  ``move_stream_network_to_thalweg`` is True.
+
+.. _json-num_workers:
+
+* ``num_workers`` (Integer, optional): Worker count used when ``parallel`` is True
+  and NenCarta creates its own process executor. If omitted, NenCarta uses the
+  default executor behavior.
 
 .. _json-nwm_api_key:
 
@@ -248,19 +255,190 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 * ``output_dir`` (String): The full filepath to the directory where your output will
   be saved.
 
+.. _json-bbox:
+
+* ``bbox`` (List of Numbers, optional): Bounding box as
+  ``[minx, miny, maxx, maxy]``. Used with ``source_dems`` when NenCarta builds a
+  DEM for the domain.
+
+.. _json-dem:
+
+* ``dem`` (String, optional): Path to a single DEM file. ``dem_dir`` takes
+  precedence when both ``dem`` and ``dem_dir`` are supplied.
+
+.. _json-source_dems:
+
+* ``source_dems`` (List of Strings, optional): Source DEM files used to create a
+  domain DEM when ``bbox`` is supplied.
+
+.. _json-source_flowlines:
+
+* ``source_flowlines`` (List of Strings, optional): Source flowline files used
+  when NenCarta prepares the flowline network instead of using one prepared
+  ``flowline`` file.
+
+.. _json-buffer:
+
+* ``buffer`` (Bool, optional): Whether to buffer the requested ``bbox`` when
+  creating a DEM from ``source_dems``. Default False.
+
+.. _json-buffer_distance:
+
+* ``buffer_distance`` (Float, optional): Buffer distance applied when ``buffer``
+  is True. Default 0.1.
+
+.. _json-land_cover_cache:
+
+* ``land_cover_cache`` (List of Strings, optional): Local land-cover raster
+  cache files. Default empty list.
+
+.. _json-lakes:
+
+* ``lakes`` (String, optional): Path to a lake polygon file used by stream
+  movement and filtering workflows.
+
+.. _json-reanalysis_file:
+
+* ``reanalysis_file`` (String, optional): Existing streamflow reanalysis file to
+  use instead of generating or downloading one.
+
+.. _json-return_periods:
+
+* ``return_periods`` (List of Integers, optional): Return periods to map when
+  ``floodmap_mode`` is ``return_period``. Valid values are 2, 5, 10, 25, 50,
+  and 100.
+
+.. _json-parallel:
+
+* ``parallel`` (Bool, optional): Whether to run workspace tasks in parallel.
+  Default False.
+
+.. _json-profile:
+
+* ``profile`` (Bool, optional): Whether to print task profiling output for
+  serial runs. Default True.
+
+.. _json-compression:
+
+* ``compression`` (String, optional): Raster compression option passed to output
+  writers. Default ``LZW``.
+
+.. _json-exclude:
+
+* ``exclude`` (List of Integers, optional): Stream IDs to exclude from the run.
+  Default empty list.
+
+.. _json-use_parquet:
+
+* ``use_parquet`` (Bool, optional): Whether to use parquet intermediate files
+  where supported. Default False.
+
+.. _json-use_yaml:
+
+* ``use_yaml`` (Bool, optional): Whether to write mapper configuration files as
+  YAML instead of text. Default False.
+
+.. _json-use_vrt:
+
+* ``use_vrt`` (Bool, optional): Whether to create assigned DEMs as VRT files
+  where supported. Default False.
+
+.. _json-streams_as_parquet:
+
+* ``streams_as_parquet`` (Bool, optional): Whether to write prepared stream
+  vectors as parquet files. Default False.
+
+.. _json-burn_streams:
+
+* ``burn_streams`` (Bool, optional): Whether to burn streams into the DEM during
+  stream movement. Default False.
+
+.. _json-project_to_utm:
+
+* ``project_to_utm`` (Bool, optional): Whether to project outputs to a local UTM
+  coordinate system where supported. Default False.
+
+.. _json-raise_errors_if_nothing_in_domain:
+
+* ``raise_errors_if_nothing_in_domain`` (Bool, optional): Whether empty-domain
+  checks should raise errors instead of logging and continuing. Default True.
+
+.. _json-use_power_laws_for_bathymetry:
+
+* ``use_power_laws_for_bathymetry`` (Bool, optional): Whether to use drainage
+  area power laws for bathymetry parameters when supported. Default False.
+
+.. _json-area_m2_field:
+
+* ``area_m2_field`` (String, optional): Drainage area field in square meters.
+  Default ``DSContArea``.
+
+.. _json-area_km2_field:
+
+* ``area_km2_field`` (String, optional): Drainage area field in square
+  kilometers. Default ``DSContArea_km2``.
+
+.. _json-make_vdt:
+
+* ``make_vdt`` (Bool, optional): Whether to write a VDT database. Default True.
+
+.. _json-make_cross_section_file:
+
+* ``make_cross_section_file`` (Bool, optional): Whether to write cross-section
+  output from ARC. Default False.
+
+.. _json-fldpln_dh:
+
+* ``fldpln_dh`` (Float, optional): FLDPLN depth interval. Default 0.5.
+
+.. _json-fldpln_min_depth:
+
+* ``fldpln_min_depth`` (Float, optional): Minimum FLDPLN depth. Default 0.1.
+
+.. _json-fldpln_max_depth:
+
+* ``fldpln_max_depth`` (Float, optional): Maximum FLDPLN depth. Default 25.0.
+
+.. _json-fldpln_max_wse_rise:
+
+* ``fldpln_max_wse_rise`` (Float, optional): Maximum WSE rise used by FLDPLN.
+  Default 0.01.
+
+.. _json-fldpln_keep_spilling:
+
+* ``fldpln_keep_spilling`` (Bool, optional): Whether FLDPLN keeps spilling
+  cells. Default False.
+
+.. _json-fldpln_parallel:
+
+* ``fldpln_parallel`` (Bool, optional): Whether FLDPLN runs its internal parallel
+  mode. Default False.
+
+Runtime cache settings
+----------------------
+
+NenCarta can use local caches to avoid repeated metadata and compiled-function
+work.
+
+* ``NENCARTA_CACHE_DIR``: Optional directory for the LMDB raster metadata cache.
+  If it is not set, NenCarta uses ``Path.home() / ".cache"``. If LMDB is not
+  installed, the cache cannot be opened, or the directory is locked, NenCarta
+  disables this cache and continues.
+* ``NUMBA_CACHE_DIR``: Optional directory for Numba caches used by ARC and other
+  compiled functions. This is useful on systems where the default user cache is
+  locked or unavailable.
+
 .. _json-overwrite_floodmaps:
 
 * ``overwrite_floodmaps`` (Bool, optional): Whether to replace existing flood
   indunation, depth, WSE, etc. maps if they exist. Defaults to True.
 
-.. _json-process_stream_network:
+.. _json-overwrite:
 
-* ``process_stream_network`` (Bool, optional): Setting this value to True will direct
-  the forecast system to take the flowline network (your flowline variable) and
-  determine which flowlines are within each of your DEM tiles and download the
-  necessary ECMWF GEOGLOWS Streamflow Service historic data for each DEM tile. Setting
-  this value to False will bypass the creation of these system inputs and assumes that
-  those inputs already exist. Default False.
+* ``overwrite`` (Bool, optional): Whether to rebuild existing intermediate
+  products, including DEM-specific stream geometry, stream rasters, flow files,
+  bathymetry inputs, and model setup files. Setting this value to False reuses
+  existing intermediate products when they are present. Default False.
 
 .. _json-q_baseflow_threshold:
 
@@ -268,6 +446,16 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   second) equal to a float value will filter out all streams in your domain that have
   a baseflow (from ``specified_bathyflow_field``) that are less than the specified
   value. Default is None.
+
+.. _json-slope_low_percentile:
+
+* ``slope_low_percentile`` (Float, optional): Lower percentile used when ARC
+  derives robust stream slope values. Default 5.
+
+.. _json-slope_high_percentile:
+
+* ``slope_high_percentile`` (Float, optional): Upper percentile used when ARC
+  derives robust stream slope values. Default 95.
 
 .. _json-quiet:
 
@@ -360,7 +548,9 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-use_warning_flags_to_download_dem:
 
-* ``use_warning_flags_to_download_dem`` (Bool, optional): TODO. Default False.
+* ``use_warning_flags_to_download_dem`` (Bool, optional): Whether to use warning
+  flag locations to identify DEM downloads for the selected GEOGLOWS VPU.
+  Default False.
 
 .. _json-user_flow_files:
 
@@ -390,7 +580,7 @@ Common processing options
 These options control the main flood-mapping workflow. They are defined in 
 `this section <https://nencarta.readthedocs.io/en/latest/configuration.html#json-inputs>`_.
 
-* :ref:`process_stream_network <json-process_stream_network>`
+* :ref:`overwrite <json-overwrite>`
 * :ref:`clean_dem <json-clean_dem>`
 * :ref:`use_warning_flags_to_download_dem <json-use_warning_flags_to_download_dem>`
 
@@ -583,11 +773,11 @@ The FIST subdirectory contains the following file types:
 Stream network movement options
 -------------------------------
 
-* :ref:`move_stream_network_to_new_locations <json-move_stream_network_to_new_locations>`
+* :ref:`move_stream_network_to_thalweg <json-move_stream_network_to_thalweg>`
 * :ref:`new_strm_threshold_km2 <json-new_strm_threshold_km2>`
 * :ref:`min_match_score <json-min_match_score>`
 
-When ``move_stream_network_to_new_locations`` is enabled, or when
+When ``move_stream_network_to_thalweg`` is enabled, or when
 ``mapper`` is set to ``Curve2Flood-FLDPLNpy``, NenCarta switches to the stream
 movement workflow implemented in ``nencarta/nencarta/main.py``. That workflow
 first checks the DEM coordinate system. If the DEM is geographic
@@ -628,7 +818,7 @@ stream order when available, and removes low-scoring or detached subnetworks.
 The matched network becomes the stream layer used by the rest of the NenCarta
 workflow, and the filled DEM replaces the original DEM for downstream steps.
 
-If ``process_stream_network`` is ``false`` and the moved stream network products
+If ``overwrite`` is ``false`` and the moved stream network products
 already exist, NenCarta reuses the existing matched flowlines and filled DEM
 instead of rebuilding them.
 
@@ -642,7 +832,7 @@ This workflow writes its outputs beneath the watershed's ``FlowDirection`` and
 * ``FlowDirection/{DEM}.tif``: A projected DEM that is either supplied by the user or automatically created. 
   A projected DEM copy is automatically created only when a geographic DEM is used with ``Curve2Flood-FLDPLNpy`` 
   or with
-  ``move_stream_network_to_new_locations=true``. The automated DEM reprojection
+  ``move_stream_network_to_thalweg=true``. The automated DEM reprojection
   output is written as a GeoTIFF in ``WGS 84 / NSIDC EASE-Grid 2.0 Global`` (EPSG:6933) 
   and becomes the DEM used by subsequent NenCarta steps for that tile.
 
@@ -682,21 +872,24 @@ GeoPackages above are the persistent vector outputs.
 GUI options
 -----------
 
-When you load the GUI, the number of inputs can be confusing. Below we describe how each input in the GUI corresponds to the JSON inputs 
-described above. The GUI will create a JSON file and then execute the NenCarta workflow. The GUI outputs the JSON file in the 
-``output_dir`` directory with the filename ``{name}.json``.The GUI inputs are organized into sections that correspond 
-to the categories of JSON inputs described above.
+The GUI is a runner and monitor for ``process_watershed``. It validates the
+form inputs, previews the watershed dictionary that will be passed to the Python
+API, starts the run, and streams log output while the simulation is active. It
+does not provide map visualization.
 
-The GUI writes a JSON file with top-level ``parallel`` set to ``False`` and
-``num_workers`` set to ``1``. Those two top-level values are currently not
-user-configurable in the GUI.
+The GUI inputs are organized into tabs that correspond to the categories of JSON
+inputs described above.
 
 Required Inputs
 ~~~~~~~~~~~~~~~
 
 * ``Watershed Name`` -> ``name``
 * ``Flowline File`` -> ``flowline``
+* ``Source Flowline Files`` -> ``source_flowlines``
 * ``DEM Directory`` -> ``dem_dir``
+* ``DEM File`` -> ``dem``
+* ``Source DEM Files`` -> ``source_dems``
+* ``Bounding Box`` -> ``bbox``
 * ``Output Directory`` -> ``output_dir``
 
 Key Workflow Switches
@@ -707,6 +900,8 @@ Key Workflow Switches
 * ``Mapper Method`` -> ``mapper``
 * ``Streamflow Source`` -> ``streamflow_source``
 * ``NWM API Key`` -> ``nwm_api_key``
+* ``Parallel`` -> ``parallel``
+* ``Worker Count`` -> ``num_workers``
 
 For ``Streamflow Source``, the GUI labels map to the JSON values as follows:
 
@@ -723,7 +918,7 @@ Advanced Parameters
 * ``Flood LC and Stream Cells in Flood Map`` -> ``flood_waterlc_and_strm_cells``
 * ``Use Specified Depth for Bathy Mask`` -> ``use_specified_depth_for_bathy_mask``
 * ``Find Banks Based on Land Cover (Default=True)`` -> ``find_banks_based_on_landcover``
-* ``Process Stream Network`` -> ``process_stream_network``
+* ``Overwrite Existing Products`` -> ``overwrite``
 * ``Create Reach Average Curve File`` -> ``create_reach_average_curve_file``
 * ``Use Warning Flags to Download DEM`` -> ``use_warning_flags_to_download_dem``
 * ``Land Water Value`` -> ``land_watervalue``
@@ -734,23 +929,23 @@ Advanced Parameters
 * ``Forensic Forecast Hour`` -> ``forensic_forecast_hour``
 * ``Bathy Flow Field`` -> ``specified_bathyflow_field``
 * ``High Flow Field`` -> ``specified_highflow_field``
-* ``Move Stream Network to Match DEM (Optional)`` -> ``move_stream_network_to_new_locations``
+* ``Move Stream Network to Thalweg`` -> ``move_stream_network_to_thalweg``
 * ``Stream Threshold for New Stream Network`` -> ``new_strm_threshold_km2``
 * ``Minimum Match Score`` -> ``min_match_score``
+* ``Slope Low Percentile`` -> ``slope_low_percentile``
+* ``Slope High Percentile`` -> ``slope_high_percentile``
 * ``Stream Order Field`` -> ``StrmOrder_Field``
 * ``Stream Order Lower`` -> ``StrmOrder_Lower``
 * ``Stream Order Upper`` -> ``StrmOrder_Upper``
 * ``Baseflow Threshold`` -> ``q_baseflow_threshold``
 * ``Lake Filter JSON`` -> ``lake_filter_json``
-* ``Overwrite Forecast Floodmaps`` -> ``overwrite_floodmaps`` conceptually, but the
-  current GUI field key is ``overwrite_forecast_floodmaps``
+* ``Overwrite Forecast Floodmaps`` -> ``overwrite_floodmaps``
 * ``Remove Old Forecast Files`` -> ``remove_old_forecast_files``
 * ``Make FIST Inputs`` -> ``make_fist_inputs``
 * ``DEM Filter`` -> ``dem_filter``
 * ``Floodmap Mode`` -> ``floodmap_mode``
-* ``User Flow Files (one per line)`` -> ``user_flow_files``
-* ``Make Curve Files`` -> ``make_curvefile`` conceptually, but the current GUI field
-  key is ``make_curvefiles``
+* ``User Flow Files`` -> ``user_flow_files``
+* ``Make Curve File`` -> ``make_curvefile``
 * ``Make Area-Perimeter Database`` -> ``make_ap_database``
 * ``Make Depth Maps`` -> ``make_depth_maps``
 * ``Make Velocity Maps`` -> ``make_velocity_maps``
@@ -763,14 +958,9 @@ Advanced Parameters
 GUI-specific conversions
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-* The GUI stores ``Watershed Name`` as ``watershed_name`` internally and then writes
-  it to the watershed JSON as ``name``.
+* The GUI stores ``Watershed Name`` as ``watershed_name`` internally and then
+  sends it to ``process_watershed`` as ``name``.
 * ``Specific flood depths (in meters) for bathy mask`` is entered as comma-separated
   text in the GUI and written as a JSON list for
   ``specify_depths_for_bathy_mask``.
-* ``User Flow Files (one per line)`` is entered as multi-line text in the GUI and
-  written as a JSON list for ``user_flow_files``.
-* ``Stream Order Field``, ``Stream Order Lower``, and ``Stream Order Upper`` are
-  stored internally as ``strmorder_field``, ``strmorder_lower``, and
-  ``strmorder_upper`` before being mapped to ``StrmOrder_Field``,
-  ``StrmOrder_Lower``, and ``StrmOrder_Upper`` in the JSON.
+* Multi-file controls are sent as JSON lists.

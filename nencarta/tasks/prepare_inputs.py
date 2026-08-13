@@ -41,13 +41,14 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     if configs.clean_dem or not configs.disable_bathymetry or configs.burn_streams or configs.move_stream_network_to_thalweg:
         make_water_mask(workspace)
 
-    if configs.clean_dem:
-        define_configs_for_dem_cleaning(workspace)
-        make_clean_dem(workspace)
 
     if configs.move_stream_network_to_thalweg or configs.burn_streams:
         burn_streams_and_move_streams(workspace)
 
+    if configs.clean_dem:
+        define_configs_for_dem_cleaning(workspace)
+        make_clean_dem(workspace)
+        
     if configs.floodmap_mode == FloodMapMode.FORECAST:
         flow_files = make_flow_file_from_forecast(workspace)
         if configs.remove_old_forecast_files:

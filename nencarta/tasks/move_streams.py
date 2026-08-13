@@ -174,10 +174,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             not workspace.stream_info_file.exists() or not workspace.filled_dem.exists() or not workspace.flowdir.exists()
          )))
 
-    if configs.clean_dem:
-        assigned_dem = Raster(workspace.DEM_File_Clean)
-    else:
-        assigned_dem = Raster(workspace.assigned_dem)
+    assigned_dem = Raster(workspace.assigned_dem)
 
     if should_burn_streams:
         workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
@@ -196,10 +193,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
     elif should_move_streams:
         dem_for_conflation = assigned_dem.read_array()
         channel_mask = Raster(workspace.bathy_water_mask).read_array()
-        if configs.clean_dem:
-            dem_for_conflation_path = workspace.DEM_File_Clean
-        else:
-            dem_for_conflation_path = workspace.assigned_dem
+        dem_for_conflation_path = workspace.assigned_dem
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
 
     if should_move_streams:
@@ -223,8 +217,14 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             else:
                 workspace.DEM_StrmShp = workspace.new_StrmShp_matched
                 return None
-            
-        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched)
+
+        kwargs = {'index': False}
+        if workspace.DEM_StrmShp.suffix.lower().endswith('.parquet'):
+            kwargs['compression'] = 'brotli'
+            kwargs['write_covering_bbox'] = True
+            kwargs['geometry_encoding'] = 'geoarrow'
+
+        Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched, **kwargs)
         _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.streamflow_source.upstream_id)
 
         final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
@@ -241,8 +241,6 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             streams_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
             if configs.burn_streams:
                 dem_for_stream_info = workspace.fixed_dem
-            elif configs.clean_dem:
-                dem_for_stream_info = workspace.DEM_File_Clean
             else:
                 dem_for_stream_info = workspace.assigned_dem
 

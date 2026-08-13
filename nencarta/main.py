@@ -1,10 +1,7 @@
 # build-in imports
-import os
 import json
-import pprint
 import argparse
 from pathlib import Path
-from contextlib import redirect_stdout, redirect_stderr
 
 # local imports
 from nencarta.logger import LOG
@@ -13,35 +10,11 @@ from nencarta.pipeline import build_pipeline
 from nencarta.core.enumerations import Mapper
 from nencarta.core.configs import NencartaConfig
 from nencarta.Download_Process_ForecastData import Download_USGS_DEM_Data_Using_WarningFlag_Data
-    
+
+
 def process_json_input_serial(json_file):
-    """Process input from a JSON file."""
-    with open(json_file, 'r') as file:
-        LOG.info(f'Opening JSON file: {json_file}')
-        data: dict = json.load(file)
-        LOG.info(f"{os.linesep}{pprint.pformat(data)}")
-    
-    watersheds: list[dict] = data.get("watersheds", [])
-    for watershed in watersheds:
-        process_watershed(watershed)
-
-    return None
-
-def process_single_watershed(watershed: dict):
-    """Run a single watershed processing job and log to a file."""
-    watershed_name = watershed.get("name", "unnamed")
-    safe_name = watershed_name.replace(" ", "_").replace("/", "_")
-    log_dir = os.path.join("logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"{safe_name}.log")
-
-    with open(log_path, 'w') as log_file, redirect_stdout(log_file), redirect_stderr(log_file):
-        try:
-            process_watershed(watershed)
-            return watershed_name
-        except Exception as e:
-            LOG.error(f"Exception during processing {watershed_name}: {e}")
-            raise
+    """Backward-compatible serial JSON runner."""
+    return process_json_input(json_file, parallel=False)
 
 def _resolve_workspace_dems(configs: NencartaConfig) -> list:
     """Return DEM inputs that should become workspaces."""
@@ -70,7 +43,7 @@ def _setup_workspace(input_dict: dict) -> list[Workspace]:
             dem_list = [None]
         else:
             LOG.warning("No DEMs found in the specified folder and no source DEMs provided; cannot run pipeline.")
-            return
+            return []
         
     workspaces = [Workspace(configs, dem) for dem in dem_list]
     return workspaces
@@ -81,6 +54,8 @@ def process_watershed(input_dict: dict):
     The current pipeline manages timing through task-level profiling.
     """
     workspaces = _setup_workspace(input_dict)
+    if not workspaces:
+        return
     run_pipeline(workspaces)
     return
 
@@ -89,6 +64,8 @@ def process_many_watersheds(input_dicts: list[dict]):
     for input_dict in input_dicts:
         workspaces.extend(_setup_workspace(input_dict))
 
+    if not workspaces:
+        return
     run_pipeline(workspaces)
 
 def run_pipeline(workspaces: list[Workspace], executor=None):
@@ -96,12 +73,16 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
     parallel = workspaces[0].configs.parallel
     num_workers = workspaces[0].configs.num_workers
     pipeline = build_pipeline(profile)
+    should_shutdown_executor = False
 
-    if executor is not None and num_workers is not None:
+    if not parallel and num_workers is not None:
+        LOG.warning(f"Ignoring num_workers={num_workers} because parallel is False.")
+    elif executor is not None and num_workers is not None:
         LOG.warning(f"Ignoring num_workers={num_workers} because an executor was provided.")
     elif executor is None and num_workers is not None:
         from concurrent.futures import ProcessPoolExecutor
         executor = ProcessPoolExecutor(max_workers=num_workers)
+        should_shutdown_executor = True
         LOG.info(f"Using ProcessPoolExecutor with {num_workers} workers.")
 
     try:
@@ -120,12 +101,35 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
         if not pipeline.error_snapshot:
             raise e
     finally:
+        if should_shutdown_executor:
+            executor.shutdown()
         if pipeline.error_snapshot:
             print(pipeline.error_snapshot.traceback)
             print(pipeline.error_snapshot)
 
     LOG.info(f"Finished processing")
     return
+
+
+def _resolve_parallel_settings(data, cli_parallel=None, cli_num_workers=None):
+    json_parallel = data.get("parallel", data.get("run_parallel"))
+    json_workers = data.get("num_workers", data.get("workers"))
+    parallel = cli_parallel if cli_parallel is not None else json_parallel
+    num_workers = cli_num_workers if cli_num_workers is not None else json_workers
+    return parallel, num_workers
+
+
+def _apply_run_overrides(watersheds, parallel=None, num_workers=None):
+    configured = []
+    for watershed in watersheds:
+        item = dict(watershed)
+        if parallel is not None:
+            item["parallel"] = bool(parallel)
+        if num_workers is not None:
+            item["num_workers"] = int(num_workers)
+        configured.append(item)
+    return configured
+
 
 def process_json_input(json_file, parallel=None, num_workers=None):
     """
@@ -144,6 +148,8 @@ def process_json_input(json_file, parallel=None, num_workers=None):
         LOG.warning("No watersheds found.")
         return
 
+    parallel, num_workers = _resolve_parallel_settings(data, parallel, num_workers)
+    watersheds = _apply_run_overrides(watersheds, parallel, num_workers)
     process_many_watersheds(watersheds)
 
 def rename_cli_keys(input_dict: dict) -> dict:
@@ -208,6 +214,7 @@ def main():
     cli_parser.add_argument("--forensic_forecast_hour", type=int, default=0, choices=[i for i in range (0,24)], help="Forensic forecast hour (defaults to 0) unless this argument is provided")
     cli_parser.add_argument("--specified_bathyflow_field", type=str, default="p_exceed_50", help="Specify the streamflow field in the streamflow reanalysis file that will be used for bathymetry estimation  (defaults to 'p_exceed_50') ")
     cli_parser.add_argument("--specified_highflow_field", type=str, default="rp100_premium", help="Specify the highflow field in the streamflow reanalysis file that will be used by ARC as the highest flow for the VDT database and curvefile creation (defaults to 'rp100_premium')")
+    cli_parser.add_argument("--use_power_laws_for_bathymetry", action="store_true", help="Use power laws to estimate bathymetry")
     cli_parser.add_argument("--StrmOrder_Field", type=str, default=None, help="Stream order field in the stream shapefile (optional)")
     cli_parser.add_argument("--StrmOrder_Lower", type=int, default=None, help="Upper bound for stream order (optional)")
     cli_parser.add_argument("--StrmOrder_Upper", type=int, default=None, help="Upper bound for stream order (optional)")

@@ -5,22 +5,17 @@ import logging
 import os
 import sys
 import traceback
-import urllib.request
 from pathlib import Path
 
 # third-party imports
-from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPalette, QPainterPath, QPen, QPixmap, QTextCursor
+from PyQt5.QtCore import QSettings, QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
-    QGraphicsPathItem,
-    QGraphicsPixmapItem,
-    QGraphicsScene,
-    QGraphicsView,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -64,6 +59,7 @@ STREAMFLOW_SOURCE_LABELS = {
     "NWM Medium Range": str(StreamflowSource.NWM_MEDIUM_RANGE),
     "NWM Long Range": str(StreamflowSource.NWM_LONG_RANGE),
 }
+
 
 def _streamflow_label(value):
     for label, source in STREAMFLOW_SOURCE_LABELS.items():
@@ -119,464 +115,6 @@ class QtLogHandler(logging.Handler):
             self.signal.emit(self.format(record))
         except Exception:
             self.handleError(record)
-
-
-class MapGraphicsView(QGraphicsView):
-    view_changed = pyqtSignal()
-
-    def __init__(self):
-        super().__init__()
-        self.setRenderHints(self.renderHints())
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-
-    def wheelEvent(self, event):
-        factor = 1.25 if event.angleDelta().y() > 0 else 0.8
-        self.scale(factor, factor)
-        self.view_changed.emit()
-
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        self.view_changed.emit()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.view_changed.emit()
-
-
-class MapLayerLoader:
-    RASTER_SUFFIXES = {".tif", ".tiff", ".vrt", ".img"}
-    VECTOR_SUFFIXES = {".gpkg", ".shp", ".gdb", ".parquet", ".geoparquet", ".geojson", ".json"}
-    COLORS = ("#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#4f46e5")
-    EXCLUDED_OUTPUT_PATTERNS = (
-        "_water_mask",
-        "_strm_raster",
-        "_strm_raster_clean",
-        "_matched.tif",
-        "_wtbx_derived.tif",
-    )
-
-    @classmethod
-    def layer_kind(cls, path):
-        suffix = Path(path).suffix.lower()
-        if suffix in cls.RASTER_SUFFIXES:
-            return "raster"
-        if suffix in cls.VECTOR_SUFFIXES:
-            return "vector"
-        return "file"
-
-    @classmethod
-    def discover_rasters(cls, directory):
-        directory = Path(directory)
-        if not directory.is_dir():
-            return []
-        paths = []
-        for suffix in cls.RASTER_SUFFIXES:
-            paths.extend(directory.glob(f"*{suffix}"))
-        return sorted(paths)
-
-    @classmethod
-    def discover_outputs(cls, output_dir, watershed_name):
-        root = Path(output_dir) / watershed_name
-        if not root.is_dir():
-            return []
-        suffixes = cls.RASTER_SUFFIXES | cls.VECTOR_SUFFIXES
-        return sorted(
-            path
-            for path in root.rglob("*")
-            if path.suffix.lower() in suffixes and not cls.skip_output_layer(path)
-        )
-
-    @classmethod
-    def skip_output_layer(cls, path):
-        name = Path(path).name.lower()
-        return any(pattern in name for pattern in cls.EXCLUDED_OUTPUT_PATTERNS)
-
-    @classmethod
-    def google_hybrid_tile_specs(cls, bbox, max_tiles=64):
-        min_lon, min_lat, max_lon, max_lat = bbox
-        if min_lon >= max_lon or min_lat >= max_lat:
-            return []
-
-        zoom = cls.choose_tile_zoom(max_lon - min_lon, max_lat - min_lat)
-        x_min, y_max = cls.lonlat_to_tile(min_lon, min_lat, zoom)
-        x_max, y_min = cls.lonlat_to_tile(max_lon, max_lat, zoom)
-        x_min, x_max = sorted((x_min, x_max))
-        y_min, y_max = sorted((y_min, y_max))
-        center_x, center_y = cls.lonlat_to_tile((min_lon + max_lon) / 2, (min_lat + max_lat) / 2, zoom)
-
-        tiles = []
-        for x in range(x_min, x_max + 1):
-            for y in range(y_min, y_max + 1):
-                tiles.append((zoom, x, y))
-        tiles.sort(key=lambda tile: (tile[1] - center_x) ** 2 + (tile[2] - center_y) ** 2)
-        return tiles[:max_tiles]
-
-    @staticmethod
-    def choose_tile_zoom(width_degrees, height_degrees):
-        span = max(width_degrees, height_degrees)
-        if span > 20:
-            return 5
-        if span > 8:
-            return 6
-        if span > 3:
-            return 8
-        if span > 1:
-            return 10
-        if span > 0.25:
-            return 12
-        if span > 0.05:
-            return 14
-        return 16
-
-    @staticmethod
-    def lonlat_to_tile(lon, lat, zoom):
-        import math
-
-        lat = max(min(lat, 85.05112878), -85.05112878)
-        n = 2 ** zoom
-        x = int((lon + 180.0) / 360.0 * n)
-        lat_rad = math.radians(lat)
-        y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
-        return max(0, min(n - 1, x)), max(0, min(n - 1, y))
-
-    @staticmethod
-    def tile_bounds(x, y, zoom):
-        import math
-
-        n = 2 ** zoom
-        lon_min = x / n * 360.0 - 180.0
-        lon_max = (x + 1) / n * 360.0 - 180.0
-        lat_max = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
-        lat_min = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
-        return lon_min, lat_min, lon_max, lat_max
-
-    @staticmethod
-    def google_tile_url(x, y, zoom):
-        return f"https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={zoom}"
-
-    @classmethod
-    def make_google_tile_item_from_data(cls, x, y, zoom, data):
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(data):
-            return None
-
-        item = QGraphicsPixmapItem(pixmap)
-        minx, miny, maxx, maxy = cls.tile_bounds(x, y, zoom)
-        item.setPos(minx, -maxy)
-        item.setTransform(item.transform().scale((maxx - minx) / pixmap.width(), (maxy - miny) / pixmap.height()), True)
-        item.setZValue(-100)
-        return item
-
-    @classmethod
-    def make_google_tile_item(cls, x, y, zoom):
-        url = cls.google_tile_url(x, y, zoom)
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "NenCarta GUI"})
-            with urllib.request.urlopen(request, timeout=2) as response:
-                data = response.read()
-        except Exception:
-            return None
-        return cls.make_google_tile_item_from_data(x, y, zoom, data)
-
-    @classmethod
-    def make_layer(cls, name, path, group, index):
-        path = Path(path)
-        kind = cls.layer_kind(path)
-        color = cls.COLORS[index % len(cls.COLORS)]
-        layer = {
-            "name": name,
-            "path": path,
-            "group": group,
-            "kind": kind,
-            "color": color,
-            "item": None,
-            "stats": "",
-            "error": None,
-        }
-        try:
-            if not path.exists():
-                layer["error"] = "File does not exist."
-                layer["stats"] = cls.file_stats(path, missing=True)
-            elif kind == "raster":
-                layer["item"], layer["stats"] = cls.make_raster_item(path)
-            elif kind == "vector":
-                layer["item"], layer["stats"] = cls.make_vector_item(path, color)
-            else:
-                layer["stats"] = cls.file_stats(path)
-        except Exception as exc:
-            layer["error"] = str(exc)
-            layer["stats"] = f"{path}\nError: {exc}"
-        return layer
-
-    @classmethod
-    def make_raster_item(cls, path):
-        import numpy as np
-        from osgeo import gdal
-        from pyproj import CRS
-
-        ds = gdal.Open(str(path))
-        if ds is None:
-            raise ValueError("Could not open raster.")
-
-        band = ds.GetRasterBand(1)
-        x_size = ds.RasterXSize
-        y_size = ds.RasterYSize
-        scale = max(x_size / 900, y_size / 900, 1)
-        out_x = max(1, int(x_size / scale))
-        out_y = max(1, int(y_size / scale))
-        array = band.ReadAsArray(buf_xsize=out_x, buf_ysize=out_y).astype("float64")
-        nodata = band.GetNoDataValue()
-        projection = ds.GetProjection()
-        geotransform = ds.GetGeoTransform()
-
-        bbox = cls.raster_bbox(geotransform, x_size, y_size)
-        epsg_bbox = cls.to_epsg4326_bbox(bbox, projection)
-
-        valid = np.isfinite(array)
-        if nodata is not None:
-            valid &= array != nodata
-
-        color_table = band.GetRasterColorTable()
-        color_table_count = color_table.GetCount() if color_table is not None else 0
-        if color_table_count:
-            rgba = np.zeros((array.shape[0], array.shape[1], 4), dtype="uint8")
-            indices = np.rint(array).astype("int64")
-            for value in np.unique(indices[valid]):
-                if 0 <= value < color_table_count:
-                    red, green, blue, alpha = color_table.GetColorEntry(int(value))
-                    rgba[indices == value] = [red, green, blue, alpha]
-            rgba[..., 3] = np.where(valid, rgba[..., 3], 0).astype("uint8")
-        else:
-            if valid.any():
-                low, high = np.nanpercentile(array[valid], [2, 98])
-                if low == high:
-                    high = low + 1
-                normalized = np.clip((array - low) / (high - low), 0, 1)
-                gray = (normalized * 255).astype("uint8")
-            else:
-                gray = np.zeros(array.shape, dtype="uint8")
-
-            rgba = np.zeros((array.shape[0], array.shape[1], 4), dtype="uint8")
-            rgba[..., 0] = gray
-            rgba[..., 1] = gray
-            rgba[..., 2] = gray
-            rgba[..., 3] = np.where(valid, 210, 0).astype("uint8")
-
-        image = QImage(rgba.data, rgba.shape[1], rgba.shape[0], QImage.Format_RGBA8888).copy()
-        pixmap = QPixmap.fromImage(image)
-        item = QGraphicsPixmapItem(pixmap)
-        minx, miny, maxx, maxy = epsg_bbox
-        item.setPos(minx, -maxy)
-        item.setScale(1)
-        item.setTransformOriginPoint(0, 0)
-        item.setTransform(item.transform().scale((maxx - minx) / out_x, (maxy - miny) / out_y), True)
-        item.setZValue(0)
-
-        crs_text = CRS.from_user_input(projection).to_string() if projection else "Unknown"
-        stats = "\n".join(
-            [
-                f"{path}",
-                "Type: Raster",
-                f"Projection: {crs_text}",
-                f"Size: {x_size} x {y_size}",
-                f"Resolution: {abs(geotransform[1]):g}, {abs(geotransform[5]):g}",
-                f"BBox EPSG:4326: {cls.format_bbox(epsg_bbox)}",
-                f"NoData: {nodata}",
-                f"Color table entries: {color_table_count}",
-            ]
-        )
-        ds = None
-        return item, stats
-
-    @classmethod
-    def make_vector_item(cls, path, color):
-        import geopandas as gpd
-        import pyogrio
-        from pyproj import CRS
-
-        info = pyogrio.read_info(path, force_total_bounds=True)
-        if Path(path).suffix.lower() in {".parquet", ".geoparquet"}:
-            gdf = gpd.read_parquet(path)
-            if len(gdf) > 5000:
-                gdf = gdf.head(5000)
-        else:
-            kwargs = {"max_features": 5000}
-            if Path(path).suffix.lower() == ".gdb":
-                kwargs["layer"] = "geoglowsv2"
-            gdf = pyogrio.read_dataframe(path, **kwargs)
-
-        if gdf.empty:
-            raise ValueError("Vector file has no features to draw.")
-        if gdf.crs is not None:
-            gdf = gdf.to_crs("EPSG:4326")
-
-        painter_path = QPainterPath()
-        for geom in gdf.geometry:
-            cls.add_geometry_to_path(painter_path, geom)
-
-        item = QGraphicsPathItem(painter_path)
-        item.setPen(QPen(QColor(color), 0))
-        item.setZValue(10)
-
-        bounds = tuple(gdf.total_bounds)
-        crs_text = CRS.from_user_input(info["crs"]).to_string() if info.get("crs") is not None else "Unknown"
-        feature_count = info.get("features")
-        stats = "\n".join(
-            [
-                f"{path}",
-                "Type: Vector",
-                f"Projection: {crs_text}",
-                f"Geometry: {info.get('geometry_type')}",
-                f"Features: {feature_count}",
-                f"Displayed: {len(gdf)}",
-                f"BBox EPSG:4326: {cls.format_bbox(bounds)}",
-            ]
-        )
-        return item, stats
-
-    @staticmethod
-    def add_geometry_to_path(path, geom):
-        if geom is None or geom.is_empty:
-            return
-        geom_type = geom.geom_type
-        if geom_type == "LineString":
-            MapLayerLoader.add_line(path, geom.coords)
-        elif geom_type == "MultiLineString":
-            for line in geom.geoms:
-                MapLayerLoader.add_line(path, line.coords)
-        elif geom_type == "Polygon":
-            MapLayerLoader.add_polygon(path, geom)
-        elif geom_type == "MultiPolygon":
-            for polygon in geom.geoms:
-                MapLayerLoader.add_polygon(path, polygon)
-        elif geom_type == "Point":
-            path.addEllipse(geom.x - 0.0005, -geom.y - 0.0005, 0.001, 0.001)
-        elif geom_type == "MultiPoint":
-            for point in geom.geoms:
-                path.addEllipse(point.x - 0.0005, -point.y - 0.0005, 0.001, 0.001)
-        elif hasattr(geom, "geoms"):
-            for part in geom.geoms:
-                MapLayerLoader.add_geometry_to_path(path, part)
-
-    @staticmethod
-    def add_line(path, coords):
-        coords = list(coords)
-        if not coords:
-            return
-        path.moveTo(coords[0][0], -coords[0][1])
-        for x, y, *_ in coords[1:]:
-            path.lineTo(x, -y)
-
-    @staticmethod
-    def add_polygon(path, polygon):
-        MapLayerLoader.add_line(path, polygon.exterior.coords)
-        for interior in polygon.interiors:
-            MapLayerLoader.add_line(path, interior.coords)
-
-    @staticmethod
-    def raster_bbox(geotransform, width, height):
-        xs = [
-            geotransform[0],
-            geotransform[0] + width * geotransform[1],
-            geotransform[0] + height * geotransform[2],
-            geotransform[0] + width * geotransform[1] + height * geotransform[2],
-        ]
-        ys = [
-            geotransform[3],
-            geotransform[3] + width * geotransform[4],
-            geotransform[3] + height * geotransform[5],
-            geotransform[3] + width * geotransform[4] + height * geotransform[5],
-        ]
-        return min(xs), min(ys), max(xs), max(ys)
-
-    @staticmethod
-    def to_epsg4326_bbox(bbox, projection):
-        if not projection:
-            return bbox
-        import geopandas as gpd
-        from pyproj import CRS
-        from shapely.geometry import box
-
-        crs = CRS.from_user_input(projection)
-        if crs == CRS.from_epsg(4326):
-            return bbox
-        return tuple(gpd.GeoSeries([box(*bbox)], crs=crs).to_crs("EPSG:4326").total_bounds)
-
-    @staticmethod
-    def format_bbox(bbox):
-        return ", ".join(f"{value:.6g}" for value in bbox)
-
-    @staticmethod
-    def file_stats(path, missing=False):
-        size = "missing" if missing else f"{Path(path).stat().st_size / 1024:.1f} KB"
-        return "\n".join([f"{path}", "Type: File", f"Size: {size}"])
-
-
-class BasemapTileWorker(QThread):
-    tile_signal = pyqtSignal(int, int, int, int, object)
-    finished_signal = pyqtSignal(int, int)
-
-    def __init__(self, request_id, tile_specs, max_workers=8):
-        super().__init__()
-        self.request_id = request_id
-        self.tile_specs = list(tile_specs)
-        self.max_workers = max(1, int(max_workers))
-
-    @staticmethod
-    def fetch_tile(tile_spec):
-        zoom, x, y = tile_spec
-        url = MapLayerLoader.google_tile_url(x, y, zoom)
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "NenCarta GUI"})
-            with urllib.request.urlopen(request, timeout=1) as response:
-                data = response.read()
-        except Exception:
-            return None
-        return zoom, x, y, data
-
-    def run(self):
-        import concurrent.futures
-
-        loaded = 0
-        tile_iter = iter(self.tile_specs)
-        max_workers = min(self.max_workers, len(self.tile_specs))
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        pending = set()
-
-        def submit_next():
-            if self.isInterruptionRequested():
-                return False
-            try:
-                tile_spec = next(tile_iter)
-            except StopIteration:
-                return False
-            pending.add(executor.submit(self.fetch_tile, tile_spec))
-            return True
-
-        try:
-            for _ in range(max_workers):
-                submit_next()
-
-            while pending and not self.isInterruptionRequested():
-                done, pending = concurrent.futures.wait(
-                    pending,
-                    timeout=0.1,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for future in done:
-                    result = future.result()
-                    if result is not None and not self.isInterruptionRequested():
-                        zoom, x, y, data = result
-                        loaded += 1
-                        self.tile_signal.emit(self.request_id, zoom, x, y, data)
-                    submit_next()
-        finally:
-            for future in pending:
-                future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
-        self.finished_signal.emit(self.request_id, loaded)
 
 
 class WorkerThread(QThread):
@@ -995,7 +533,7 @@ class FloodSimulationGUI(QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
-        self.resize(1360, 860)
+        self.resize(1320, 820)
         self.input_fields = {}
         self.field_parsers = {}
         self.worker_thread = None
@@ -1018,11 +556,15 @@ class FloodSimulationGUI(QMainWindow):
         title_block = QVBoxLayout()
         title = QLabel("NenCarta")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Flood simulation setup")
+        subtitle = QLabel("Runner and monitor")
         subtitle.setObjectName("AppSubtitle")
         title_block.addWidget(title)
         title_block.addWidget(subtitle)
 
+        self.validate_button = QPushButton("Validate")
+        self.validate_button.clicked.connect(self.validate_configuration)
+        self.preview_button = QPushButton("Preview JSON")
+        self.preview_button.clicked.connect(self.preview_configuration)
         self.run_button = QPushButton("Start Simulation")
         self.run_button.setObjectName("PrimaryButton")
         self.run_button.clicked.connect(self.start_simulation)
@@ -1030,6 +572,8 @@ class FloodSimulationGUI(QMainWindow):
 
         header_layout.addLayout(title_block)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.validate_button)
+        header_layout.addWidget(self.preview_button)
         header_layout.addWidget(self.run_button)
         root_layout.addWidget(header)
 
@@ -1041,105 +585,36 @@ class FloodSimulationGUI(QMainWindow):
         self.tabs.setMinimumWidth(560)
         splitter.addWidget(self.tabs)
 
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(12, 0, 0, 0)
-        right_layout.setSpacing(12)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        monitor_panel = QWidget()
+        monitor_layout = QVBoxLayout(monitor_panel)
+        monitor_layout.setContentsMargins(12, 0, 0, 0)
+        monitor_layout.setSpacing(12)
 
-        self.side_tabs = QTabWidget()
-        right_layout.addWidget(self.side_tabs, 1)
+        preview_group = QGroupBox("Configuration Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview_text = QPlainTextEdit()
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setFont(QFont("Consolas", 9))
+        self.preview_text.setMaximumHeight(230)
+        preview_layout.addWidget(self.preview_text)
+        monitor_layout.addWidget(preview_group)
 
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
-        log_layout.setContentsMargins(0, 0, 0, 0)
         log_group = QGroupBox("Simulation Log")
-        log_group_layout = QVBoxLayout(log_group)
+        log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Consolas", 9))
-        log_group_layout.addWidget(self.log_text)
-        log_layout.addWidget(log_group)
-        self.side_tabs.addTab(log_tab, "Log")
+        log_layout.addWidget(self.log_text)
+        monitor_layout.addWidget(log_group, 1)
 
-        self._init_map_panel()
+        splitter.addWidget(monitor_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
 
         self._add_input_tabs()
         self._wire_visibility()
-        self._wire_map_refresh()
+        self.preview_configuration(write_log=False)
         self.log_text.setText("[INFO] Configure inputs, then start the simulation.\n")
-
-    def _init_map_panel(self):
-        map_tab = QWidget()
-        map_layout = QVBoxLayout(map_tab)
-        map_layout.setContentsMargins(0, 0, 0, 0)
-        map_layout.setSpacing(10)
-
-        toolbar = QHBoxLayout()
-        refresh_inputs = QPushButton("Refresh Inputs")
-        refresh_outputs = QPushButton("Load Outputs")
-        zoom_layers = QPushButton("Zoom to Layers")
-        clear_layers = QPushButton("Clear")
-        self.google_hybrid_basemap = QCheckBox("Google Hybrid")
-        refresh_inputs.clicked.connect(self.refresh_input_layers)
-        refresh_outputs.clicked.connect(self.load_output_layers)
-        zoom_layers.clicked.connect(self.zoom_to_map_layers)
-        clear_layers.clicked.connect(self.clear_map_layers)
-        self.google_hybrid_basemap.toggled.connect(self.render_map_layers)
-        toolbar.addWidget(refresh_inputs)
-        toolbar.addWidget(refresh_outputs)
-        toolbar.addWidget(zoom_layers)
-        toolbar.addWidget(clear_layers)
-        toolbar.addWidget(self.google_hybrid_basemap)
-        toolbar.addStretch(1)
-        map_layout.addLayout(toolbar)
-
-        map_splitter = QSplitter(Qt.Horizontal)
-        self.map_scene = QGraphicsScene(self)
-        self.map_view = MapGraphicsView()
-        self.map_view.setScene(self.map_scene)
-        self.map_view.setMinimumHeight(360)
-        map_splitter.addWidget(self.map_view)
-
-        layer_panel = QWidget()
-        layer_panel.setMinimumWidth(300)
-        layer_layout = QVBoxLayout(layer_panel)
-        layer_layout.setContentsMargins(0, 0, 0, 0)
-        self.layer_controls = QWidget()
-        self.layer_controls_layout = QVBoxLayout(self.layer_controls)
-        self.layer_controls_layout.setContentsMargins(8, 8, 8, 8)
-        self.layer_controls_layout.setSpacing(6)
-        self.layer_controls_layout.addStretch(1)
-        layer_scroll = QScrollArea()
-        layer_scroll.setWidgetResizable(True)
-        layer_scroll.setWidget(self.layer_controls)
-        layer_layout.addWidget(QLabel("Layers"))
-        layer_layout.addWidget(layer_scroll, 1)
-        map_splitter.addWidget(layer_panel)
-        map_splitter.setStretchFactor(0, 4)
-        map_splitter.setStretchFactor(1, 1)
-        map_layout.addWidget(map_splitter, 1)
-
-        self.side_tabs.addTab(map_tab, "Map")
-        self.layer_groups = {"Inputs": [], "Outputs": []}
-        self.layer_visibility = {}
-        self.basemap_items = []
-        self.basemap_tile_cache = {}
-        self.basemap_workers = []
-        self.basemap_request_id = 0
-        self.current_layer_rect = None
-        self._basemap_warning_shown = False
-        self.map_refresh_timer = QTimer(self)
-        self.map_refresh_timer.setSingleShot(True)
-        self.map_refresh_timer.timeout.connect(self.refresh_input_layers)
-        self.basemap_refresh_timer = QTimer(self)
-        self.basemap_refresh_timer.setSingleShot(True)
-        self.basemap_refresh_timer.timeout.connect(self.refresh_basemap_for_view)
-        self.map_view.view_changed.connect(self.schedule_basemap_refresh)
-        self.map_view.horizontalScrollBar().valueChanged.connect(self.schedule_basemap_refresh)
-        self.map_view.verticalScrollBar().valueChanged.connect(self.schedule_basemap_refresh)
 
     def _make_tab(self, title):
         scroll = QScrollArea()
@@ -1194,12 +669,6 @@ class FloodSimulationGUI(QMainWindow):
         widget.setPlaceholderText(placeholder)
         return self._add_row(layout, label, widget, key, parser, tooltip)
 
-    def _add_multiline(self, layout, key, label, default="", parser="str_list", tooltip=None):
-        value = _setting_text(key, default, multiline=True)
-        widget = QPlainTextEdit(value)
-        widget.setMinimumHeight(72)
-        return self._add_row(layout, label, widget, key, parser, tooltip)
-
     def _add_combo(self, layout, key, label, items, default=None, editable=False, parser="text", tooltip=None):
         saved = settings.value(key, default if default is not None else "")
         widget = QComboBox()
@@ -1240,7 +709,7 @@ class FloodSimulationGUI(QMainWindow):
             except (TypeError, json.JSONDecodeError):
                 data = default
         widget = DictTable(data, defaults=default)
-        widget.setMinimumHeight(280)
+        widget.setMinimumHeight(260)
         return self._add_row(layout, label, widget, key, "dict")
 
     def _add_input_tabs(self):
@@ -1251,18 +720,17 @@ class FloodSimulationGUI(QMainWindow):
         outputs_tab = self._make_tab("Outputs")
         advanced_tab = self._make_tab("Advanced")
 
-        source_files = "Raster/Vector Files (*.tif *.tiff *.vrt *.gpkg *.shp *.gdb *.parquet *.geoparquet);;All Files (*)"
-        vector_files = "Vector Files (*.gpkg *.shp *.gdb *.parquet *.geoparquet);;All Files (*)"
+        raster_files = "Raster Files (*.tif *.tiff *.vrt *.img);;All Files (*)"
+        source_files = "Raster/Vector Files (*.tif *.tiff *.vrt *.img *.gpkg *.shp *.gdb *.parquet *.geoparquet);;All Files (*)"
+        vector_files = "Vector Files (*.gpkg *.shp *.gdb *.parquet *.geoparquet *.geojson *.json);;All Files (*)"
 
         group = self._make_group(inputs_tab, "Required")
         self._add_line(group, "watershed_name", "Watershed name", settings.value("name", "example"), placeholder="example")
-        self._add_path(group, "output_dir", "Output directory", "data/output", mode="directory")
+        self._add_path(group, "output_dir", "Output directory", "", mode="directory")
 
-        group = self._make_group(inputs_tab, "DEM Source: Directory or File")
+        group = self._make_group(inputs_tab, "DEM Source")
         self._add_path(group, "dem_dir", "DEM directory", "", mode="directory")
-        self._add_path(group, "dem", "DEM file", "", file_filter=source_files)
-
-        group = self._make_group(inputs_tab, "Generated DEM")
+        self._add_path(group, "dem", "DEM file", "", file_filter=raster_files)
         self._add_multi_files(group, "source_dems", "Source DEM files", _default("source_dems"), source_files)
         self._add_line(group, "bbox", "Bounding box", "", parser="bbox", placeholder="minx, miny, maxx, maxy")
         self._add_checkbox(group, "buffer", "Buffer DEM from source DEMs", _default("buffer"))
@@ -1271,7 +739,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "use_warning_flags_to_download_dem", "Use warning flags to download DEM", _default("use_warning_flags_to_download_dem"))
         self._add_line(group, "dem_filter", "DEM filter", _default("dem_filter"), placeholder="*.tif")
 
-        group = self._make_group(inputs_tab, "Flowline Source: File or Source Flowlines")
+        group = self._make_group(inputs_tab, "Flowline Source")
         self._add_path(group, "flowline", "Flowline file", "", file_filter=vector_files)
         self._add_multi_files(group, "source_flowlines", "Source flowline files", _default("source_flowlines"), vector_files)
 
@@ -1283,7 +751,7 @@ class FloodSimulationGUI(QMainWindow):
         self.nwm_api_key_label = group.itemAtPosition(group.rowCount() - 1, 0).widget()
         self._add_combo(group, "floodmap_mode", "Floodmap mode", [mode.value for mode in FloodMapMode], default=_default("floodmap_mode"))
         self._add_multi_files(group, "user_flow_files", "User flow files", _default("user_flow_files"), "CSV Files (*.csv);;All Files (*)")
-        self._add_return_periods(group, "return_periods", "Return periods")
+        self._add_return_periods(group, "return_periods", "Return periods", _default("return_periods"))
         self._add_path(group, "reanalysis_file", "Reanalysis file", "", file_filter="CSV Files (*.csv);;All Files (*)")
 
         group = self._make_group(run_tab, "Forecast")
@@ -1294,6 +762,7 @@ class FloodSimulationGUI(QMainWindow):
 
         group = self._make_group(run_tab, "Execution")
         self._add_checkbox(group, "parallel", "Run workspaces in parallel", _default("parallel"))
+        self._add_line(group, "num_workers", "Worker count", "", parser="int", placeholder="Optional")
         self._add_checkbox(group, "profile", "Print profiling stats", _default("profile"))
         self._add_checkbox(group, "quiet", "Reduce model output", _default("quiet"))
         self._add_checkbox(group, "use_yaml", "Write mapper configs as YAML", _default("use_yaml"))
@@ -1309,6 +778,8 @@ class FloodSimulationGUI(QMainWindow):
         self._add_line(group, "new_strm_threshold_km2", "New stream threshold km2", _default("new_strm_threshold_km2"), parser="float")
         self._add_line(group, "min_match_score", "Minimum match score", "", parser="float")
         self._add_line(group, "q_baseflow_threshold", "Baseflow threshold", "", parser="float")
+        self._add_line(group, "slope_low_percentile", "Slope low percentile", _default("slope_low_percentile"), parser="float")
+        self._add_line(group, "slope_high_percentile", "Slope high percentile", _default("slope_high_percentile"), parser="float")
 
         group = self._make_group(hydro_tab, "Stream and Lake Filters")
         self._add_line(group, "StrmOrder_Field", "Stream order field", "")
@@ -1318,7 +789,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_path(group, "lakes", "Lakes file", "", file_filter=vector_files)
 
         group = self._make_group(hydro_tab, "Land Cover")
-        self._add_multi_files(group, "land_cover_cache", "Land cover cache files", _default("land_cover_cache"), "Raster Files (*.tif *.tiff *.vrt);;All Files (*)")
+        self._add_multi_files(group, "land_cover_cache", "Land cover cache files", _default("land_cover_cache"), raster_files)
         self._add_line(group, "land_watervalue", "Land water value", _default("land_watervalue"), parser="int")
         self._add_checkbox(group, "flood_waterlc_and_strm_cells", "Flood water land-cover and stream cells", _default("flood_waterlc_and_strm_cells"))
 
@@ -1353,7 +824,7 @@ class FloodSimulationGUI(QMainWindow):
         group = self._make_group(outputs_tab, "Flood Maps")
         self._add_checkbox(group, "overwrite_floodmaps", "Overwrite flood maps", _default("overwrite_floodmaps"))
         self._add_checkbox(group, "remove_old_forecast_files", "Remove old forecast files", _default("remove_old_forecast_files"))
-        self._add_line(group, "floodmap_identifier", "Flood map identifier", "")
+        self._add_line(group, "floodmap_identifier", "Flood map identifier", _default("floodmap_identifier"))
         self._add_combo(group, "vdt_file_extension", "VDT file extension", ["txt", "csv", "parquet"], default=_default("vdt_file_extension"))
 
         group = self._make_group(outputs_tab, "Floodmap Arguments")
@@ -1371,299 +842,6 @@ class FloodSimulationGUI(QMainWindow):
         self._add_combo(group, "compression", "Raster compression", ["LZW", "DEFLATE", "ZSTD", "NONE"], default=_default("compression"), editable=True)
         self._add_checkbox(group, "raise_errors_if_nothing_in_domain", "Raise if nothing is in domain", _default("raise_errors_if_nothing_in_domain"))
         self._add_line(group, "exclude", "Exclude stream IDs", "", parser="int_list", placeholder="123, 456")
-
-    def _wire_map_refresh(self):
-        map_keys = {
-            "dem",
-            "dem_dir",
-            "flowline",
-            "source_dems",
-            "land_cover_cache",
-            "user_flow_files",
-        }
-        for key in map_keys:
-            widget = self.input_fields.get(key)
-            if isinstance(widget, PathPicker):
-                widget.line_edit.textChanged.connect(self.schedule_input_layer_refresh)
-            elif isinstance(widget, MultiFilePicker):
-                widget.changed_signal.connect(self.schedule_input_layer_refresh)
-
-        self.schedule_input_layer_refresh()
-
-    def schedule_input_layer_refresh(self):
-        if hasattr(self, "map_refresh_timer"):
-            self.map_refresh_timer.start(500)
-
-    def refresh_input_layers(self):
-        specs = []
-        raster_filter = {".tif", ".tiff", ".vrt", ".img"}
-        vector_filter = {".gpkg", ".shp", ".gdb", ".parquet", ".geoparquet", ".geojson", ".json"}
-
-        dem_dir = self.input_fields["dem_dir"].text().strip()
-        dem_file = self.input_fields["dem"].text().strip()
-        if dem_file:
-            specs.append(("DEM file", dem_file))
-        if dem_dir:
-            for path in MapLayerLoader.discover_rasters(dem_dir)[:50]:
-                specs.append((f"DEM directory/{path.name}", path))
-
-        for path in self.input_fields["source_dems"].values():
-            specs.append((f"Source DEM/{Path(path).name}", path))
-        flowline = self.input_fields["flowline"].text().strip()
-        if flowline:
-            specs.append((f"Flowline/{Path(flowline).name}", flowline))
-        for path in self.input_fields["land_cover_cache"].values():
-            specs.append((f"Land cover/{Path(path).name}", path))
-        for path in self.input_fields["user_flow_files"].values():
-            specs.append((f"User flow file/{Path(path).name}", path))
-
-        layers = []
-        for index, (name, path) in enumerate(specs):
-            suffix = Path(path).suffix.lower()
-            if suffix in raster_filter | vector_filter or Path(path).exists():
-                layers.append(MapLayerLoader.make_layer(name, path, "Inputs", index))
-        self.set_map_group_layers("Inputs", layers)
-
-    def load_output_layers(self):
-        try:
-            params = self._get_params()
-        except Exception as exc:
-            self.log_message(f"[WARNING] Could not collect output path settings: {exc}")
-            return
-
-        output_dir = params.get("output_dir")
-        watershed_name = params.get("name")
-        if not output_dir or not watershed_name:
-            self.log_message("[WARNING] Output directory and watershed name are required to load outputs.")
-            return
-
-        paths = MapLayerLoader.discover_outputs(output_dir, watershed_name)
-        stream_layers = self.make_generated_stream_layers(params)
-        layers = stream_layers + [
-            MapLayerLoader.make_layer(str(path.relative_to(Path(output_dir) / watershed_name)), path, "Outputs", index)
-            for index, path in enumerate(paths[:150])
-            if path not in {layer["path"] for layer in stream_layers}
-        ]
-        self.set_map_group_layers("Outputs", layers)
-        self.side_tabs.setCurrentIndex(1)
-        self.log_message(f"[INFO] Loaded {len(layers)} output layers.")
-
-    def make_generated_stream_layers(self, params):
-        try:
-            from nencarta.workspace import Workspace
-
-            configs = NencartaConfig(dict(params))
-            dem_inputs = []
-            if configs.dem_dir:
-                dem_inputs = list(Path(configs.dem_dir).glob(configs.dem_filter))
-            elif configs.dem:
-                dem_inputs = [Path(configs.dem)]
-            elif configs.source_dems and configs.bbox:
-                dem_inputs = [None]
-
-            layers = []
-            for index, dem in enumerate(dem_inputs[:50]):
-                workspace = Workspace(configs, dem)
-                if configs.move_stream_network_to_thalweg and workspace.new_StrmShp_matched.exists():
-                    path = workspace.new_StrmShp_matched
-                    name = f"Generated streams matched/{workspace.FileName}"
-                elif workspace.DEM_StrmShp.exists():
-                    path = workspace.DEM_StrmShp
-                    name = f"Generated streams/{workspace.FileName}"
-                else:
-                    continue
-                layers.append(MapLayerLoader.make_layer(name, path, "Outputs", index))
-            return layers
-        except Exception as exc:
-            self.log_message(f"[WARNING] Could not inspect generated stream outputs: {exc}")
-            return []
-
-    def set_map_group_layers(self, group, layers):
-        self.layer_groups[group] = layers
-        self.render_map_layers()
-
-    def clear_map_layers(self):
-        self.layer_groups = {"Inputs": [], "Outputs": []}
-        self.layer_visibility.clear()
-        self.stop_basemap_workers()
-        self.render_map_layers()
-
-    def render_map_layers(self):
-        for item in self.map_scene.items():
-            self.map_scene.removeItem(item)
-        self.clear_layer_controls()
-        has_layers = False
-        layer_rect = None
-
-        for group_name, layers in self.layer_groups.items():
-            if not layers:
-                continue
-            has_layers = True
-            group_label = QLabel(group_name)
-            group_label.setObjectName("LayerGroupLabel")
-            self.layer_controls_layout.insertWidget(self.layer_controls_layout.count() - 1, group_label)
-            for layer in layers:
-                key = f"{group_name}:{layer['path']}:{layer['name']}"
-                visible = self.layer_visibility.get(key, True)
-                checkbox = QCheckBox(layer["name"])
-                checkbox.setChecked(visible)
-                checkbox.setToolTip(str(layer["path"]))
-                checkbox.toggled.connect(lambda checked, item=layer["item"], layer_key=key: self.set_layer_visible(layer_key, item, checked))
-
-                stats_button = QPushButton("Stats")
-                stats_button.setCheckable(True)
-                stats_button.setMaximumWidth(70)
-                header = QHBoxLayout()
-                header.addWidget(checkbox, 1)
-                header.addWidget(stats_button)
-
-                stats_text = QPlainTextEdit(layer["stats"])
-                stats_text.setReadOnly(True)
-                stats_text.setVisible(False)
-                stats_text.setMaximumHeight(150)
-                stats_button.toggled.connect(stats_text.setVisible)
-
-                layer_widget = QWidget()
-                layer_layout = QVBoxLayout(layer_widget)
-                layer_layout.setContentsMargins(0, 0, 0, 0)
-                layer_layout.setSpacing(4)
-                layer_layout.addLayout(header)
-                layer_layout.addWidget(stats_text)
-                self.layer_controls_layout.insertWidget(self.layer_controls_layout.count() - 1, layer_widget)
-
-                if layer["item"] is not None:
-                    layer["item"].setVisible(visible)
-                    self.map_scene.addItem(layer["item"])
-                    if visible:
-                        item_rect = layer["item"].sceneBoundingRect()
-                        layer_rect = item_rect if layer_rect is None else layer_rect.united(item_rect)
-
-        if not has_layers:
-            empty_label = QLabel("No map layers loaded.")
-            empty_label.setObjectName("LayerEmptyLabel")
-            self.layer_controls_layout.insertWidget(self.layer_controls_layout.count() - 1, empty_label)
-
-        self.current_layer_rect = layer_rect
-        self.render_basemap(layer_rect)
-        if self.map_scene.items():
-            self.zoom_to_map_layers(refresh_basemap=False)
-
-    def render_basemap(self, layer_rect):
-        self.remove_basemap_items()
-        if not self.google_hybrid_basemap.isChecked() or layer_rect is None or layer_rect.isNull():
-            return
-
-        self.basemap_request_id += 1
-        request_id = self.basemap_request_id
-        bbox = self.scene_rect_to_bbox(layer_rect)
-        tile_specs = MapLayerLoader.google_hybrid_tile_specs(bbox)
-        if not tile_specs:
-            self.log_basemap_warning_once()
-            return
-
-        missing_tiles = []
-        for zoom, x, y in tile_specs:
-            key = (zoom, x, y)
-            data = self.basemap_tile_cache.get(key)
-            if data is None:
-                missing_tiles.append((zoom, x, y))
-            else:
-                self.add_basemap_tile(request_id, zoom, x, y, data)
-
-        if missing_tiles:
-            worker = BasemapTileWorker(request_id, missing_tiles)
-            worker.tile_signal.connect(self.add_basemap_tile)
-            worker.finished_signal.connect(self.basemap_worker_finished)
-            worker.finished.connect(lambda worker=worker: self.cleanup_basemap_worker(worker))
-            self.basemap_workers.append(worker)
-            worker.start()
-
-    def refresh_basemap_for_view(self):
-        if not self.google_hybrid_basemap.isChecked() or self.current_layer_rect is None:
-            return
-        visible_rect = self.map_view.mapToScene(self.map_view.viewport().rect()).boundingRect()
-        if not visible_rect.isValid() or visible_rect.isNull():
-            visible_rect = self.current_layer_rect
-        else:
-            visible_rect = visible_rect.intersected(self.current_layer_rect)
-            if visible_rect.isNull():
-                visible_rect = self.current_layer_rect
-        self.render_basemap(visible_rect)
-
-    def schedule_basemap_refresh(self):
-        if hasattr(self, "basemap_refresh_timer") and self.google_hybrid_basemap.isChecked():
-            self.basemap_refresh_timer.start(850)
-
-    def remove_basemap_items(self):
-        self.stop_basemap_workers()
-        for item in self.basemap_items:
-            if item.scene() is self.map_scene:
-                self.map_scene.removeItem(item)
-        self.basemap_items = []
-
-    def add_basemap_tile(self, request_id, zoom, x, y, data):
-        if request_id != self.basemap_request_id:
-            return
-        key = (zoom, x, y)
-        self.basemap_tile_cache[key] = data
-        while len(self.basemap_tile_cache) > 2048:
-            self.basemap_tile_cache.pop(next(iter(self.basemap_tile_cache)))
-
-        item = MapLayerLoader.make_google_tile_item_from_data(x, y, zoom, data)
-        if item is None:
-            return
-        self.basemap_items.append(item)
-        self.map_scene.addItem(item)
-
-    def basemap_worker_finished(self, request_id, loaded_count):
-        if request_id == self.basemap_request_id and loaded_count == 0 and not self.basemap_items:
-            self.log_basemap_warning_once()
-
-    def cleanup_basemap_worker(self, worker):
-        if worker in self.basemap_workers:
-            self.basemap_workers.remove(worker)
-        worker.deleteLater()
-
-    def stop_basemap_workers(self):
-        self.basemap_request_id += 1
-        for worker in list(self.basemap_workers):
-            if worker.isRunning():
-                worker.requestInterruption()
-
-    def log_basemap_warning_once(self):
-        if not self._basemap_warning_shown:
-            self.log_message("[WARNING] Google Hybrid basemap tiles could not be loaded.")
-            self._basemap_warning_shown = True
-
-    @staticmethod
-    def scene_rect_to_bbox(rect):
-        return (
-            rect.left(),
-            -rect.bottom(),
-            rect.right(),
-            -rect.top(),
-        )
-
-    def clear_layer_controls(self):
-        while self.layer_controls_layout.count() > 1:
-            item = self.layer_controls_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-    def set_layer_visible(self, key, item, visible):
-        self.layer_visibility[key] = visible
-        if item is not None:
-            item.setVisible(visible)
-
-    def zoom_to_map_layers(self, refresh_basemap=True):
-        rect = self.map_scene.itemsBoundingRect()
-        if rect.isValid() and not rect.isNull():
-            margin_x = max(rect.width() * 0.08, 0.01)
-            margin_y = max(rect.height() * 0.08, 0.01)
-            self.map_view.fitInView(rect.adjusted(-margin_x, -margin_y, margin_x, margin_y), Qt.KeepAspectRatio)
-            if refresh_basemap:
-                self.schedule_basemap_refresh()
 
     def _wire_visibility(self):
         def toggle_nwm_api_key(value):
@@ -1753,6 +931,27 @@ class FloodSimulationGUI(QMainWindow):
 
         NencartaConfig(dict(params))
 
+    def preview_configuration(self, write_log=True):
+        try:
+            params = self._get_params()
+            self.preview_text.setPlainText(json.dumps(params, indent=2, default=str))
+            if write_log:
+                self.log_message("[INFO] Configuration preview updated.")
+        except Exception as exc:
+            self.preview_text.setPlainText(f"Could not build configuration: {exc}")
+            if write_log:
+                self.log_message(f"[WARNING] Could not build configuration preview: {exc}")
+
+    def validate_configuration(self):
+        try:
+            params = self._get_params()
+            self._validate_params(params)
+            self.preview_text.setPlainText(json.dumps(params, indent=2, default=str))
+            self.save_settings(params)
+            self.log_message("[INFO] Configuration is valid.")
+        except Exception as exc:
+            self.show_error(f"Parameter error: {exc}")
+
     def start_simulation(self):
         if self.worker_thread and self.worker_thread.isRunning():
             QMessageBox.warning(self, "Running", "A simulation is already running.")
@@ -1761,6 +960,8 @@ class FloodSimulationGUI(QMainWindow):
         self.log_text.clear()
         self.log_text.append("[INFO] Collecting parameters...")
         self.run_button.setEnabled(False)
+        self.validate_button.setEnabled(False)
+        self.preview_button.setEnabled(False)
         self.run_button.setText("Running...")
 
         try:
@@ -1771,6 +972,7 @@ class FloodSimulationGUI(QMainWindow):
                     "[WARNING] Both DEM directory and DEM file are set. "
                     "process_watershed uses the DEM directory first."
                 )
+            self.preview_text.setPlainText(json.dumps(params, indent=2, default=str))
             self.save_settings(params)
         except Exception as e:
             self.show_error(f"Parameter error: {e}")
@@ -1801,8 +1003,9 @@ class FloodSimulationGUI(QMainWindow):
 
     def display_results(self, watershed_name: str):
         self.log_message("[COMPLETED] Simulation finished.")
-        self.load_output_layers()
         self.run_button.setEnabled(True)
+        self.validate_button.setEnabled(True)
+        self.preview_button.setEnabled(True)
         self.run_button.setText("Start Simulation")
 
     def show_error(self, message):
@@ -1824,14 +1027,9 @@ class FloodSimulationGUI(QMainWindow):
         dlg.exec_()
 
         self.run_button.setEnabled(True)
+        self.validate_button.setEnabled(True)
+        self.preview_button.setEnabled(True)
         self.run_button.setText("Start Simulation")
-
-    def closeEvent(self, event):
-        self.stop_basemap_workers()
-        for worker in list(self.basemap_workers):
-            if worker.isRunning():
-                worker.wait(1200)
-        super().closeEvent(event)
 
     def save_settings(self, params=None):
         if params is None:
@@ -1916,16 +1114,6 @@ def apply_theme(app):
             subcontrol-origin: margin;
             left: 12px;
             padding: 0 4px;
-        }
-        QLabel#LayerGroupLabel {
-            color: #111827;
-            font-weight: 700;
-            padding-top: 6px;
-        }
-        QGraphicsView {
-            background: #eef2f7;
-            border: 1px solid #cfd6df;
-            border-radius: 6px;
         }
         QListWidget {
             background: #ffffff;
