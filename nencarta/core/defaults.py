@@ -85,7 +85,6 @@ DEFAULT_CONFIG = {
     "make_wse_maps": True,
     "mapper": Mapper.CURVE2FLOOD_KERNEL_WEIGHTED.value,
     "mannings_text_file": None,
-    "min_match_score": None,
     "move_stream_network_to_thalweg": False,
     "name": None,
     "new_strm_threshold_km2": 25,

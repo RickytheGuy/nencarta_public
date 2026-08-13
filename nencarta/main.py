@@ -230,7 +230,6 @@ def main():
     cli_parser.add_argument("--make_fist_inputs", action="store_true", help="Make FIST inputs after processing")
     cli_parser.add_argument("--move_stream_network_to_thalweg", action="store_true", help="Move stream network to the thalweg of the DEM")
     cli_parser.add_argument("--new_strm_threshold_km2", type=float, default=None, help="The stream threshold for creating a new stream network for the DEM that you will be using. Use in conjunction with move_stream_network_to_thalweg and Curve2Flood-FLDPLNpy")
-    cli_parser.add_argument("--min_match_score", type=float, default=None, help="The score needed to conflate the new DEM based network with the one provided by the as the `flowline` input")
     gui_parser = subparsers.add_parser("gui", help="Summon the GUI application")
 
     args = parser.parse_args()

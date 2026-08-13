@@ -298,7 +298,6 @@ class NencartaConfig:
         self.make_wse_maps: bool = self.get("make_wse_maps")
         self.floodmap_identifier: str = self.get("floodmap_identifier")
         self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2") # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
-        self.min_match_score: float = self.get("min_match_score")
         self.quiet: bool = self.get("quiet")
         self.source_dems: list = self.get("source_dems")
         self.buffer: bool = self.get("buffer")

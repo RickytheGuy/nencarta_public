@@ -203,15 +203,6 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   "Curve2Flood-Multi-Point Interpolation" when performing bathymetry estimation and
   flood inundation mapping. Defaults to FloodSpreader
 
-.. _json-min_match_score:
-
-* ``min_match_score`` (Float, optional): This is the threshold value that is used to
-  determine if a good match is made when using the
-  ``move_stream_network_to_thalweg`` option. NenCarta scores the match between
-  each terrain-derived stream segment and nearby segments from the original stream
-  network using buffered corridor overlap. The best candidate is retained for each
-  new segment and any match with a score below ``min_match_score`` is discarded.
-
 .. _json-move_stream_network_to_thalweg:
 
 * ``move_stream_network_to_thalweg`` (Bool, optional): If True, this option
@@ -775,7 +766,6 @@ Stream network movement options
 
 * :ref:`move_stream_network_to_thalweg <json-move_stream_network_to_thalweg>`
 * :ref:`new_strm_threshold_km2 <json-new_strm_threshold_km2>`
-* :ref:`min_match_score <json-min_match_score>`
 
 When ``move_stream_network_to_thalweg`` is enabled, or when
 ``mapper`` is set to ``Curve2Flood-FLDPLNpy``, NenCarta switches to the stream
@@ -931,7 +921,6 @@ Advanced Parameters
 * ``High Flow Field`` -> ``specified_highflow_field``
 * ``Move Stream Network to Thalweg`` -> ``move_stream_network_to_thalweg``
 * ``Stream Threshold for New Stream Network`` -> ``new_strm_threshold_km2``
-* ``Minimum Match Score`` -> ``min_match_score``
 * ``Slope Low Percentile`` -> ``slope_low_percentile``
 * ``Slope High Percentile`` -> ``slope_high_percentile``
 * ``Stream Order Field`` -> ``StrmOrder_Field``

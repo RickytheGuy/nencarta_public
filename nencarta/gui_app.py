@@ -776,7 +776,6 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "streams_as_parquet", "Write streams as parquet", _default("streams_as_parquet"))
         self._add_checkbox(group, "use_parquet", "Use parquet intermediates", _default("use_parquet"))
         self._add_line(group, "new_strm_threshold_km2", "New stream threshold km2", _default("new_strm_threshold_km2"), parser="float")
-        self._add_line(group, "min_match_score", "Minimum match score", "", parser="float")
         self._add_line(group, "q_baseflow_threshold", "Baseflow threshold", "", parser="float")
         self._add_line(group, "slope_low_percentile", "Slope low percentile", _default("slope_low_percentile"), parser="float")
         self._add_line(group, "slope_high_percentile", "Slope high percentile", _default("slope_high_percentile"), parser="float")
