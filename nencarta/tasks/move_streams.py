@@ -1980,7 +1980,7 @@ def _create_stream_info_table(
 
     stream_info = pd.DataFrame(output_table, 
                  columns=['start_pixel', 'end_pixel', 'length', 'stream_id'])
-    if stream_info.suffix.lower() in {".parquet", ".pq"}:
+    if stream_info_file.suffix.lower() in {".parquet", ".pq"}:
         stream_info.to_parquet(stream_info_file, index=False)
     else:
         stream_info.to_csv(stream_info_file, index=False)

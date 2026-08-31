@@ -44,7 +44,7 @@ class Workspace:
         self.flowacc = self.Flow_Direction_Folder / (self.FileName + '_flowacc.tif')
         self.new_StrmShp = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.shp')
         self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
-        stream_output_ext = "parquet" if configs.streams_as_parquet else "shp"
+        stream_output_ext = "parquet" if configs.streams_as_parquet else "gpkg"
         stream_info_ext = "parquet" if configs.use_parquet else "csv"
         self.new_StrmShp_matched = self.strm_folder / (self.FileName + f'_matched.{stream_output_ext}')
         self.stream_info_file = self.strm_folder / (self.FileName + f'_stream_info.{stream_info_ext}')
