@@ -9,20 +9,7 @@ from nencarta.workspace import Workspace
 
 gdal.UseExceptions()
 
-def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_Raster_Name, Consequences_Output_GPKG_File):
-    """
-    Write a go-consequences config JSON using NSIAPI structures,
-    one 'depth' hazard GeoTIFF, and a GPKG results writer.
-
-    Args:
-        Consequences_GeoJSON_Path (str): Full path (including filename) to write the JSON config on your host.
-        FloodDepthFile (str): Container-visible path to the flood-depth GeoTIFF (e.g., '/data/.../file.tif').
-        Consequences_GeoJSON_File (str): Container-visible output GPKG path (e.g., '/data/.../file.gpkg').
-
-    Returns:
-        None
-    """
-
+def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path, Consequences_Output_GPKG_File):
     config = {
         "structure_provider_info": {
             "structure_provider_type": "NSIAPI"
@@ -31,7 +18,7 @@ def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_
             "hazards": [
                 {
                     "hazard_parameter_type": "depth",
-                    "hazard_provider_file_path": f"/data/FloodMap/{Forecast_Flood_Depth_Raster_Name}"
+                    "hazard_provider_file_path": Container_Hazard_Path
                 }
             ]
         },
@@ -49,6 +36,8 @@ def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_
 def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: Workspace) -> list:
     if not workspace.configs.estimate_consequences:
         return []
+
+    workspace.Consequences_Folder.mkdir(parents=True, exist_ok=True)
     
     tasks = []
     for floodmapper_output in floodmapper_bulk_output.outputs:
@@ -78,14 +67,19 @@ def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, work
             LOG.error(f"Error converting to WGS84: {e}, using original file")
             depth_file_wgs84 = depth_file
         
+        # Resolve container path based on workspace output mount (/data)
+        rel_depth_path = depth_file_wgs84.relative_to(workspace.output_dir).as_posix()
+        Container_Hazard_Path = f"/data/{rel_depth_path}"
+
         Forecast_Flood_Depth_Raster_Name = depth_file_wgs84.name
-        Consequences_JSON_File = Forecast_Flood_Depth_Raster_Name.replace('.tif','_consequences.json') 
+        Consequences_JSON_File = Forecast_Flood_Depth_Raster_Name.replace('.tif', '_consequences.json') 
         Consequences_JSON_Path = workspace.Consequences_Folder / Consequences_JSON_File
-        Consequences_Output_GPKG_File = Consequences_JSON_File.replace('.json','.gpkg')
+        Consequences_Output_GPKG_File = Consequences_JSON_File.replace('.json', '.gpkg')
+
         LOG.info(f"Creating consequences file {Consequences_JSON_Path}")
-        _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Forecast_Flood_Depth_Raster_Name, Consequences_Output_GPKG_File)
+        _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path, Consequences_Output_GPKG_File)
         # run the go-consequences Docker container
-        source_dir = workspace.output_dir / workspace.watershed
+        source_dir = workspace.output_dir
         source_dir = source_dir.resolve().as_posix()
 
         docker_command = [

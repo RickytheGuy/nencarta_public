@@ -69,6 +69,8 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
                     LOG.error(f'Could not process forecast, moving back another day.. ({e})')
             if found:
                 break  # break outer
+            else:
+                LOG.error('We are sorry, the forecast could not be found within the bounds of our current logic.')
 
     LOG.info(f'Forecast data save here: {ForecastFlowFile}')    
     return [ForecastFlowFile]

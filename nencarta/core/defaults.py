@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "slope_low_percentile": 25,
     "source_dems": [],
     "source_flowlines": [],
-    "specified_bathyflow_field": "p_exceed_50",
+    "specified_bathyflow_field": "rp2", # setting this as default so that GEOGLOWS or NWM will run
     "specified_highflow_field": "rp100_premium",
     "specify_depths_for_bathy_mask": [0.1],
     "streamflow_source": str(StreamflowSource.GEOGLOWS),

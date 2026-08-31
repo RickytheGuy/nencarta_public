@@ -60,6 +60,8 @@ def _fldpln_inputs(workspace: Workspace):
         "Filled_DEM_File": workspace.filled_dem,
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
+        "reach_id": workspace.configs.stream_id_field,
+        "downstream_reach_id": workspace.configs.downstream_id_field,
         "max_wse_rise": workspace.configs.fldpln_max_wse_rise,
     }
     if workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"):
@@ -326,6 +328,7 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
                 ending_of_forecast_file = f'Forecast_{configs.forecastdate}_{configs.forecasthour}'
             # rename the forecast of the extent raster based upon the type of NWM forecast we are using
             postfix = f"_{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}{ending_of_forecast_file}"
+            config_path = workspace.ARC_Folder / f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{'yaml' if configs.use_yaml else 'txt'}"
         elif configs.streamflow_source == StreamflowSource.GEOGLOWS:
             # create the end of the file name that describes the forecast
             if configs.forensic_forecast_date != None:

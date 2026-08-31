@@ -29,6 +29,7 @@ dependencies = [
 "numba",
 "numpy",
 "pandas",
+"polars",
 "pipefunc",
 "progress",
 "pyproj",

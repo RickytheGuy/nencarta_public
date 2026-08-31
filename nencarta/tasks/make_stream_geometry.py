@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import geopandas as gpd
+import shapely
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
@@ -42,7 +43,9 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         LOG.info(f"{workspace.DEM_StrmShp} already exists and we aren't making it again...")
         return workspace.DEM_StrmShp
     
-    bbox = Raster(workspace.assigned_dem).epsg_4326_bbox
+    assigned_dem = Raster(workspace.assigned_dem)
+    bbox = assigned_dem.epsg_4326_bbox
+    assigned_dem_crs = assigned_dem.projection
 
     if configs.flowline:
         LOG.info(f"Using provided flowline {configs.flowline} for stream geometry.")
@@ -62,6 +65,12 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         gdf = pd.concat([Vector(path, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=bbox) for path in streamlines], ignore_index=True, copy=False)
 
     gdf = gdf[~gdf.geometry.isna()]
+
+     # make sure the workspace.DEM_StrmShp and workspace.assigned_dem are both using the assigned_dem's coordinate system before saving workspace.DEM_StrmShp
+    if gdf.crs is not None and str(gdf.crs) != str(assigned_dem_crs):
+        gdf = gdf.to_crs(assigned_dem_crs)
+    elif gdf.crs is None:
+        gdf = gdf.set_crs(assigned_dem_crs)
 
     if "LINKNO" not in gdf.columns and "COMID" in gdf.columns:
         gdf["LINKNO"] = gdf["COMID"]
@@ -105,6 +114,10 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
     # Set the downstream id to -1 for any river that has a downstream id that is not in the existing river ids
     gdf.loc[~gdf[configs.downstream_id_field].isin(existing_river_ids), configs.downstream_id_field] = -1
 
+
+    # added this to reduce the 3d geometry of the NHDPlus to a 2D geometry.
+    gdf.geometry = gdf.geometry.force_2d()
+    
     workspace.DEM_StrmShp.parent.mkdir(parents=True, exist_ok=True)
     Vector.save_any_geom(gdf, workspace.DEM_StrmShp, **kwargs)
 

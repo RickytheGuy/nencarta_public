@@ -120,7 +120,7 @@ class Vector(GISDataSource, LMDBCache):
             if data_crs is not None and data_crs != 'EPSG:4326':
                 minx, miny, maxx, maxy = bbox_epsg_4326
                 gdf_bbox = gpd.GeoSeries([box(minx, miny, maxx, maxy)], crs="EPSG:4326").to_crs(data_crs)
-                bbox_epsg_4326 = gdf_bbox.total_bounds
+                bbox_epsg_4326 = tuple(gdf_bbox.total_bounds)
 
         if self.filepath.suffix.lower() in ('.parquet', '.geoparquet'):
             try:

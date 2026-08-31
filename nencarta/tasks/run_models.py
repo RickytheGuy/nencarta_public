@@ -27,6 +27,10 @@ def _run_mapper(config_file: Path, model_config: ModelConfig) -> None:
         Curve2Flood_MainFunction(str(config_file), quiet=model_config.quiet)
 
 def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
+    if model_config.arc_config is None:
+        LOG.info("No ARC config was generated for this workspace; skipping ARC bathymetry.")
+        return model_config
+
     if model_config.vdt_exists and not workspace.configs.overwrite:
         return model_config
     

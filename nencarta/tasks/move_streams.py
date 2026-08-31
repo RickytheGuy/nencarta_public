@@ -146,6 +146,15 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
 
     wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance, callback=whitebox_callback)
     wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance, callback=whitebox_callback)
+    wbt.run_tool(
+        "vector_stream_network_analysis",
+        [
+            f"--streams='{workspace.new_StrmShp}'",
+            f"--output='{workspace.new_StrmShp}'",
+            f"--snap={snap_distance}",
+        ],
+        callback=whitebox_callback,
+    )
 
     # Remove the other vectors that were created
     for file in workspace.new_StrmShp.parent.glob("*"):
@@ -1694,11 +1703,13 @@ def _conflate_streams(
 
     wtbx_gdf[wtbx_ds_col] = wtbx_gdf[wtbx_ds_col].clip(lower=-1)  # Ensure no outlet is -1
     
-    bounds = wtbx_vector.epsg_4326_bbox
+    bounds = wtbx_vector.bbox
 
     # Filter source_gdf to only include streams that intersect the bounds of the wtbx_gdf, shrunk by a small distance
     source_gdf = source_gdf[source_gdf.intersects(box(*bounds))].copy()
     source_gdf = source_gdf.to_crs(dem_proj)
+
+    LOG.info(f"Conflation input: {len(source_gdf)} source reaches, {len(wtbx_gdf)} Whitebox reaches.")
     if strm_order_col not in source_gdf.columns:
         raise ValueError(f"Source GeoDataFrame must have a '{strm_order_col}' column.")
     min_strm_order = source_gdf[strm_order_col].min()
@@ -1716,6 +1727,7 @@ def _conflate_streams(
 
     if lakes_gdf is not None and not lakes_gdf.empty:
         wtbx_gdf = remove_select_lake_streams(wtbx_gdf, lakes_gdf, wtbx_id_col, wtbx_ds_col)
+    LOG.info(f"After topology/lake pruning: {len(wtbx_gdf)} Whitebox reaches remain.")
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message="Geometry is in a geographic CRS")
@@ -1968,7 +1980,10 @@ def _create_stream_info_table(
 
     stream_info = pd.DataFrame(output_table, 
                  columns=['start_pixel', 'end_pixel', 'length', 'stream_id'])
-    stream_info.to_parquet(stream_info_file, index=False)
+    if stream_info.suffix.lower() in {".parquet", ".pq"}:
+        stream_info.to_parquet(stream_info_file, index=False)
+    else:
+        stream_info.to_csv(stream_info_file, index=False)
 
 
 def make_channel_mask(channel_mask: np.ndarray, dem: str, water_mask: str, compression: str):

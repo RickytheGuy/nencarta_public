@@ -174,7 +174,7 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
     if configs.streamflow_source == StreamflowSource.GEOGLOWS:
         final_df = _get_geoglows_rp(river_ids)
     elif configs.streamflow_source.is_nwm():
-        nwm_api_key = nwm_api_key or os.getenv("NWM_API_KEY")
+        nwm_api_key = configs.nwm_api_key or os.getenv("NWM_API_KEY")
         if not nwm_api_key:
             raise ValueError("NWM_API_KEY environment variable must be set for NWM flow retrieval.")
         final_df = _get_nwm_rp(river_ids, nwm_api_key)

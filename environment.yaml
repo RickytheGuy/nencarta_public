@@ -12,10 +12,13 @@ dependencies:
   - geoglows
   - geojson
   - geopandas
+  - libgdal-arrow-parquet
   - netcdf4
   - numba
   - numpy
   - pandas
+  - pipefunc
+  - polars
   - progress
   - pyproj
   - pyqt>=5.15

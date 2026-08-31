@@ -19,10 +19,14 @@ class ModelConfig():
 
     @property
     def vdt_exists(self) -> bool:
+        if self.arc_config is None:
+            return False
         return self.arc_config.exists() and Path(inspect_config(self.arc_config, "Print_VDT_Database")).exists()
     
     @property
     def burned_dem_exists(self) -> bool:
+        if self.arc_config is None:
+            return False
         burned_dem = inspect_config(self.arc_config, "FSOutBATHY")
         return self.arc_config.exists() and burned_dem and Path(burned_dem).exists()
     

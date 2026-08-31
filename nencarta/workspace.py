@@ -44,8 +44,10 @@ class Workspace:
         self.flowacc = self.Flow_Direction_Folder / (self.FileName + '_flowacc.tif')
         self.new_StrmShp = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.shp')
         self.whitebox_stream_raster = self.Flow_Direction_Folder / (self.FileName + '_wtbx_derived.tif')
-        self.new_StrmShp_matched = self.strm_folder / (self.FileName + '_matched.parquet')
-        self.stream_info_file = self.strm_folder / (self.FileName + '_stream_info.parquet')
+        stream_output_ext = "parquet" if configs.streams_as_parquet else "shp"
+        stream_info_ext = "parquet" if configs.use_parquet else "csv"
+        self.new_StrmShp_matched = self.strm_folder / (self.FileName + f'_matched.{stream_output_ext}')
+        self.stream_info_file = self.strm_folder / (self.FileName + f'_stream_info.{stream_info_ext}')
         self.new_stream_raster = self.strm_folder / (self.FileName + '_matched.tif')
         self.lake_raster = self.strm_folder / (self.FileName + '_lakes.tif')
 
@@ -54,7 +56,7 @@ class Workspace:
 
         #Datasets to be Created
         streamflow_source: StreamflowSource = configs.streamflow_source
-        self.DEM_StrmShp = self.strm_folder / f"{streamflow_source}_{self.FileName}_StrmShp.gpkg"
+        self.DEM_StrmShp = self.strm_folder / f"{streamflow_source}_{self.FileName}_StrmShp.{stream_output_ext}"
         self.DEM_Reanalsyis_FlowFile = self.FLOW_Folder / f"{streamflow_source}_{self.FileName}_Reanalysis.csv"
         self.COMID_Q_File = (self.DEM_Reanalsyis_FlowFile.parent / f"{self.FileName}_2yr_flow_initial.csv")
 

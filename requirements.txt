@@ -12,6 +12,7 @@ numba
 numpy
 pandas
 pipefunc
+polars
 progress
 pyproj
 PyQt5>=5.15

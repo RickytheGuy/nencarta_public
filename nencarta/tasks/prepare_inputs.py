@@ -24,10 +24,10 @@ from nencarta.core.enumerations import FloodMapMode
 
 def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     DEM = workspace.assigned_dem
+    configs = workspace.configs
     if not DEM.suffix.lower() in {'.tif', '.vrt', '.img', '.tiff', '.btiff', '.bil', '.dem'}:
         return ModelConfig(None, [], [], configs.mapper, configs.quiet)
 
-    configs = workspace.configs
     assign_and_validate_dem(workspace)
     Create_BaseLine_Manning_n_File_ESA(workspace)
     make_land_cover(workspace)

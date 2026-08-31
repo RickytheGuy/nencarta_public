@@ -6,6 +6,7 @@ Created on Wed Apr 10 16:47:37 2024
 """
 import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, datetime, timezone
 
 import io
@@ -19,6 +20,8 @@ import nencarta.Download_USGS_DEM as Download_USGS_DEM
 from nencarta.logger import LOG
 from nencarta.core.enumerations import StreamflowSource
 from nencarta._constants import GEOGLOWS_FORECAST_PREFIX_URL
+
+NWM_GOOGLE_STORAGE_URL = "https://storage.googleapis.com/national-water-model"
 
 #Hydroviewer=>  https://apps.geoglows.org/apps/geoglows-hydroviewer/      https://beta.apps.geoglows.org/
 #Forecast Data=>  http://geoglows-v2-forecasts.s3-website-us-west-2.amazonaws.com/
@@ -148,6 +151,124 @@ def _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids):
         column_order=["rivid", "min", "max", "median"],
     )
 
+def _nwm_google_forecast_specs(streamflow_source):
+    if streamflow_source == StreamflowSource.NWM_SHORT_RANGE:
+        return [("short_range", "short_range.channel_rt", range(1, 18))]
+
+    if streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE:
+        specs = [("medium_range", "medium_range.channel_rt", range(3, 240, 3))]
+        specs.extend(
+            (f"medium_range_mem{i}", f"medium_range.channel_rt_{i}", range(3, 240, 3))
+            for i in range(1, 6)
+        )
+        return specs
+
+    if streamflow_source == StreamflowSource.NWM_LONG_RANGE:
+        specs = [("long_range", "long_range.channel_rt", range(6, 720, 6))]
+        specs.extend(
+            (f"long_range_mem{i}", f"long_range.channel_rt_{i}", range(6, 720, 6))
+            for i in range(1, 4)
+        )
+        return specs
+
+    raise ValueError(f"streamflow_source {streamflow_source} is not an NWM forecast source.")
+
+def _read_nwm_google_netcdf_streamflow(url, normalized_rivids):
+    response = requests.get(url, timeout=60)
+    if response.status_code == 404:
+        return pd.DataFrame(columns=["rivid", "streamflow"])
+    response.raise_for_status()
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as temp_file:
+            temp_file.write(response.content)
+            temp_path = temp_file.name
+
+        with xr.open_dataset(temp_path) as ds:
+            if "feature_id" not in ds or "streamflow" not in ds:
+                raise ValueError(f"NWM forecast file is missing feature_id or streamflow: {url}")
+
+            available_rivids = pd.Index(ds["feature_id"].values).astype(int).intersection(normalized_rivids)
+            if available_rivids.empty:
+                return pd.DataFrame(columns=["rivid", "streamflow"])
+
+            try:
+                flow_df = (
+                    ds[["streamflow"]]
+                    .sel(feature_id=available_rivids)
+                    .to_dataframe()
+                    .reset_index()
+                )
+            except KeyError:
+                flow_df = ds[["streamflow"]].to_dataframe().reset_index()
+                flow_df = flow_df[flow_df["feature_id"].astype(int).isin(available_rivids)]
+
+        flow_df = flow_df.rename(columns={"feature_id": "rivid"})
+        flow_df["rivid"] = flow_df["rivid"].astype(int)
+        return flow_df[["rivid", "streamflow"]].dropna(subset=["streamflow"])
+    finally:
+        if temp_path is not None:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                LOG.warning("Could not remove temporary NWM forecast file: %s", temp_path)
+
+def _read_nwm_google_storage_forecast(forecastdate, forecasthour, rivids, streamflow_source):
+    if forecasthour in (None, ""):
+        raise ValueError("forecasthour is required for NWM Google Storage forecast fallback.")
+
+    forecast_hour = int(forecasthour)
+    normalized_rivids = _normalize_rivids(rivids)
+    member_df_list = []
+
+    LOG.info(
+        "Attempting NWM public Google Storage forecast fallback for forecastdate=%s forecasthour=%02d",
+        forecastdate,
+        forecast_hour,
+    )
+
+    for forecast_folder, product_name, lead_hours in _nwm_google_forecast_specs(streamflow_source):
+        forecast_frames = []
+        for lead_hour in lead_hours:
+            url = (
+                f"{NWM_GOOGLE_STORAGE_URL}/nwm.{forecastdate}/{forecast_folder}/"
+                f"nwm.t{forecast_hour:02d}z.{product_name}.f{lead_hour:03d}.conus.nc"
+            )
+            flow_df = _read_nwm_google_netcdf_streamflow(url, normalized_rivids)
+            if not flow_df.empty:
+                forecast_frames.append(flow_df)
+
+        if not forecast_frames:
+            LOG.warning(
+                "No NWM Google Storage forecast files were available for folder=%s product=%s",
+                forecast_folder,
+                product_name,
+            )
+            continue
+        if forecast_frames:
+            LOG.info(
+                "NWM Google Storage forecast files were available for folder=%s product=%s",
+                forecast_folder,
+                product_name,
+            )
+
+        member_df = pd.concat(forecast_frames).groupby("rivid", sort=False).max()
+        member_df_list.append(member_df)
+
+    if not member_df_list:
+        raise ValueError(
+            f"No NWM Google Storage forecast streamflow rows were found for {forecastdate} "
+            f"hour {forecast_hour:02d} and {len(normalized_rivids)} rivids."
+        )
+
+    combined_df = pd.concat(member_df_list)
+    return combined_df.groupby("rivid").agg(
+        min=("streamflow", "min"),
+        max=("streamflow", "max"),
+        median=("streamflow", "median")
+    ).reset_index()
+
 def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source: StreamflowSource, nwm_api_key=None):
     try:
         if streamflow_source == StreamflowSource.GEOGLOWS:
@@ -191,37 +312,56 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
             if not nwm_api_key:
                 raise ValueError("nwm_api_key is required for NWM forecast requests.")
 
-            for i in range(0, number_of_ensembles + 1):
+            try:
+                for i in range(0, number_of_ensembles + 1):
 
-                header = {'x-api-key': nwm_api_key}
-                params = {'forecast_type': forecast_type,
-                        'reference_time': forecastdate_formatted,
-                        'comids': ','.join(map(str, rivids)),
-                        'output_format': 'csv',
-                        'ensemble': i  # ensemble member
-                        }
+                    header = {'x-api-key': nwm_api_key}
+                    params = {'forecast_type': forecast_type,
+                            'reference_time': forecastdate_formatted,
+                            'comids': ','.join(map(str, rivids)),
+                            'output_format': 'csv',
+                            'ensemble': i  # ensemble member
+                            }
 
-                response = requests.get(rp_url, params=params, headers=header, timeout=60)
+                    response = requests.get(rp_url, params=params, headers=header, timeout=60)
 
-                if response.status_code == 200:
+
+
+
+
+
+
+                    if response.status_code != 200:
+                        raise requests.exceptions.HTTPError(response.text)
+
+
                     forecast_df = pd.read_csv(io.StringIO(response.text))
-                else:
-                    raise requests.exceptions.HTTPError(response.text)
-                forecast_df = forecast_df.set_index("feature_id")
-                forecast_df.index.name = "rivid"
-                # group by rivid and find the max value for each rivid
-                forecast_df = forecast_df.groupby("rivid").max()
-                # append to the ensemble list
-                nwm_ensemble_df_list.append(forecast_df)
-            
-            # Concatenate all dataframes in the list
-            combined_df = pd.concat(nwm_ensemble_df_list)
+                    forecast_df = forecast_df.set_index("feature_id")
+                    forecast_df.index.name = "rivid"
+                    # group by rivid and find the max value for each rivid
+                    forecast_df = forecast_df.groupby("rivid").max()
+                    # append to the ensemble list
+                    nwm_ensemble_df_list.append(forecast_df)
+                
+                # Concatenate all dataframes in the list
+                combined_df = pd.concat(nwm_ensemble_df_list)
 
-            df_max = combined_df.groupby("rivid").agg(
-                min=("streamflow", "min"),
-                max=("streamflow", "max"),
-                median=("streamflow", "median")
-            ).reset_index()
+                df_max = combined_df.groupby("rivid").agg(
+                    min=("streamflow", "min"),
+                    max=("streamflow", "max"),
+                    median=("streamflow", "median")
+                ).reset_index()
+            except requests.exceptions.HTTPError as nwm_api_exc:
+                LOG.warning(
+                    "NWM API forecast request failed; attempting public Google Storage fallback. Error: %s",
+                    nwm_api_exc,
+                )
+                df_max = _read_nwm_google_storage_forecast(
+                    forecastdate,
+                    forecasthour,
+                    rivids,
+                    streamflow_source,
+                )
         else:
             raise ValueError(f"streamflow_source {streamflow_source} not recognized.")
 
@@ -365,10 +505,10 @@ def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_fo
         lon = row['lon']
         DEM_save_path, DEM_Filename, bad_url_list = Download_USGS_DEM.download_dem(lat, lon, bad_url_list, DEM_save_dir)
         if DEM_save_path is not None:
-            DEMs_with_flooding_forecast.append(DEM_Filename)
+            DEMs_with_flooding_forecast.append(DEM_save_path)
 
     # uniqueify the DEM list
-    DEMs_with_flooding_forecast = list(set(DEMs_with_flooding_forecast))
+    DEMs_with_flooding_forecast = list(dict.fromkeys(DEMs_with_flooding_forecast))
 
     # write the bad urls to a csv file
     if len(bad_url_list) > 0:
