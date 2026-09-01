@@ -145,7 +145,6 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
             return
 
     wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance, callback=whitebox_callback)
-    wbt.vector_stream_network_analysis(str(workspace.new_StrmShp), str(workspace.filled_dem), str(workspace.new_StrmShp), snap=snap_distance, callback=whitebox_callback)
     wbt.run_tool(
         "vector_stream_network_analysis",
         [
