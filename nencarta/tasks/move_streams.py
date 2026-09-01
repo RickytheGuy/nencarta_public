@@ -199,9 +199,14 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         )
         dem_for_conflation_path = workspace.fixed_dem
     elif should_move_streams:
-        dem_for_conflation = assigned_dem.read_array()
+        if configs.burn_streams:
+            dem_for_conflation = Raster(workspace.fixed_dem).read_array()
+            dem_for_conflation_path = workspace.fixed_dem
+        else:
+            dem_for_conflation = assigned_dem.read_array()
+            dem_for_conflation_path = workspace.assigned_dem
+
         channel_mask = Raster(workspace.bathy_water_mask).read_array()
-        dem_for_conflation_path = workspace.assigned_dem
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
 
     if should_move_streams:
@@ -221,6 +226,17 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         )
         if streams_gdf.empty:
             if configs.raise_errors_if_nothing_in_domain:
+                # _conflate_streams(
+                #     source_gdf=source_gdf, 
+                #     streams_vector=workspace.new_StrmShp, 
+                #     lakes_gdf=lakes_gdf,
+                #     buffer_distance=buffer_distance,
+                #     dem_proj=assigned_dem.projection, 
+                #     dem_bbox=assigned_dem.bbox,
+                #     source_id_col=configs.streamflow_source.upstream_id,
+                #     source_ds_col=configs.streamflow_source.downstream_id,
+                #     strm_order_col=configs.StrmOrder_Field,
+                # )
                 raise ValueError("No stream geometries remain after conflation.")
             else:
                 workspace.DEM_StrmShp = workspace.new_StrmShp_matched
