@@ -93,8 +93,7 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
     wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
-    if workspace.configs.parallel:
-        wbt.set_max_procs(1)
+    wbt.set_max_procs(1)
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
@@ -1650,9 +1649,12 @@ def update_wtbx_gdf(
 
     # Map all other columns from the source_gdf to the wtbx_gdf based on the LINKNO
     source_columns = [col for col in source_gdf.columns if col not in [source_id_col, source_ds_col, strm_order_col, 'geometry', 'buffered']]
-    for col in source_columns:
-        source_col_mapping = source_gdf.set_index(source_id_col)[col].to_dict()
-        wtbx_gdf[col] = wtbx_gdf[source_id_col].map(source_col_mapping)
+    mapped_source_columns = {
+        col: wtbx_gdf[source_id_col].map(source_gdf.set_index(source_id_col)[col].to_dict())
+        for col in source_columns
+    }
+
+    wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame(mapped_source_columns, index=wtbx_gdf.index)], axis=1).copy()
 
     # Move linkno to the front
     cols = wtbx_gdf.columns.tolist()
