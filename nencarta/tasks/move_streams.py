@@ -781,6 +781,21 @@ def _burn_linestring(
     if row2 == 0 or row2 == nrows - 1 or col2 == 0 or col2 == ncols - 1:
         dem[row2, col2] -= 0.5
 
+class NodeType(Enum):
+    ISOLATED = 1
+    OUTLET = 2
+    SOURCE = 3
+    MERGED_SOURCE = 4
+    CONFLUENCE = 5
+    INTERIOR = 6
+
+    def is_outlet(self) -> bool:
+        return self == NodeType.OUTLET or self == NodeType.ISOLATED
+    
+    def is_source(self) -> bool:
+        return self == NodeType.SOURCE or self == NodeType.MERGED_SOURCE or self == NodeType.ISOLATED
+
+
 @dataclass
 class ReachSig:
     geom: LineString
@@ -898,20 +913,6 @@ def compute_reach_signatures(G: nx.DiGraph) -> dict[int, ReachSig]:
             local_order=data['STRAHLER'],
         )
     return sig
-
-class NodeType(Enum):
-    ISOLATED = 1
-    OUTLET = 2
-    SOURCE = 3
-    MERGED_SOURCE = 4
-    CONFLUENCE = 5
-    INTERIOR = 6
-
-    def is_outlet(self) -> bool:
-        return self == NodeType.OUTLET or self == NodeType.ISOLATED
-    
-    def is_source(self) -> bool:
-        return self == NodeType.SOURCE or self == NodeType.MERGED_SOURCE or self == NodeType.ISOLATED
 
 def classify_node(G: nx.DiGraph, n: int, local_order: int) -> NodeType:
     indeg = G.in_degree(n)
