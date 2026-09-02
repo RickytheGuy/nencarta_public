@@ -111,6 +111,11 @@ NenCarta uses the following priority to decide which DEMs become workspaces:
 * No DEM source: the run logs a warning and returns without starting the
   pipeline.
 
+If you want ARC bathymetry estimated from drainage-area power laws instead of a
+baseflow field, provide all five optional parameters together:
+``--drainage_area_field``, ``--coefficient_depth``, ``--exponent_depth``,
+``--coefficient_width``, and ``--exponent_width``.
+
 Forecast sources
 ----------------
 

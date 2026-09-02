@@ -29,10 +29,11 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 .. _json-bathy_use_banks:
 
 * ``bathy_use_banks`` (Bool, optional): Setting this to True will allow the system
-  to use estimated bank elevations to estimate bathymetry using the streamflow
-  specified in specified_bathyflow_field. Setting this value to False will allow the
-  system to use the estimated water surface elevation to estimate bathymetry the using
-  the streamflow specified in specified_bathyflow_field. Default False.
+  to use estimated bank elevations to estimate bathymetry using either the
+  streamflow specified in ``specified_bathyflow_field`` or the optional
+  drainage-area power-law depth relationship. Setting this value to False will
+  allow the system to use the estimated water surface elevation to estimate
+  bathymetry using that same bathymetry target. Default False.
 
 .. _json-clean_dem:
 
@@ -499,7 +500,11 @@ work.
   "p_exceed_95", "p_exceed_100", "rp2", "rp5", "rp10", "rp25", "rp50",
   "rp100","p_exceed_0_premium", or "rp100_premium". For "NWM" it must be one of
   "rp2", "rp5", "rp10", "rp25", "rp50", "rp100", or "rp100_premium". Default is
-  "p_exceed_50".
+  "p_exceed_50". If the five drainage-area bathymetry parameters are supplied,
+  NenCarta omits ``Flow_File_BF`` from the ARC input file and uses the
+  drainage-area relationship for ARC bathymetry instead. In that case,
+  ``specified_bathyflow_field`` is only still relevant if you also use
+  ``q_baseflow_threshold`` to filter streams before the ARC run.
 
 .. _json-specify_depths_for_bathy_mask:
 
@@ -651,6 +656,11 @@ These options control bathymetry estimation generation. They are defined in
 
 * :ref:`disable_bathymetry <json-disable_bathymetry>`
 * :ref:`bathy_use_banks <json-bathy_use_banks>`
+* :ref:`drainage_area_field <json-drainage_area_field>`
+* :ref:`coefficient_depth <json-coefficient_depth>`
+* :ref:`exponent_depth <json-exponent_depth>`
+* :ref:`coefficient_width <json-coefficient_width>`
+* :ref:`exponent_width <json-exponent_width>`
 * :ref:`use_specified_depth_for_bathy_mask <json-use_specified_depth_for_bathy_mask>`
 * :ref:`specify_depths_for_bathy_mask <json-specify_depths_for_bathy_mask>`
 * :ref:`find_banks_based_on_landcover <json-find_banks_based_on_landcover>`
