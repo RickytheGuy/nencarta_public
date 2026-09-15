@@ -24,6 +24,7 @@ from shapely.geometry import box, Point, LineString, Polygon, MultiLineString, G
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
+from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
 
@@ -225,21 +226,13 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         )
         if streams_gdf.empty:
             if configs.raise_errors_if_nothing_in_domain:
-                # _conflate_streams(
-                #     source_gdf=source_gdf, 
-                #     streams_vector=workspace.new_StrmShp, 
-                #     lakes_gdf=lakes_gdf,
-                #     buffer_distance=buffer_distance,
-                #     dem_proj=assigned_dem.projection, 
-                #     dem_bbox=assigned_dem.bbox,
-                #     source_id_col=configs.streamflow_source.upstream_id,
-                #     source_ds_col=configs.streamflow_source.downstream_id,
-                #     strm_order_col=configs.StrmOrder_Field,
-                # )
                 raise ValueError("No stream geometries remain after conflation.")
             else:
                 workspace.DEM_StrmShp = workspace.new_StrmShp_matched
                 return None
+
+        if configs.StrmOrder_Field and (configs.StrmOrder_Lower is not None or configs.StrmOrder_Upper is not None) and not configs.mapper.is_curve2flood_fldpln_mapper():
+            streams_gdf = _filter_streams_by_stream_order(streams_gdf, configs.StrmOrder_Field, configs.StrmOrder_Lower, configs.StrmOrder_Upper)
 
         kwargs = {'index': False}
         if workspace.DEM_StrmShp.suffix.lower().endswith('.parquet'):
