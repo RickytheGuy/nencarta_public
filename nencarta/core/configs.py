@@ -320,6 +320,7 @@ class NencartaConfig:
         self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")
         self.fldpln_parallel: bool = self.get("fldpln_parallel")
         self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise")
+        self.fldpln_solver: str = self.get("fldpln_solver")
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
         self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry")

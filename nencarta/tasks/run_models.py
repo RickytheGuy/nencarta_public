@@ -120,7 +120,6 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     from curve2flood import build_fldpln_library
 
     build_fldpln_library(
-        dem = dem,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,
@@ -132,7 +131,8 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         vdt_file = workspace.VDT_File_Bathy,
         parallel = workspace.configs.fldpln_parallel,
         pbar = not workspace.configs.quiet,
-        bg_mask=bg_mask
+        bg_mask=bg_mask,
+        solver=workspace.configs.fldpln_solver
     )
 
     return model_config
