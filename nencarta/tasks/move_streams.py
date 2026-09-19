@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from itertools import combinations
 from collections import defaultdict
-from functools import partial, cache
+from functools import partial
 
 import tqdm
 import numpy as np
@@ -28,16 +28,39 @@ from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
 
-@cache
-def get_lake_ds(path: Path) -> gdal.Dataset:
-    ds = ogr.Open(str(path))
-    if ds is None:
-        raise FileNotFoundError(f"Lake shapefile not found at {path}. Please ensure it is included in the nencarta package.")
-    return ds
+def _in_memory_ogr_layer(gdf: gpd.GeoDataFrame, projection: str) -> tuple[ogr.DataSource, ogr.Layer]:
+    """
+    Copy ``gdf``'s geometries into an in-memory OGR layer so GDAL can rasterize them.
+
+    The caller must keep the returned DataSource alive: OGR owns the layer, and letting the
+    DataSource fall out of scope invalidates the layer while it is still in use.
+    """
+    # 'Memory' is the pre-GDAL-3.11 spelling and now warns on every call; 'MEM' is the
+    # current name. Fall back so this still works on older GDAL builds.
+    driver = ogr.GetDriverByName('MEM') or ogr.GetDriverByName('Memory')
+    ogr_ds: ogr.DataSource = driver.CreateDataSource('lakes')
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(projection)
+    layer: ogr.Layer = ogr_ds.CreateLayer('lakes', srs, ogr.wkbUnknown)
+    layer_defn = layer.GetLayerDefn()
+    for geometry in gdf.geometry.values:
+        if geometry is None or geometry.is_empty:
+            continue
+        feature = ogr.Feature(layer_defn)
+        feature.SetGeometry(ogr.CreateGeometryFromWkb(geometry.wkb))
+        layer.CreateFeature(feature)
+        feature = None
+    return ogr_ds, layer
 
 def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
     """
     We load the lakes in the DEM's domain. We do not want to include lakes/reservoirs.
+
+    The lakes are read through :class:`Vector` rather than ``ogr.Open`` so that every vector
+    format nencarta accepts elsewhere works here too. ``ogr.Open`` cannot read a GeoParquet
+    lakes file unless GDAL was built with the Parquet/Arrow driver; without it GDAL falls
+    through to the ADBC driver and dies on a missing ``duckdb.dll``, which took out the whole
+    burn/move step for the default (GeoParquet) lakes layer.
     """
     if not workspace.configs.lakes:
         return None
@@ -49,23 +72,19 @@ def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | No
     lakes_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(str(workspace.lake_raster), dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte, options=[f'COMPRESS={workspace.configs.compression}'])
     lakes_ds.SetGeoTransform(dem_raster.geotransform)
     lakes_ds.SetProjection(dem_raster.projection)
-    ds: gdal.Dataset = get_lake_ds(workspace.configs.lakes)
-    lakes_layer: ogr.Layer = ds.GetLayer()
-    bbox = dem_raster.bbox
-    # If the lake shapefile is in a different projection than the DEM, we need to transform the bbox to the lake shapefile's projection
-    lake_srs: osr.SpatialReference = lakes_layer.GetSpatialRef()
-    if lake_srs is not None and lake_srs.ExportToWkt() != dem_raster.projection:
-        source_srs: osr.SpatialReference = osr.SpatialReference(dem_raster.projection)
-        transform = osr.CoordinateTransformation(source_srs, lake_srs)
-        min_x, min_y, _ = transform.TransformPoint(bbox[0], bbox[1])
-        max_x, max_y, _ = transform.TransformPoint(bbox[2], bbox[3])
-        bbox = (min_x, min_y, max_x, max_y)
 
-    lakes_layer.SetSpatialFilterRect(*bbox)
+    # Vector.to_geopandas() does the bbox reprojection itself, so the subset comes back
+    # already clipped to the DEM's footprint.
+    lakes_gdf = load_lake_gdf(workspace, dem_raster)
+    if lakes_gdf is not None and not lakes_gdf.empty:
+        lakes_gdf = lakes_gdf.to_crs(dem_raster.projection)
+        ogr_ds, lakes_layer = _in_memory_ogr_layer(lakes_gdf, dem_raster.projection)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
+
+        ogr_ds = None
 
     lakes_ds.FlushCache()
     lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
@@ -190,7 +209,6 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         lakes = load_lake_array(workspace, assigned_dem)
 
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
-        source_gdf['geometry'] = source_gdf.geometry.line_merge()
         channel_mask, dem_for_conflation = smooth_and_burn_dem(
             workspace, 
             source_gdf, 
@@ -209,7 +227,6 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
 
         channel_mask = Raster(workspace.bathy_water_mask).read_array()
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
-        source_gdf['geometry'] = source_gdf.geometry.line_merge()
 
     if should_move_streams:
         lakes_gdf = load_lake_gdf(workspace, assigned_dem)
@@ -225,6 +242,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             source_id_col=configs.streamflow_source.upstream_id,
             source_ds_col=configs.streamflow_source.downstream_id,
             strm_order_col=configs.StrmOrder_Field,
+            drop_multilinestrings=configs.drop_multilinestrings
         )
         if streams_gdf.empty:
             if configs.raise_errors_if_nothing_in_domain:
@@ -583,8 +601,6 @@ def burn_linestring(
         labels: np.ndarray,
         local_min: np.ndarray,
         nodata_value: float):
-    if linkno == 710239626:
-        pass
     if linkno not in G:
         return  # Skip if the linkno is not in the graph
     
@@ -661,7 +677,7 @@ def burn_linestring(
 
     _burn_linestring(dem, streams, coords, linkno, channel_mask, labels, local_min, inverse_transform, row1, col1, last_elevation, nodata_value)
 
-# @njit(cache=True, nogil=True, parallel=True)
+@njit(cache=True, nogil=True, parallel=True)
 def _burn_linestring(
     dem: np.ndarray, 
     streams: np.ndarray, 
@@ -703,6 +719,14 @@ def _burn_linestring(
     write = True
     will_come_back = True
     has_written = False
+
+    # The trailing edge-of-DEM check below reads state from the last iteration of the loop.
+    # A single-pixel reach never enters that loop, so these have to exist beforehand -- and
+    # numba needs them bound on every path to compile the function at all. `has_written`
+    # gates both uses, so the seed values are never the ones acted on.
+    row2 = row1
+    col2 = col1
+    outstream_neighbor_count = 0
 
     for i, (row1, col1, row2, col2) in enumerate(zip(rows[:-1], cols[:-1], rows[1:], cols[1:])):
         if started_in_mask and write and not channel_mask[row2, col2]:
@@ -761,14 +785,14 @@ def _burn_linestring(
         instream_neighbors = []
         outstream_neighbors = []
         for r, c in zip(rs, cs):
-            if r == 3960 and c == 2280:
-                pass
             if (r == row1 and c == col1) or dem[r, c] == nodata_value:
                 continue
             if streams[r, c] > 0:
                 instream_neighbors.append((r, c))
             else:
                 outstream_neighbors.append((r, c))
+
+        outstream_neighbor_count = len(outstream_neighbors)
 
         if instream_neighbors and outstream_neighbors:
             for r, c in outstream_neighbors:
@@ -778,7 +802,7 @@ def _burn_linestring(
     if has_written and (row2 == 0 or row2 == nrows - 1 or col2 == 0 or col2 == ncols - 1) and dem[row2, col2] != nodata_value:
         dem[row2, col2] -= 0.5
     # Same check, but for if we are on the edge of nodata
-    elif has_written and len(outstream_neighbors) == 0 and dem[row2, col2] != nodata_value:
+    elif has_written and outstream_neighbor_count == 0 and dem[row2, col2] != nodata_value:
         dem[row2, col2] -= 0.5
 
 class NodeType(Enum):
@@ -1288,6 +1312,14 @@ def find_outlets_of_headwaters(
     if not headwater_fids:
         return headwater_fids, best_outlet_linkno_to_fid, headwater_fid_to_linkno
 
+    # Which weakly-connected component of the source network each reach belongs to. Two source
+    # reaches in different components can never drain to a common downstream reach, so this is
+    # what makes the convergence test below answerable.
+    component_of_linkno = {}
+    for component_index, component in enumerate(nx.weakly_connected_components(GA)):
+        for linkno in component:
+            component_of_linkno[linkno] = component_index
+
     headwater_fids_to_remove = set()
     
     # For each headwater, find the corresponding outlet
@@ -1318,7 +1350,29 @@ def find_outlets_of_headwaters(
         
         # Find the most common downstream linkno for these headwaters in GA
         headwater_linknos = [headwater_fid_to_linkno[f] for f in outlet_headwaters]
-        current_linkno_outlet = headwater_linknos[0]
+
+        # The Whitebox network comes off the filled DEM, so it drains the whole domain as one
+        # connected system. The clipped source network does not -- reaches whose downstream
+        # neighbour lies outside the AOI were cut loose, leaving several components. Every
+        # headwater sharing this Whitebox outlet therefore lands in the list above, including
+        # ones the source network can never route to the same reach. Those are guaranteed
+        # misses: keeping them only drags the convergence ratio down, and once it falls under
+        # the threshold this outlet is abandoned and every reach on the path to it is dropped
+        # from the conflated network. At South Platte that is what removed the entire order-6
+        # mainstem -- 12 of 12 reachable headwaters converged on the true outlet, but 4
+        # headwaters from other components made it read as 12/16.
+        home_component = component_of_linkno.get(headwater_linkno)
+        headwater_linknos = [
+            linkno for linkno in headwater_linknos
+            if component_of_linkno.get(linkno) == home_component
+        ]
+        if not headwater_linknos:
+            headwater_linknos = [headwater_linkno]
+
+        # Walk down from this headwater rather than an arbitrary member of a set, so the path
+        # taken does not depend on set iteration order. Any headwater in the component reaches
+        # the same confluence, so this only fixes which one we start from.
+        current_linkno_outlet = headwater_linkno
         found = False
         while True:
             try:
@@ -1603,7 +1657,8 @@ def update_wtbx_gdf(
     GB: nx.DiGraph,
     source_gdf: gpd.GeoDataFrame,
     strm_order_col: str,
-    dem_proj: str
+    dem_proj: str,
+    drop_multilinestrings: bool
 
 ):
      # Finally assign to the gdf
@@ -1658,8 +1713,10 @@ def update_wtbx_gdf(
     wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame(mapped_source_columns, index=wtbx_gdf.index)], axis=1).copy()
 
     # If there is a wtbx stream that has a linkno, where that linkno is in the source gdf and is a multilinstring in the source, we will remove them
-    source_multilines = set(source_gdf[source_gdf.geometry.geom_type == 'MultiLineString'][source_id_col])
-    wtbx_gdf = wtbx_gdf[~wtbx_gdf[source_id_col].isin(source_multilines)].copy()
+    
+    if drop_multilinestrings:
+        source_multilines = set(source_gdf[source_gdf.geometry.geom_type == 'MultiLineString'][source_id_col])
+        wtbx_gdf = wtbx_gdf[~wtbx_gdf[source_id_col].isin(source_multilines)].copy()
 
     # Move linkno to the front
     cols = wtbx_gdf.columns.tolist()
@@ -1714,6 +1771,7 @@ def _conflate_streams(
     wtbx_id_col: str = "FID",
     wtbx_ds_col: str = "DS_LINK_ID",
     strm_order_col: str = "strmOrder",
+    drop_multilinestrings: bool = False
 ) -> gpd.GeoDataFrame:
     """
     Read files, build graphs, match the stream networks, and return the mapping state.
@@ -1858,7 +1916,8 @@ def _conflate_streams(
         GB,
         source_gdf,
         strm_order_col,
-        dem_proj
+        dem_proj,
+        drop_multilinestrings
     )
 
     return wtbx_gdf

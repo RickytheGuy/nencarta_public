@@ -1,5 +1,6 @@
 # build-in imports
 import json
+import sys
 import argparse
 from pathlib import Path
 
@@ -68,6 +69,24 @@ def process_many_watersheds(input_dicts: list[dict]):
         return
     run_pipeline(workspaces)
 
+def _print_unencodable(obj) -> None:
+    """
+    Print a snapshot that may contain characters the console cannot encode.
+
+    The error snapshot carries emoji, and on a cp1252 Windows console ``print`` raises
+    UnicodeEncodeError on them. That happens inside ``run_pipeline``'s ``finally`` block,
+    where the new exception replaces the real pipeline failure -- so the one thing the user
+    needed to see is exactly what gets lost. Fall back to the console's own encoding with
+    ``errors="replace"`` instead.
+    """
+    text = str(obj)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
 def run_pipeline(workspaces: list[Workspace], executor=None):
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
@@ -104,8 +123,8 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
         if should_shutdown_executor:
             executor.shutdown()
         if pipeline.error_snapshot:
-            print(pipeline.error_snapshot.traceback)
-            print(pipeline.error_snapshot)
+            _print_unencodable(pipeline.error_snapshot.traceback)
+            _print_unencodable(pipeline.error_snapshot)
 
     LOG.info(f"Finished processing")
     return

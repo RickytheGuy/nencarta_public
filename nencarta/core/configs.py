@@ -334,6 +334,7 @@ class NencartaConfig:
         self.exponent_depth = self.get("exponent_depth")
         self.exponent_width = self.get("exponent_width")
         self.use_dem_derived_channel_mask: bool = self.get("use_dem_derived_channel_mask")
+        self.drop_multilinestrings: bool = self.get("drop_multilinestrings", False)
 
         if self.parallel and self.fldpln_parallel:
             LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
