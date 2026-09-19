@@ -109,6 +109,62 @@ def whitebox_callback(message: str) -> None:
     if "error" in lowered or "panic" in lowered:
         LOG.error(message) 
 
+class _WhiteboxOutput:
+    """Collects WhiteboxTools messages so a failure can report what the tool actually said."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def __call__(self, message: str) -> None:
+        self.lines.append(message)
+        whitebox_callback(message)
+
+
+def _run_whitebox(tool, expected: Path, description: str, *args, **kwargs) -> int:
+    """
+    Run one WhiteboxTools tool and fail loudly if it did not produce ``expected``.
+
+    The WhiteboxTools Python wrapper reads the tool's stdout until EOF and then returns 0
+    unconditionally -- it never waits on the child or looks at its exit status. With verbose
+    mode off the tool prints nothing at all, so a crash is indistinguishable from success and
+    the only symptom is a missing output file. whitebox_tools.exe does crash: under a process
+    pool it panics (exit code 101) on a minority of runs, and without the child's real exit
+    status there is nothing to tell that apart from a bad input.
+    """
+    import whitebox.whitebox_tools as whitebox_module
+
+    output = _WhiteboxOutput()
+    launched = []
+    original_popen = whitebox_module.Popen
+
+    def recording_popen(*popen_args, **popen_kwargs):
+        process = original_popen(*popen_args, **popen_kwargs)
+        launched.append(process)
+        return process
+
+    whitebox_module.Popen = recording_popen
+    try:
+        code = tool(*args, callback=output, **kwargs)
+    finally:
+        whitebox_module.Popen = original_popen
+
+    if expected.exists():
+        return code
+
+    exit_codes = []
+    for process in launched:
+        try:
+            exit_codes.append(process.wait(timeout=30))
+        except Exception as exc:
+            exit_codes.append(f"<{type(exc).__name__}>")
+    reported = "\n".join(output.lines[-15:]) or "<the tool printed nothing>"
+    panicked = " (101 is a Rust panic)" if 101 in exit_codes else ""
+    raise FileNotFoundError(
+        f"{description} was not created successfully: {expected}. "
+        f"whitebox_tools exited with {exit_codes}{panicked}. Output:\n{reported}"
+    )
+
+
 def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float:
     wbt = WhiteboxTools()
     wbt.set_compress_rasters(True)
@@ -117,15 +173,17 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
-    wbt.fill_depressions(str(dem_for_conflation_path), str(workspace.filled_dem), callback=whitebox_callback)
-    if not workspace.filled_dem.exists():
-        raise FileNotFoundError(f"Filled DEM file {workspace.filled_dem} was not created successfully using {dem_for_conflation_path}.")
-    wbt.d8_pointer(str(workspace.filled_dem), str(workspace.flowdir), callback=whitebox_callback)
-    if not workspace.flowdir.exists():
-        raise FileNotFoundError(f"Flow direction file {workspace.flowdir} was not created successfully.")
-    wbt.d8_flow_accumulation(str(workspace.flowdir), str(workspace.flowacc), pntr=True, out_type='catchment area', callback=whitebox_callback)
-    if not workspace.flowacc.exists():
-        raise FileNotFoundError(f"Flow accumulation file {workspace.flowacc} was not created successfully.")
+    attempts = 1
+    while not workspace.filled_dem.exists() and attempts <= 1:
+        _run_whitebox(wbt.fill_depressions, workspace.filled_dem,
+                    f"Filled DEM from {dem_for_conflation_path}",
+                    str(dem_for_conflation_path), str(workspace.filled_dem))
+        attempts += 1
+    _run_whitebox(wbt.d8_pointer, workspace.flowdir, "Flow direction file",
+                  str(workspace.filled_dem), str(workspace.flowdir))
+    _run_whitebox(wbt.d8_flow_accumulation, workspace.flowacc, "Flow accumulation file",
+                  str(workspace.flowdir), str(workspace.flowacc), pntr=True,
+                  out_type='catchment area')
 
     # If DEM units are not in km2, convert the threshold to the DEM units. This is important for the stream extraction step, which uses the flow accumulation raster to determine where streams are.
     threshold = workspace.configs.new_strm_threshold_km2
@@ -138,9 +196,11 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
         if file.stem.startswith(workspace.new_StrmShp.stem):
             file.unlink()
 
-    wbt.extract_streams(str(workspace.flowacc), str(workspace.whitebox_stream_raster), threshold=threshold_native, zero_background=True, callback=whitebox_callback)
-    if not workspace.whitebox_stream_raster.exists():
-        raise FileNotFoundError(f"Whitebox stream raster file {workspace.whitebox_stream_raster} was not created successfully. The threshold used was {threshold_native} in DEM units, which is equivalent to {threshold} km2.")
+    _run_whitebox(wbt.extract_streams, workspace.whitebox_stream_raster,
+                  f"Whitebox stream raster (threshold {threshold_native} DEM units "
+                  f"= {threshold} km2)",
+                  str(workspace.flowacc), str(workspace.whitebox_stream_raster),
+                  threshold=threshold_native, zero_background=True)
 
     # Remove flow accumulation for space
     workspace.flowacc.unlink()
