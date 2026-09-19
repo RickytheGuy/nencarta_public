@@ -190,6 +190,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         lakes = load_lake_array(workspace, assigned_dem)
 
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
+        source_gdf['geometry'] = source_gdf.geometry.line_merge()
         channel_mask, dem_for_conflation = smooth_and_burn_dem(
             workspace, 
             source_gdf, 
@@ -208,6 +209,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
 
         channel_mask = Raster(workspace.bathy_water_mask).read_array()
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
+        source_gdf['geometry'] = source_gdf.geometry.line_merge()
 
     if should_move_streams:
         lakes_gdf = load_lake_gdf(workspace, assigned_dem)
@@ -581,6 +583,8 @@ def burn_linestring(
         labels: np.ndarray,
         local_min: np.ndarray,
         nodata_value: float):
+    if linkno == 710239626:
+        pass
     if linkno not in G:
         return  # Skip if the linkno is not in the graph
     
@@ -657,7 +661,7 @@ def burn_linestring(
 
     _burn_linestring(dem, streams, coords, linkno, channel_mask, labels, local_min, inverse_transform, row1, col1, last_elevation, nodata_value)
 
-@njit(cache=True, nogil=True, parallel=True)
+# @njit(cache=True, nogil=True, parallel=True)
 def _burn_linestring(
     dem: np.ndarray, 
     streams: np.ndarray, 
@@ -698,6 +702,7 @@ def _burn_linestring(
     started_in_mask = channel_mask[row1, col1]
     write = True
     will_come_back = True
+    has_written = False
 
     for i, (row1, col1, row2, col2) in enumerate(zip(rows[:-1], cols[:-1], rows[1:], cols[1:])):
         if started_in_mask and write and not channel_mask[row2, col2]:
@@ -718,6 +723,8 @@ def _burn_linestring(
 
         if not write:
             continue
+
+        has_written = True
 
         upstream_elev = dem[row1, col1]
         downstream_elev = dem[row2, col2]
@@ -754,7 +761,9 @@ def _burn_linestring(
         instream_neighbors = []
         outstream_neighbors = []
         for r, c in zip(rs, cs):
-            if r == row1 and c == col1:
+            if r == 3960 and c == 2280:
+                pass
+            if (r == row1 and c == col1) or dem[r, c] == nodata_value:
                 continue
             if streams[r, c] > 0:
                 instream_neighbors.append((r, c))
@@ -766,7 +775,10 @@ def _burn_linestring(
                 dem[r, c] = upstream_elev + 0.5
 
     # One more thing: check if the last (row2, col2) is on the border of the dem. If so, drop by 0.5 (helps filled dem step route out of the DEM)
-    if row2 == 0 or row2 == nrows - 1 or col2 == 0 or col2 == ncols - 1:
+    if has_written and (row2 == 0 or row2 == nrows - 1 or col2 == 0 or col2 == ncols - 1) and dem[row2, col2] != nodata_value:
+        dem[row2, col2] -= 0.5
+    # Same check, but for if we are on the edge of nodata
+    elif has_written and len(outstream_neighbors) == 0 and dem[row2, col2] != nodata_value:
         dem[row2, col2] -= 0.5
 
 class NodeType(Enum):
@@ -1644,6 +1656,10 @@ def update_wtbx_gdf(
     }
 
     wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame(mapped_source_columns, index=wtbx_gdf.index)], axis=1).copy()
+
+    # If there is a wtbx stream that has a linkno, where that linkno is in the source gdf and is a multilinstring in the source, we will remove them
+    source_multilines = set(source_gdf[source_gdf.geometry.geom_type == 'MultiLineString'][source_id_col])
+    wtbx_gdf = wtbx_gdf[~wtbx_gdf[source_id_col].isin(source_multilines)].copy()
 
     # Move linkno to the front
     cols = wtbx_gdf.columns.tolist()
