@@ -87,7 +87,35 @@ def _print_unencodable(obj) -> None:
         print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
+def _make_console_lenient() -> None:
+    """
+    Stop a character the console cannot encode from killing the run.
+
+    The rich progress display asked for below prints emoji, and a Windows console defaults to
+    cp1252, which has no mapping for them. rich then raises UnicodeEncodeError from inside its
+    own renderer -- at the *end* of a successful run, when it reports completion -- so a
+    pipeline that did all of its work still exits on a traceback about a codepage. Switching
+    the stream to errors="replace" leaves its encoding alone and substitutes only the
+    characters it cannot represent.
+    """
+    # Only these actually substitute an unencodable character on the way out. "surrogateescape"
+    # is the Windows default and looks lenient, but it only round-trips lone surrogates -- an
+    # emoji still raises through it.
+    substituting = {"replace", "ignore", "xmlcharrefreplace", "backslashreplace", "namereplace"}
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        if (getattr(stream, "errors", None) or "") in substituting:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def run_pipeline(workspaces: list[Workspace], executor=None):
+    _make_console_lenient()
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
     num_workers = workspaces[0].configs.num_workers

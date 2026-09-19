@@ -1773,9 +1773,19 @@ def update_wtbx_gdf(
     wtbx_gdf = pd.concat([wtbx_gdf, pd.DataFrame(mapped_source_columns, index=wtbx_gdf.index)], axis=1).copy()
 
     # If there is a wtbx stream that has a linkno, where that linkno is in the source gdf and is a multilinstring in the source, we will remove them
-    
+
     if drop_multilinestrings:
-        source_multilines = set(source_gdf[source_gdf.geometry.geom_type == 'MultiLineString'][source_id_col])
+        # Whether a reach is genuinely in disconnected pieces has to be decided after a
+        # line_merge, not read off the stored geometry type. make_stream_geometry() does merge
+        # before writing, but DEM_StrmShp is a GeoPackage unless streams_as_parquet is set, and
+        # a GeoPackage layer promotes every LineString back to MultiLineString on the way in --
+        # so the stored type says "MultiLineString" for every reach and carries no information.
+        # Taken at face value this test drops the entire network: on the N14W89 domain it threw
+        # away all 665 reaches and conflation returned nothing, when only 165 are really split.
+        merged_source = source_gdf.geometry.line_merge()
+        source_multilines = set(
+            source_gdf.loc[merged_source.geom_type == 'MultiLineString', source_id_col]
+        )
         wtbx_gdf = wtbx_gdf[~wtbx_gdf[source_id_col].isin(source_multilines)].copy()
 
     # Move linkno to the front
