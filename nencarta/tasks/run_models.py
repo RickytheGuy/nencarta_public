@@ -120,7 +120,6 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     from curve2flood import build_fldpln_library
 
     build_fldpln_library(
-        dem = dem,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,
