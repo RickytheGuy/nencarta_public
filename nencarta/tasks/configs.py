@@ -43,6 +43,20 @@ def _arc_inputs(dem: Path,
         "Gen_Dir_Dist",
         "Gen_Slope_Dist",
         "Stream_Slope_Method",
+        # ARC reads its configuration from a file, so a key absent from this whitelist cannot
+        # reach it at all and silently falls back to the ARC default. These four control the
+        # depth-varying Manning's n and the conveyance scale:
+        #   n(h) = n0 * [deep_factor + (shallow_factor - deep_factor) / (1 + k_decay * h)]
+        #   Q    = conveyance * sqrt(slope) * slope_adjustment_factor
+        # ARC defaults them to shallow_factor 2.0, deep_factor 1.0, k_decay 6.0 and
+        # slope_adjustment_factor 1.0, so Manning's n is doubled at zero depth whether or not
+        # the caller asked for it. The depth-roughness pair is the only lever in the pipeline
+        # that changes the *shape* of the rating curve rather than its level, and it cannot be
+        # tuned while it is dropped here.
+        "shallow_factor",
+        "deep_factor",
+        "k_decay",
+        "slope_adjustment_factor",
     ]
 
     params.update({
