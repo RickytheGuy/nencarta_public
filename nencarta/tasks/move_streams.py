@@ -24,6 +24,7 @@ from shapely.geometry import box, Point, LineString, Polygon, MultiLineString, G
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
+from nencarta.tasks import configs
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
@@ -154,7 +155,7 @@ def _run_whitebox(tool, expected: Path, description: str, *args, **kwargs) -> in
     exit_codes = []
     for process in launched:
         try:
-            exit_codes.append(process.wait(timeout=30))
+            exit_codes.append(process.wait(timeout=60))
         except Exception as exc:
             exit_codes.append(f"<{type(exc).__name__}>")
     reported = "\n".join(output.lines[-15:]) or "<the tool printed nothing>"
@@ -173,12 +174,11 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
     workspace.Flow_Direction_Folder.mkdir(parents=True, exist_ok=True)
 
-    attempts = 1
-    while not workspace.filled_dem.exists() and attempts <= 1:
-        _run_whitebox(wbt.fill_depressions, workspace.filled_dem,
-                    f"Filled DEM from {dem_for_conflation_path}",
-                    str(dem_for_conflation_path), str(workspace.filled_dem))
-        attempts += 1
+    # Though fill_depressions is more efficient thanfill_depressions_wang_and_liu,
+    # fill_depressions_wang_and_liu is more stable and crashes less
+    _run_whitebox(wbt.fill_depressions_wang_and_liu, workspace.filled_dem,
+                f"Filled DEM from {dem_for_conflation_path}",
+                str(dem_for_conflation_path), str(workspace.filled_dem))
     _run_whitebox(wbt.d8_pointer, workspace.flowdir, "Flow direction file",
                   str(workspace.filled_dem), str(workspace.flowdir))
     _run_whitebox(wbt.d8_flow_accumulation, workspace.flowacc, "Flow accumulation file",
@@ -315,12 +315,15 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             streams_gdf = _filter_streams_by_stream_order(streams_gdf, configs.StrmOrder_Field, configs.StrmOrder_Lower, configs.StrmOrder_Upper)
 
         kwargs = {'index': False}
-        if workspace.DEM_StrmShp.suffix.lower().endswith('.parquet'):
+        if workspace.new_StrmShp_matched.suffix.lower().endswith('.parquet'):
             kwargs['compression'] = 'brotli'
             kwargs['write_covering_bbox'] = True
             kwargs['geometry_encoding'] = 'geoarrow'
 
         Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched, **kwargs)
+        if configs.minimize_output_files:
+            workspace.DEM_StrmShp.unlink()
+            workspace.new_StrmShp.unlink()
         _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.streamflow_source.upstream_id)
 
         final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
@@ -373,7 +376,7 @@ def smooth_and_burn_dem(
     dem = smooth_burned_dem(dem, channel_mask, streams, pbar=False)
 
     dem[dem < -1000] = nodata_value # Remove any DEM values that are less than -1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
-    output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32)
+    output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32, options=[f'COMPRESS={workspace.configs.compression}'])
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     output_ds.SetProjection(dem_ds.GetProjection())

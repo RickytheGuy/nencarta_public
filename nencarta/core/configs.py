@@ -216,7 +216,10 @@ class NencartaConfig:
         self.warn_if_multiple_primary_dems()
 
         self.streamflow_source: StreamflowSource = StreamflowSource.from_string(self.get("streamflow_source"))
-        self.stream_id_field, self.downstream_id_field = get_streamids_from_source(self.streamflow_source)
+        self.stream_id_field = self.get("stream_id_field")
+        self.downstream_id_field = self.get("downstream_id_field")
+        if not self.stream_id_field or not self.downstream_id_field:
+            self.stream_id_field, self.downstream_id_field = get_streamids_from_source(self.streamflow_source)
         self.forensic_forecast_date: str | None = self.validate_forecast_date()
         self.forensic_forecast_hour: int = self.validate_forecast_hour()
         self.validate_forecast_hours()
@@ -248,8 +251,6 @@ class NencartaConfig:
         self.mapper: Mapper = Mapper.from_string(self.get('mapper'))
 
         self.streams_as_parquet: bool = self.get("streams_as_parquet")
-        if self.streams_as_parquet and self.mapper.is_curve2flood_fldpln_mapper():
-            raise ValueError("The Curve2Flood-FLDPLNpy mapper is not currently compatible with stream networks stored as parquet files. Please set streams_as_parquet to false in order to proceed...")
         
         self.floodmap_id: str = self.get('floodmap_identifier')
         if self.floodmap_id:
@@ -334,7 +335,8 @@ class NencartaConfig:
         self.exponent_depth = self.get("exponent_depth")
         self.exponent_width = self.get("exponent_width")
         self.use_dem_derived_channel_mask: bool = self.get("use_dem_derived_channel_mask")
-        self.drop_multilinestrings: bool = self.get("drop_multilinestrings", False)
+        self.drop_multilinestrings: bool = self.get("drop_multilinestrings")
+        self.minimize_output_files: bool = self.get("minimize_output_files")
 
         if self.parallel and self.fldpln_parallel:
             LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
