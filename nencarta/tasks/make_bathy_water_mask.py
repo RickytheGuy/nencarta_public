@@ -17,7 +17,12 @@ def make_water_mask(workspace: Workspace) -> Path:
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     
     land_cover_array = Raster(workspace.LAND_File).read_array()
-    stream_ras = Raster(workspace.STRM_File_Clean)
+    # ARC carves the bathymetry along the streams it is given, which are the moved ones when the network has been
+    # moved to the thalweg, and curve2flood discards whatever bathymetry falls outside this mask.
+    if configs.move_stream_network_to_thalweg and workspace.new_stream_raster.exists():
+        stream_ras = Raster(workspace.new_stream_raster)
+    else:
+        stream_ras = Raster(workspace.STRM_File_Clean)
     streams = stream_ras.read_array()
 
     # Mark streams in LC with 1, other areas as -9999
