@@ -273,8 +273,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             workspace, 
             source_gdf, 
             lakes,
-            configs.streamflow_source.upstream_id, 
-            configs.streamflow_source.downstream_id
+            configs.stream_id_field, 
+            configs.downstream_id_field
         )
         dem_for_conflation_path = workspace.fixed_dem
     elif should_move_streams:
@@ -299,8 +299,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             buffer_distance=buffer_distance,
             dem_proj=assigned_dem.projection, 
             dem_bbox=assigned_dem.bbox,
-            source_id_col=configs.streamflow_source.upstream_id,
-            source_ds_col=configs.streamflow_source.downstream_id,
+            source_id_col=configs.stream_id_field,
+            source_ds_col=configs.downstream_id_field,
             strm_order_col=configs.StrmOrder_Field,
             drop_multilinestrings=configs.drop_multilinestrings
         )
@@ -324,7 +324,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         if configs.minimize_output_files:
             workspace.DEM_StrmShp.unlink()
             workspace.new_StrmShp.unlink()
-        _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.streamflow_source.upstream_id)
+        _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.stream_id_field)
 
         final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
         channel_mask |= (final_streams > 0)

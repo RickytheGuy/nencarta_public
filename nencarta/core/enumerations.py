@@ -57,18 +57,6 @@ class StreamflowSource(NencartaEnum):
         if self == self.GEOGLOWS:
             return self.value.upper()
         return self.value[:3].upper() + self.value[3:]
-    
-    @property
-    def upstream_id(self) -> str:
-        if self == self.GEOGLOWS:
-            return "LINKNO"
-        return "COMID"
-
-    @property
-    def downstream_id(self) -> str:
-        if self == self.GEOGLOWS:
-            return "DSLINKNO"
-        return "TOCOMID"
 
 class Mapper(NencartaEnum):
     FLOODSPREADER = 'FloodSpreader'
