@@ -820,6 +820,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "make_curvefile", "Make curve file", _default("make_curvefile"))
         self._add_checkbox(group, "make_ap_database", "Make AP database", _default("make_ap_database"))
         self._add_checkbox(group, "make_cross_section_file", "Make cross-section file", _default("make_cross_section_file"))
+        self._add_checkbox(group, "make_representative_cross_section_file", "Make representative cross-section file", _default("make_representative_cross_section_file"))
         self._add_checkbox(group, "make_depth_maps", "Make depth maps", _default("make_depth_maps"))
         self._add_checkbox(group, "make_velocity_maps", "Make velocity maps", _default("make_velocity_maps"))
         self._add_checkbox(group, "make_wse_maps", "Make WSE maps", _default("make_wse_maps"))

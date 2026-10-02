@@ -408,6 +408,16 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 * ``make_cross_section_file`` (Bool, optional): Whether to write cross-section
   output from ARC. Default False.
 
+.. _json-make_representative_cross_section_file:
+
+* ``make_representative_cross_section_file`` (Bool, optional): Whether to write
+  ARC's representative cross sections, which describe each reach by its cross
+  sections averaged stage by stage, every 0.10 m, for routing in hydrologic models.
+  ARC builds them in place of rating curves, so NenCarta runs ARC a second time
+  for them, set up like the bathymetry run so that they average the cross sections
+  the rating curves come from, with the same carved channels. They cover the
+  reaches in the flow file, as the rating curves do. Default False.
+
 .. _json-fldpln_dh:
 
 * ``fldpln_dh`` (Float, optional): FLDPLN depth interval. Default 0.5.
@@ -630,6 +640,7 @@ These options control the ARC workflow that estimates bathymetry and creates cur
 * :ref:`create_reach_average_curve_file <json-create_reach_average_curve_file>`
 * :ref:`make_curvefile <json-make_curvefile>`
 * :ref:`make_ap_database <json-make_ap_database>`
+* :ref:`make_representative_cross_section_file <json-make_representative_cross_section_file>`
 * :ref:`bathy_args <json-bathy_args>`
 * :ref:`vdt_file_extension <json-vdt_file_extension>`
 
@@ -646,6 +657,16 @@ For each DEM tile, NenCarta writes bathymetry-related outputs under
   when ``make_curvefile`` is ``true``.
 * ``VDT/<NWM|GEOGLOWS>_<DEM>_AP_Database_Bathy.txt``: Area-perimeter database,
   written when ``make_ap_database`` is ``true``.
+* ``VDT/<NWM|GEOGLOWS>_<DEM>_Representative_XS.<csv|parquet>``: Representative
+  cross sections, one row per reach and 0.10 m stage, written when
+  ``make_representative_cross_section_file`` is ``true``. It is Parquet when
+  ``vdt_file_extension`` is ``parquet`` and CSV otherwise. Its ARC run is configured
+  by ``ARC_InputFiles/<NWM|GEOGLOWS>_ARC_Input_<DEM>_Representative_XS.<txt|yaml>``
+  and also writes ``Bathymetry/<NWM|GEOGLOWS>_<DEM>_ARC_Bathy_Representative_XS.tif``,
+  the channels it carved. When the stream raster has reaches that the flow file
+  has no flows for, the run uses
+  ``STRM/<NWM|GEOGLOWS>_<DEM>_STRM_Raster_Representative_XS.tif``, the stream
+  raster without them.
 
 
 Bathymetry options
@@ -981,6 +1002,7 @@ Advanced Parameters
 * ``User Flow Files`` -> ``user_flow_files``
 * ``Make Curve File`` -> ``make_curvefile``
 * ``Make Area-Perimeter Database`` -> ``make_ap_database``
+* ``Make Representative Cross-Section File`` -> ``make_representative_cross_section_file``
 * ``Make Depth Maps`` -> ``make_depth_maps``
 * ``Make Velocity Maps`` -> ``make_velocity_maps``
 * ``Make WSE Maps`` -> ``make_wse_maps``

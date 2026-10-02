@@ -81,6 +81,7 @@ DEFAULT_CONFIG = {
     "make_curvefile": True,
     "make_depth_maps": True,
     "make_fist_inputs": True,
+    "make_representative_cross_section_file": False,
     "make_vdt": True,
     "make_velocity_maps": True,
     "make_wse_maps": True,

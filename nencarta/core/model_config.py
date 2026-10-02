@@ -10,12 +10,14 @@ class ModelConfig():
             mapper_configs: list[Path],
             fist_inputs: list[tuple],
             mapper: Mapper,
-            quiet: bool = False):
+            quiet: bool = False,
+            representative_cross_section_config: Path | None = None):
         self.arc_config = arc_config
         self.mapper_configs = mapper_configs
         self.fist_inputs = fist_inputs
         self.mapper = mapper
         self.quiet = quiet
+        self.representative_cross_section_config = representative_cross_section_config
 
     @property
     def vdt_exists(self) -> bool:

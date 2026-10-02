@@ -290,6 +290,7 @@ class NencartaConfig:
         self.make_curvefile: bool = self.get("make_curvefile")
         self.make_ap_database: bool = self.get("make_ap_database")
         self.make_cross_section_file: bool = self.get("make_cross_section_file")
+        self.make_representative_cross_section_file: bool = self.get("make_representative_cross_section_file")
         self.vdt_file_extension: str = self.get("vdt_file_extension")
         self.mannings_text_file: str = self.get("mannings_text_file")
         self.bathy_args: dict = self.get("bathy_args")

@@ -2,6 +2,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from numba import njit
 from osgeo import gdal, ogr
 
@@ -146,3 +147,31 @@ def make_stream_raster(workspace: Workspace) -> Path:
     stream_ds = None
 
     return workspace.STRM_File_Clean
+
+def make_representative_stream_raster(workspace: Workspace, stream_raster: Path) -> Path:
+    """
+    The stream raster for ARC's representative cross sections: stream_raster with only the reaches in the flow file,
+    or stream_raster itself when it has no others.
+
+    ARC makes rating curves only for the reaches in its flow file, but representative cross sections for every reach
+    in its stream raster, and with the baseflow bathymetry it raises for a reach that the flow file has no flows for.
+    The flow file can leave reaches out (q_baseflow_threshold, return periods that are missing or zero, a
+    reanalysis_file with fewer reaches), so without this the representative run would fail on them, or describe
+    reaches that have no rating curves.
+    """
+    flow_file = Path(workspace.DEM_Reanalsyis_FlowFile)
+    if flow_file.suffix.lower() == '.parquet':
+        flow_ids = pd.read_parquet(flow_file, columns=['COMID'])['COMID']
+    else:
+        flow_ids = pd.read_csv(flow_file, usecols=['COMID'])['COMID']
+
+    reference = Raster(stream_raster)
+    streams = reference.read_array()
+    without_flows = (streams > 0) & ~np.isin(streams, flow_ids.to_numpy())
+    if not without_flows.any():
+        return stream_raster
+
+    LOG.info(f"{np.unique(streams[without_flows]).size} reaches in {stream_raster} have no flows, so they are left out of the representative cross sections.")
+    streams[without_flows] = 0
+    Raster.write_array_using_reference(streams, reference, workspace.STRM_File_Representative_XS, reference.ds.GetRasterBand(1).DataType)
+    return workspace.STRM_File_Representative_XS

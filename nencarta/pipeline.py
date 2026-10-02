@@ -16,6 +16,12 @@ def build_pipeline(profile: bool) -> Pipeline:
             mapspec="model_configs[i], workspace[i] -> mapper_arc_config[i]",
         ),
         PipeFunc(
+            tasks.run_arc_representative_cross_sections,
+            "representative_cross_sections",
+            renames={'model_config': 'model_configs'},
+            mapspec="model_configs[i], workspace[i] -> representative_cross_sections[i]",
+        ),
+        PipeFunc(
             tasks.run_mapper_bathymetry,
             "mapper_bathy_config",
             renames={'model_config': 'mapper_arc_config'},

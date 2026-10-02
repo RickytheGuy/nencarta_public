@@ -7,12 +7,13 @@ from nencarta.logger import LOG
 from nencarta.workspace import Workspace
 from nencarta.core.defaults import DEFAULT_BATHY_ARGS, DEFAULT_CONFIG, DEFAULT_FLOODMAP_ARGS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.tasks.make_stream_raster import make_representative_stream_raster
 
 def _arc_inputs(dem: Path,
                 stream_raster: Path,
                 land_cover: Path,
                 mannings_n_file: Path,
-                reanalysis_flow_file: Path,
+                reanalysis_flow_file: Path | None,
                 river_id: str,
                 highflow_field: str,
                 baseflow_field: str,
@@ -26,12 +27,13 @@ def _arc_inputs(dem: Path,
         "Stream_File": stream_raster,
         "LU_Raster_SameRes": land_cover,
         "LU_Manning_n": mannings_n_file,
-        "Flow_File": reanalysis_flow_file,
-        "Flow_File_ID": river_id,
     }
-    if include_baseflow:
-        params["Flow_File_BF"] = baseflow_field
-    params["Flow_File_QMax"] = highflow_field
+    if reanalysis_flow_file is not None:
+        params["Flow_File"] = reanalysis_flow_file
+        params["Flow_File_ID"] = river_id
+        if include_baseflow:
+            params["Flow_File_BF"] = baseflow_field
+        params["Flow_File_QMax"] = highflow_field
     params["Spatial_Units"] = "deg"
 
     optional_bathy_keys = [
@@ -59,6 +61,29 @@ def _arc_inputs(dem: Path,
     })
 
     return params
+
+def _bathymetry_run_inputs(workspace: Workspace) -> tuple[Path, Path, Path]:
+    """The DEM, stream raster and stream network that ARC's bathymetry run works on."""
+    configs = workspace.configs
+    if configs.clean_dem:
+        dem = workspace.DEM_File_Clean
+    elif configs.burn_streams:
+        dem = workspace.fixed_dem
+    else:
+        dem = workspace.assigned_dem
+
+    if configs.move_stream_network_to_thalweg:
+        return dem, workspace.new_stream_raster, workspace.new_StrmShp_matched
+    return dem, workspace.STRM_File_Clean, workspace.DEM_StrmShp
+
+def _power_law_params(configs) -> dict:
+    return {
+        "drainage_area_field": configs.area_km2_field,
+        "coefficient_depth": configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"],
+        "exponent_depth": configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"],
+        "coefficient_width": configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"],
+        "exponent_width": configs.exponent_width or DEFAULT_CONFIG["exponent_width"],
+    }
 
 def _fldpln_inputs(workspace: Workspace):
     output = {
@@ -195,20 +220,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         LOG.info(f"Domain {workspace.watershed} has required ARC outputs and bathymetry is disabled, skipping ARC.")
         return workspace.ARC_FileName_Bathy
 
-    if configs.clean_dem:
-        dem = workspace.DEM_File_Clean
-    elif configs.burn_streams:
-        dem = workspace.fixed_dem
-    else:
-        dem = workspace.assigned_dem
-
-    if configs.move_stream_network_to_thalweg:
-        stream_raster = workspace.new_stream_raster
-        stream_vector = workspace.new_StrmShp_matched
-    else: 
-        stream_raster = workspace.STRM_File_Clean
-        stream_vector = workspace.DEM_StrmShp
-
+    dem, stream_raster, stream_vector = _bathymetry_run_inputs(workspace)
 
     params = _arc_inputs(
         dem=dem,
@@ -243,11 +255,7 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
         if configs.use_power_laws_for_bathymetry:
-            params["drainage_area_field"] = configs.area_km2_field
-            params["coefficient_depth"] = configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]
-            params["exponent_depth"] = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
-            params["coefficient_width"] = configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"]
-            params["exponent_width"] = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
+            params.update(_power_law_params(configs))
 
         params["# Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File
@@ -285,6 +293,70 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     _write_config(workspace.ARC_FileName_Bathy, params)
     
     return workspace.ARC_FileName_Bathy
+
+def define_representative_cross_section_config(workspace: Workspace) -> Path | None:
+    """
+    ARC builds representative cross sections in place of the rating curves, so they get an ARC run of their own. It is
+    set up like the bathymetry run (define_arc_configs), so that the cross sections it averages are the ones the rating
+    curves come from: on the same DEM, reaches and roughness, with the channels carved the same way.
+    """
+    configs = workspace.configs
+    config_path = workspace.ARC_FileName_Representative_XS
+    if config_path.exists() and workspace.Representative_Cross_Section_File.exists() and not configs.overwrite:
+        return config_path
+
+    if not workspace.DEM_StrmShp.exists() and not configs.raise_errors_if_nothing_in_domain:
+        return None
+
+    workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
+    workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
+
+    dem, stream_raster, stream_vector = _bathymetry_run_inputs(workspace)
+    # Given the flow file, its ID and its baseflow column, ARC carves the channels for the baseflow and ignores the
+    # depth power law, so it only gets them when the bathymetry run carves for the baseflow as well.
+    baseflow_bathymetry = not configs.disable_bathymetry and not configs.use_power_laws_for_bathymetry
+    params = _arc_inputs(
+        dem=dem,
+        stream_raster=make_representative_stream_raster(workspace, stream_raster),
+        land_cover=workspace.LAND_File,
+        mannings_n_file=workspace.mannings_n_text_file,
+        reanalysis_flow_file=workspace.DEM_Reanalsyis_FlowFile if baseflow_bathymetry else None,
+        river_id="COMID",
+        highflow_field=configs.specified_highflow_field,
+        baseflow_field=configs.specified_bathyflow_field,
+        bathy_args=configs.bathy_args,
+        include_baseflow=baseflow_bathymetry,
+    )
+
+    params["StrmShp_File"] = stream_vector
+    params["Slope_Low_Percentile"] = configs.slope_low_percentile
+    params["Slope_High_Percentile"] = configs.slope_high_percentile
+    # ARC identifies the reaches of representative cross sections by reach_id, where rating curves use the flow file's ID
+    params["reach_id"] = configs.stream_id_field
+    params["downstream_reach_id"] = configs.downstream_id_field
+
+    if not configs.disable_bathymetry:
+        if configs.use_power_laws_for_bathymetry:
+            params.update(_power_law_params(configs))
+
+        params["# Bathymetry_Information"] = ""
+        params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", DEFAULT_BATHY_ARGS["Bathy_Trap_H"])
+        params["Bathy_Use_Banks"] = configs.bathy_use_banks
+        if configs.find_banks_based_on_landcover:
+            params["FindBanksBasedOnLandCover"] = True
+
+        # ARC only carves the channels when it has a raster to burn them into. It can't be the bathymetry run's, which
+        # curve2flood builds the flood-mapping DEM from.
+        workspace.bathy_file_folder.mkdir(parents=True, exist_ok=True)
+        params["BATHY_Out_File"] = workspace.ARC_BathyFile_Representative_XS
+
+    params["# Representative_Cross_Section"] = ""
+    params["Build_Representative_Cross_Section"] = True
+    params["Representative_Cross_Section_File"] = workspace.Representative_Cross_Section_File
+
+    LOG.info(f"Writing ARC representative cross-section config to {config_path}.")
+    _write_config(config_path, params)
+    return config_path
 
 def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
