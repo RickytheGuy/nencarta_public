@@ -31,7 +31,10 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
         LOG.info("No ARC config was generated for this workspace; skipping ARC bathymetry.")
         return model_config
 
-    if model_config.vdt_exists and not workspace.configs.overwrite:
+    # ARC writes the representative cross sections in the same run as the VDT
+    representative_missing = workspace.configs.make_representative_cross_section_file and \
+        not workspace.Representative_Cross_Section_File.exists()
+    if model_config.vdt_exists and not workspace.configs.overwrite and not representative_missing:
         return model_config
     
     if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
@@ -41,19 +44,6 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
     _run_arc(model_config.arc_config, model_config)
     
     return model_config
-
-def run_arc_representative_cross_sections(model_config: ModelConfig, workspace: Workspace) -> Path | None:
-    config = model_config.representative_cross_section_config
-    if config is None:
-        return None
-
-    if workspace.Representative_Cross_Section_File.exists() and not workspace.configs.overwrite:
-        return workspace.Representative_Cross_Section_File
-
-    LOG.info("Running ARC to build the representative cross sections...")
-    _run_arc(config, model_config)
-
-    return workspace.Representative_Cross_Section_File
 
 def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     if not model_config.vdt_exists or\

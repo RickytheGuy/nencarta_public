@@ -413,10 +413,9 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 * ``make_representative_cross_section_file`` (Bool, optional): Whether to write
   ARC's representative cross sections, which describe each reach by its cross
   sections averaged stage by stage, every 0.10 m, for routing in hydrologic models.
-  ARC builds them in place of rating curves, so NenCarta runs ARC a second time
-  for them, set up like the bathymetry run so that they average the cross sections
-  the rating curves come from, with the same carved channels. They cover the
-  reaches in the flow file, as the rating curves do. Default False.
+  ARC builds them in its bathymetry run, alongside the rating curves and from the
+  same cross sections, so they cover the same reaches and carved channels as the
+  VDT database, which they leave unchanged. Default False.
 
 .. _json-fldpln_dh:
 
@@ -658,15 +657,9 @@ For each DEM tile, NenCarta writes bathymetry-related outputs under
 * ``VDT/<NWM|GEOGLOWS>_<DEM>_AP_Database_Bathy.txt``: Area-perimeter database,
   written when ``make_ap_database`` is ``true``.
 * ``VDT/<NWM|GEOGLOWS>_<DEM>_Representative_XS.<csv|parquet>``: Representative
-  cross sections, one row per reach and 0.10 m stage, written when
-  ``make_representative_cross_section_file`` is ``true``. It is Parquet when
-  ``vdt_file_extension`` is ``parquet`` and CSV otherwise. Its ARC run is configured
-  by ``ARC_InputFiles/<NWM|GEOGLOWS>_ARC_Input_<DEM>_Representative_XS.<txt|yaml>``
-  and also writes ``Bathymetry/<NWM|GEOGLOWS>_<DEM>_ARC_Bathy_Representative_XS.tif``,
-  the channels it carved. When the stream raster has reaches that the flow file
-  has no flows for, the run uses
-  ``STRM/<NWM|GEOGLOWS>_<DEM>_STRM_Raster_Representative_XS.tif``, the stream
-  raster without them.
+  cross sections, one row per reach and 0.10 m stage, written by the ARC
+  bathymetry run when ``make_representative_cross_section_file`` is ``true``. It
+  is Parquet when ``vdt_file_extension`` is ``parquet`` and CSV otherwise.
 
 
 Bathymetry options

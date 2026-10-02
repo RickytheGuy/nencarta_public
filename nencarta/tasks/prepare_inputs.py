@@ -14,7 +14,6 @@ from nencarta.tasks import (
     assign_user_flow_files,
     make_return_period_flow_file,
     define_arc_configs,
-    define_representative_cross_section_config,
     define_mapper_configs,
     make_water_mask,
     remove_old_forecast_files,
@@ -62,9 +61,6 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
         flow_files = []
 
     arc_config = define_arc_configs(workspace)
-    representative_cross_section_config = None
-    if configs.make_representative_cross_section_file:
-        representative_cross_section_config = define_representative_cross_section_config(workspace)
 
     mapper_configs = []
     fist_inputs = []
@@ -78,5 +74,4 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
         mapper_configs, 
         fist_inputs,
         configs.mapper,
-        configs.quiet,
-        representative_cross_section_config)
+        configs.quiet)
