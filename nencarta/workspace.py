@@ -15,7 +15,7 @@ DEFAULT_FOLDER_PATH = '{name}/{folder}'
 # What each kind of file is called after its '<source>_<DEM>_' or '<DEM>_' prefix, which 'file_names' can change
 FILE_BLURBS = (
     'dem', 'fixed', 'filled', 'fixed_Clean', 'Clean',
-    'flowdir', 'flowacc', 'wtbx_derived',
+    'flowdir',
     'StrmShp', 'STRM_Raster', 'STRM_Raster_Clean', 'matched', 'lakes', 'stream_info', 'fldpln_library',
     'LAND_Raster', 'AR_Manning_n_MED',
     'Reanalysis', '2yr_flow_initial', 'rp', 'forecast', 'Flow_COMID_Q',
@@ -105,9 +105,6 @@ class Workspace:
         self.fixed_dem = self.file_path(dem_updated, 'fixed', 'tif')
         self.filled_dem = self.file_path(dem_updated, 'filled', 'tif')
         self.flowdir = self.file_path(flow_direction, 'flowdir', 'tif')
-        self.flowacc = self.file_path(flow_direction, 'flowacc', 'tif')
-        self.new_StrmShp = self.file_path(flow_direction, 'wtbx_derived', 'shp')
-        self.whitebox_stream_raster = self.file_path(flow_direction, 'wtbx_derived', 'tif')
         stream_output_ext = "parquet" if configs.streams_as_parquet else "gpkg"
         stream_info_ext = "parquet" if configs.use_parquet else "csv"
         self.new_StrmShp_matched = self.file_path(self.strm_folder, 'matched', stream_output_ext)
@@ -193,13 +190,18 @@ class Workspace:
             self.check_whitebox_paths()
 
     def check_file_paths_are_unique(self):
-        """Raise if file_names or short_file_names gives two of this workspace's files the same path."""
+        """
+        Raise if file_names or short_file_names gives two of this workspace's files the same path.
+
+        The DEM is the one file allowed two names: without a buffer or bbox the assigned DEM is the original DEM
+        itself (see setup_dem). Any other file landing on it still raises, since it would overwrite the input.
+        """
         owners = {}
         for attr, path in vars(self).items():
             if not isinstance(path, Path) or attr == 'output_dir' or attr.lower().endswith('_folder'):
                 continue
             other = owners.setdefault(path, attr)
-            if other != attr:
+            if other != attr and {other, attr} != {'original_dem', 'assigned_dem'}:
                 raise ValueError(f"Watershed '{self.watershed}': 'file_names' gives {other} and {attr} the same path, {path}.")
 
     def check_whitebox_paths(self):
@@ -207,7 +209,7 @@ class Workspace:
         Raise if WhiteboxTools, which moving the stream network to the thalweg runs, would be given
         a path it cannot open. Checked here so a bad output_dir, name or DEM fails before any processing.
         """
-        paths = [self.fixed_dem, self.filled_dem, self.flowdir, self.flowacc, self.whitebox_stream_raster, self.new_StrmShp]
+        paths = [self.fixed_dem, self.filled_dem, self.flowdir]
         if not self.configs.burn_streams:
             # Without burning, whitebox reads the assigned DEM instead of the fixed DEM
             paths.append(self.assigned_dem)

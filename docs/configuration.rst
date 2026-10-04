@@ -206,16 +206,11 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-move_stream_network_to_thalweg:
 
-* ``move_stream_network_to_thalweg`` (Bool, optional): If True, this option
-  directs NenCarta to build a terrain-derived stream network from the DEM, delineate
-  threshold-based catchments, and then transfer stream IDs from the original
-  flowline dataset onto the new network. Default is False. This is required if using
-  FLDPLNpy as the ``mapper`` option. This option should not be used if your DEM does
-  not contain most of the contribution upstream area of your area of interest. When
-  this option is enabled and the DEM CRS is geographic, NenCarta automatically
-  reprojects the DEM to ``WGS 84 / NSIDC EASE-Grid 2.0 Global`` (EPSG:6933)
-  before this hydroterrain workflow begins. The same reprojection also occurs
-  when FLDPLNpy is selected as the ``mapper`` option.
+* ``move_stream_network_to_thalweg`` (Bool, optional): If True, NenCarta moves
+  each reach of the source flowlines onto the D8 flow path it follows in the DEM,
+  keeping its ID, so that every reach is one unbroken flow path (see
+  :ref:`stream-network-movement`). Default is False. This is required if using
+  FLDPLNpy as the ``mapper`` option.
 
 .. _json-name:
 
@@ -223,10 +218,11 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-new_strm_threshold_km2:
 
-* ``new_strm_threshold_km2`` (Float, optional): This value represents the
-  terrain threshold used when NenCarta extracts a new stream mask, vector flowlines,
-  and catchments from the DEM-derived flow direction and accumulation rasters. The
-  value is in square km and is required when
+* ``new_strm_threshold_km2`` (Float, optional): The smallest drainage area, in
+  square km, of a DEM flow path that source reaches are moved onto. Where a source
+  reach runs through cells draining less than this (the upper end of a
+  headwater, typically), that part of it is left out. Rivers flowing into the
+  domain from outside it count from where they enter. Required when
   ``move_stream_network_to_thalweg`` is True.
 
 .. _json-num_workers:
@@ -292,7 +288,7 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
   extension, like the ``matched`` stream vector and raster, are renamed
   together. The keys are
   ``dem``, ``fixed``, ``filled``, ``fixed_Clean``, ``Clean``, ``flowdir``,
-  ``flowacc``, ``wtbx_derived``, ``StrmShp``, ``STRM_Raster``,
+  ``StrmShp``, ``STRM_Raster``,
   ``STRM_Raster_Clean``, ``matched``, ``lakes``, ``stream_info``,
   ``fldpln_library``, ``LAND_Raster``, ``AR_Manning_n_MED``, ``Reanalysis``,
   ``2yr_flow_initial``, ``rp`` (the return period flow files, ``rp<N>.csv``),
@@ -345,8 +341,15 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-lakes:
 
-* ``lakes`` (String, optional): Path to a lake polygon file used by stream
-  movement and filtering workflows.
+* ``lakes`` (String, optional): Path to a lake polygon file. With
+  ``burn_streams``, lakes are left out of the water mask the burned DEM is
+  smoothed within and the bathymetry is bounded by, and when
+  ``move_stream_network_to_thalweg`` is True they are cut out of the moved
+  network. With the ``Curve2Flood-FLDPLNpy`` mapper no stream runs inside a lake:
+  a reach flowing into one ends at its shore, and a reach crossing one keeps its
+  longest stretch outside it. With the other mappers a reach touching a lake is
+  dropped unless it carries a river through it, with reaches above and below it
+  that touch no lake.
 
 .. _json-reanalysis_file:
 
@@ -461,8 +464,12 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 .. _json-burn_streams:
 
-* ``burn_streams`` (Bool, optional): Whether to burn streams into the DEM during
-  stream movement. Default False.
+* ``burn_streams`` (Bool, optional): Whether to burn the source streams into the
+  DEM, writing ``DEM_Updated/{DEM}_fixed.tif``. Each reach is lowered along its
+  whole line, in steps of 0.5 m that never rise downstream, upstream reaches
+  before the reaches they flow into, and where reaches meet the larger one keeps
+  the shared cell, so the burned channels drain continuously and filling the DEM
+  does not flatten them. Default False.
 
 .. _json-project_to_utm:
 
@@ -969,102 +976,79 @@ The FIST subdirectory contains the following file types:
 * ``*_Seed.shp``: A shapefile containing the SEED locations that designate the furthest
   upstream points for headwater streams.
 
+.. _stream-network-movement:
+
 Stream network movement options
 -------------------------------
 
 * :ref:`move_stream_network_to_thalweg <json-move_stream_network_to_thalweg>`
 * :ref:`new_strm_threshold_km2 <json-new_strm_threshold_km2>`
+* :ref:`burn_streams <json-burn_streams>`
+* :ref:`lakes <json-lakes>`
 
-When ``move_stream_network_to_thalweg`` is enabled, or when
-``mapper`` is set to ``Curve2Flood-FLDPLNpy``, NenCarta switches to the stream
-movement workflow implemented in ``nencarta/nencarta/main.py``. That workflow
-first checks the DEM coordinate system. If the DEM is geographic
-(``lat/lon``), NenCarta creates a projected GeoTIFF copy in
-``WGS 84 / NSIDC EASE-Grid 2.0 Global`` (EPSG:6933) and uses that projected
-copy for stream preprocessing, hydroterrain generation, DEM cleaning,
-bathymetry, flood mapping, and FIST output generation for the rest of that DEM
-tile's run. The hydroterrain workflow
-first calls ``create_flow_direction_and_flow_accumulation_raster`` in
-``Hydroterrain_Processing.py`` to fill depressions in the DEM and create a
-filled DEM, D8 flow-direction raster, and D8 flow-accumulation raster. 
-All hydroterrain processing is conducted using 
-`WhiteboxTools <https://github.com/jblindsay/whitebox-tools>`_.
+FLDPLN, ARC and Curve2Flood read the stream network off the DEM's D8 flow
+directions: FLDPLN walks each reach down the D8 pointers, so a reach that wanders
+off its flow path stops being one reach. Source flowlines (TDX-Hydro, GEOGLOWS,
+NHD, ...) were drawn from other DEMs and drift on and off this DEM's flow paths.
+When ``move_stream_network_to_thalweg`` is enabled, NenCarta moves each source
+reach onto the D8 path it follows, keeping its ID so that the flows keyed by it
+still apply. The work is done in ``nencarta/tasks/move_streams.py`` and
+``nencarta/tasks/stream_conflation.py``.
 
-NenCarta then calls
-``create_catchments_and_flowlines_with_flow_direction_and_accumulation`` to
-extract a thresholded stream raster from the accumulation grid, convert that
-raster to vector flowlines, and delineate threshold-based catchments. By
-default the function keeps the vectorized stream reaches intact and assigns
-each reach a ``catchment_id`` from a point sampled just upstream of the
-reach's downstream endpoint. This avoids the small sliver segments that can
-appear when vector flowlines are split at catchment boundaries. The
-terrain-derived network therefore carries fields such as ``catchment_id``,
-``stream_id``, ``downstream_id``, and ``upstream_ids``.
+1. With ``burn_streams``, the source streams are burned into the DEM first, so
+   that its flow paths follow them.
+2. `WhiteboxTools <https://github.com/jblindsay/whitebox-tools>`_ fills the
+   DEM's depressions and derives its D8 flow directions.
+3. Every source reach is sampled about once a cell, from its upstream end down,
+   and matched onto the D8 network as a hidden Markov model: the candidates at
+   each sample are the nearby cells draining at least ``new_strm_threshold_km2``,
+   a candidate can only be followed by one downstream of it, and the match keeps
+   the stretch of D8 path that best follows the line. A reach the DEM doesn't
+   follow at all is left out rather than forced somewhere wrong.
+4. The matched reaches are laid onto the D8 network in flow order, each running
+   from its matched start to where the next reach starts. Where two reaches' flow
+   paths meet somewhere the source network has no confluence, the source network
+   decides which carries on; a reach whose match ends short of the reach it flows
+   into carries on down its D8 path to meet it.
 
-Direct callers can still request the legacy overlay behavior by passing
-``catchment_assignment_mode="intersection"`` to
-``create_catchments_and_flowlines_with_flow_direction_and_accumulation``. That
-mode intersects vectorized streams with catchment polygons before building
-topology, which can be useful for reproducing older outputs but is more likely
-to create short stream segments near junctions.
+Because each reach is matched on its own, a reach the DEM disagrees with costs
+only that reach, never the basin above it. Reaches are split exactly where the
+source network splits them, including the breaks that are not confluences. An
+endorheic source reach ends where its line ends, even though the filled DEM
+routes its flow on over the basin's spill point. Each moved reach's downstream ID
+is the reach its last cell drains into on the D8 network, or -1, and every reach
+is one unbroken D8 path.
 
-The final step is ``match_new_streams_to_old_streams``. That method compares the
-terrain-derived flowlines to the originally processed stream network, ranks
-candidate matches by buffered overlap, transfers the original stream IDs
-(``LINKNO``/``DSLINKNO`` for GEOGLOWS or ``COMID``/``TOCOMID`` for NWM), copies
-stream order when available, and removes low-scoring or detached subnetworks.
-The matched network becomes the stream layer used by the rest of the NenCarta
-workflow, and the filled DEM replaces the original DEM for downstream steps.
-
-If ``overwrite`` is ``false`` and the moved stream network products
-already exist, NenCarta reuses the existing matched flowlines and filled DEM
-instead of rebuilding them.
+If ``overwrite`` is ``false`` and the moved stream network products already
+exist, NenCarta reuses them instead of rebuilding them.
 
 
 Stream network movement outputs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This workflow writes its outputs beneath the watershed's ``FlowDirection`` and
-``STRM`` subdirectories:
+* ``DEM_Updated/{DEM}_fixed.tif``: the DEM with the source streams burned in,
+  when ``burn_streams`` is enabled.
 
-* ``FlowDirection/{DEM}.tif``: A projected DEM that is either supplied by the user or automatically created. 
-  A projected DEM copy is automatically created only when a geographic DEM is used with ``Curve2Flood-FLDPLNpy`` 
-  or with
-  ``move_stream_network_to_thalweg=true``. The automated DEM reprojection
-  output is written as a GeoTIFF in ``WGS 84 / NSIDC EASE-Grid 2.0 Global`` (EPSG:6933) 
-  and becomes the DEM used by subsequent NenCarta steps for that tile.
+* ``DEM_Updated/{DEM}_filled.tif``: the depression-filled DEM the flow
+  directions are derived from.
 
-* ``FlowDirection/{DEM}_filled.tif``: depression-filled DEM created before
-  stream extraction. When stream movement is active, this becomes the DEM used
-  by downstream processing.
+* ``FlowDirection/{DEM}_flowdir.tif``: the D8 flow direction raster, in
+  WhiteboxTools' pointer codes.
 
-* ``FlowDirection/{DEM}_flowdir.tif``: D8 flow-direction raster derived from the
-  filled DEM.
+* ``STRM/{DEM}_matched.gpkg`` (``.parquet`` with ``streams_as_parquet``): the
+  moved stream network, used by every later step. Each row is a source reach
+  that was placed: its ID, the ID of the reach it drains into (-1 for none), a
+  ``topological_order`` that ranks every reach before the one it drains into,
+  and the source reach's other attributes. Its line runs through the centres of
+  its D8 cells, from upstream to downstream.
 
-* ``FlowDirection/{DEM}_flowacc.tif``: D8 flow-accumulation raster derived from
-  the filled DEM.
+* ``STRM/{DEM}_matched.tif``: the moved stream network's cells, each holding its
+  reach's ID.
 
-* ``FlowDirection/{DEM}_flowlines.gpkg``: terrain-derived flowline network
-  created from the thresholded stream raster. Its ``flowlines`` layer includes
-  topology fields such as ``catchment_id``, ``stream_id``, ``id``,
-  ``downstream_id``, and ``upstream_ids``.
+* ``STRM/{DEM}_lakes.tif``: the rasterized ``lakes``, when given.
 
-* ``FlowDirection/{DEM}_catchments.gpkg``: catchment polygons generated from the
-  thresholded stream mask. The ``catchments`` layer stores ``catchment_id`` for
-  each delineated polygon.
-
-* ``STRM/{DEM}_flowlines_matched.gpkg``: matched flowline network created by
-  transferring IDs from the original stream dataset onto the terrain-derived
-  flowlines. This file is the stream network used for later NenCarta steps.
-  Along with the transferred source-network IDs and optional stream order, it
-  also stores match diagnostics including ``match_score``, ``centroid_dist_m``,
-  ``line_dist_m``, ``overlap_area_m2``, ``overlap_ratio``, and
-  ``overlap_hit``.
-
-During stream extraction NenCarta also creates intermediate threshold rasters
-and shapefiles inside ``FlowDirection`` (for example the thresholded stream
-mask and subbasin raster). Those files support the build process, while the
-GeoPackages above are the persistent vector outputs.
+* ``FLDPLN/{DEM}_stream_info.parquet`` (``.csv`` without ``use_parquet``): each moved
+  reach's D8 walk for the FLDPLN mapper.
 
 
 GUI options

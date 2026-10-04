@@ -96,7 +96,7 @@ DEFAULT_CONFIG = {
     "mannings_text_file": None,
     "move_stream_network_to_thalweg": False,
     "name": None,
-    "new_strm_threshold_km2": 25,
+    "new_strm_threshold_km2": 1,
     "num_workers": None,
     "nwm_api_key": None,
     "overwrite_floodmaps": True,
