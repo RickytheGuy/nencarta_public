@@ -46,7 +46,7 @@ def make_clean_dem(workspace: Workspace) -> Path:
     Q_Fraction = 0.10
     TopWidthPlausibleLimit = 600
     search_dist_perp_cells = 10 # this was 40
-    FlowFileName = workspace.FLOW_Folder / f"{workspace.FileName}_Flow_COMID_Q.txt"
+    FlowFileName = workspace.file_path(workspace.FLOW_Folder, 'Flow_COMID_Q', 'txt')
     _make_flood_flow_file_from_base_max_file(
         reanalysis_flow_file=workspace.DEM_Reanalsyis_FlowFile,
         out_file=FlowFileName,

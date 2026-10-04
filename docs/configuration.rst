@@ -247,6 +247,65 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 * ``output_dir`` (String): The full filepath to the directory where your output will
   be saved.
 
+.. _json-folder_paths:
+
+* ``folder_paths`` (Dictionary, optional): Where to put each of the output
+  folders, as a path template per folder. The folders are ``DEM``,
+  ``ARC_InputFiles``, ``FloodMap``, ``Bathymetry``, ``DEM_Updated``, ``STRM``,
+  ``LAND``, ``FLOW``, ``VDT``, ``ESA_LC``, ``FIST``, ``Consequences``,
+  ``FlowDirection`` and ``FLDPLN``; a ``default`` entry applies to every folder
+  not listed.
+  Templates can use ``{output_dir}``, ``{name}`` (the watershed name), ``{dem}``
+  (the DEM's file name without its extension, or the bounding box name) and
+  ``{folder}`` (the folder's name), and relative paths are relative to
+  ``output_dir``. For example, ``{"FloodMap": "/results/FloodMap/{dem}",
+  "VDT": "/results/VDT/{dem}"}`` sends the flood maps and VDTs of every DEM to
+  one tree and leaves everything else where it was, and ``{"default":
+  "{folder}/{name}"}`` groups every folder by type instead of by watershed. Keep
+  ``{name}`` or ``{dem}`` in a template when several watersheds or DEMs share
+  ``output_dir``: some files, such as ``fldpln_library.parquet``, are not named per
+  DEM. File names do not change (see ``short_file_names`` and ``file_names``).
+  Default None, which puts every folder in ``{output_dir}/{name}/{folder}``.
+
+.. _json-short_file_names:
+
+* ``short_file_names`` (Bool, optional): Name files by what they are alone,
+  dropping the ``<NWM|GEOGLOWS>_<DEM>_`` or ``<DEM>_`` prefix, e.g.
+  ``VDT/VDT_Database_Bathy.parquet`` instead of
+  ``VDT/GEOGLOWS_<DEM>_buffered_VDT_Database_Bathy.parquet``. Since the DEM is no
+  longer in the names, every DEM needs its own folders: NenCarta raises an error
+  if two DEMs would share one, as they do by default when ``dem_dir`` holds
+  several DEMs, in which case put ``{dem}`` in ``folder_paths``. Buffered flood
+  maps are cropped in place rather than renamed. Default False.
+
+.. _json-file_names:
+
+* ``file_names`` (Dictionary, optional): New names for kinds of files, keyed by
+  the part of the name that says what the file is, e.g. ``{"VDT_Database_Bathy":
+  "vdt"}``; the prefix and extension are kept, so with ``short_file_names`` that
+  file is ``VDT/vdt.parquet``. Files that come one per return period, forecast or
+  flow file keep that part after the new name, e.g. ``{"ARC_Flood": "flood"}``
+  names the return period flood maps ``flood_rp2.tif`` ... ``flood_rp100.tif``
+  (with ``short_file_names``), and an empty name names them by that part alone,
+  e.g. ``{"ARC_Flood": ""}`` names them ``rp2.tif`` ... ``rp100.tif``; a file of
+  that kind without such a part keeps its usual name. Files that differ only by
+  extension, like the ``matched`` stream vector and raster, are renamed
+  together. The keys are
+  ``dem``, ``fixed``, ``filled``, ``fixed_Clean``, ``Clean``, ``flowdir``,
+  ``flowacc``, ``wtbx_derived``, ``StrmShp``, ``STRM_Raster``,
+  ``STRM_Raster_Clean``, ``matched``, ``lakes``, ``stream_info``,
+  ``fldpln_library``, ``LAND_Raster``, ``AR_Manning_n_MED``, ``Reanalysis``,
+  ``2yr_flow_initial``, ``rp`` (the return period flow files, ``rp<N>.csv``),
+  ``forecast``, ``Flow_COMID_Q``, ``ARC_Input_Bathy``, ``ARC_Input_InitialFlood``,
+  ``ARC_Input_FloodForecast``, ``ARC_Input`` (the flood mapper configs),
+  ``VDT_Database_Initial``, ``VDT_Database_Bathy``, ``AP_Database_Bathy``,
+  ``CurveFile``, ``CurveFile_Initial``, ``CurveFile_Bathy``, ``XS``,
+  ``Representative_XS``, ``water_mask``, ``ARC_Bathy``, ``FS_Bathy``,
+  ``ARC_Flood``, ``ARC_Flood_Initial``, ``ARC_Flood_Bathy``, ``ARC_Depth``,
+  ``ARC_FloodDepth``, ``ARC_FloodWSE``, ``ARC_FloodVEL``, ``Seed`` and ``FIST``
+  (the FIST GeoJSON files). Names cannot contain ``/`` or ``\``, and NenCarta
+  raises an error if two files would end up with the same path. Default None.
+
 .. _json-bbox:
 
 * ``bbox`` (List of Numbers, optional): Bounding box as
@@ -293,6 +352,66 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 
 * ``reanalysis_file`` (String, optional): Existing streamflow reanalysis file to
   use instead of generating or downloading one.
+
+.. _json-return_period_file:
+
+* ``return_period_file`` (String, optional): Return period flows to build the
+  reanalysis file from, instead of the GEOGLOWS retrospective return periods. A
+  local path or a URL (``s3://``, ``https://``) to a CSV, Parquet, Zarr (``.zarr``)
+  or NetCDF (``.nc``) file. Zarr and NetCDF files need ``river_id`` and
+  ``return_period`` dimensions; CSV and Parquet files need a ``river_id`` column
+  and one ``rp<N>`` column per return period (``rp2``, ``rp5``, ...). The river
+  ID may instead be named after ``stream_id_field``. A NetCDF file on S3 or HTTP is
+  downloaded once per process, so Zarr is faster for large remote datasets.
+  GEOGLOWS only. Default None.
+
+.. _json-return_period_variables:
+
+* ``return_period_variables`` (List of Strings, optional): Variables of
+  ``return_period_file`` that hold return period flows. When there are several,
+  the highest is used for each river and return period. Default None, which uses
+  every variable with exactly the ``river_id`` and ``return_period`` dimensions:
+  ``gumbel``, ``gumbel_hourly`` and ``gumbel_daily`` for GEOGLOWS.
+
+.. _json-include_fdc:
+
+* ``include_fdc`` (Bool, optional): Whether to add flow duration curve
+  exceedance flows (``p_exceed_0``, ``p_exceed_5``, ... ``p_exceed_100`` and
+  ``p_exceed_1``) to the reanalysis file. GEOGLOWS only. Default True.
+
+.. _json-fdc_file:
+
+* ``fdc_file`` (String, optional): Flow duration curves to take the exceedance
+  flows from, instead of the GEOGLOWS retrospective flow duration curves. Read
+  like ``return_period_file``, with a ``p_exceed`` dimension (exceedance
+  probability in percent) for Zarr and NetCDF, or ``p_exceed_<P>`` columns for
+  CSV and Parquet. It needs all of the exceedances listed under ``include_fdc``.
+  Unlike the GEOGLOWS default, which falls back to computing the curves from the
+  daily retrospective flows when it cannot be read, an ``fdc_file`` that cannot be
+  read is an error. Default None.
+
+.. _json-fdc_variable:
+
+* ``fdc_variable`` (String, optional): Variable of the flow duration curve
+  dataset to use. Default None, which uses ``hourly_annual`` if the dataset has it
+  (as GEOGLOWS does), or else the dataset's only variable with exactly the
+  ``river_id`` and ``p_exceed`` dimensions.
+
+.. _json-reanalysis_storage_options:
+
+* ``reanalysis_storage_options`` (Dictionary, optional): fsspec storage options
+  for a remote ``return_period_file`` or ``fdc_file``, e.g.
+  ``{"profile": "my-aws-profile"}`` for a private S3 bucket. Default None, which
+  reads S3 anonymously.
+
+.. _json-raise_errors_if_river_ids_missing:
+
+* ``raise_errors_if_river_ids_missing`` (Bool, optional): What to do when some
+  river IDs in the domain are not in the return period or flow duration curve
+  dataset, e.g. for a domain that crosses the edge of a regional dataset. When
+  True, raise an error; when False, log a warning and leave those rivers out of
+  the reanalysis file, so it only has the rivers found in every dataset used.
+  Default True.
 
 .. _json-return_periods:
 
@@ -428,6 +547,42 @@ watershed objects in the ``watersheds`` array to run them in batch mode.
 .. _json-fldpln_max_depth:
 
 * ``fldpln_max_depth`` (Float, optional): Maximum FLDPLN depth. Default 25.0.
+
+.. _json-fldpln_max_drop_below_source:
+
+* ``fldpln_max_drop_below_source`` (Float, optional): Leave out of the FLDPLN
+  library the floodplain cells more than a segment's maximum depth plus this
+  many meters below the stream pixel that floods them. FLDPLN charges nothing
+  for a downhill step, so every stream pixel reaches the whole slope beneath
+  it, and on alluvial fans and bajadas those cells are most of
+  the library. The flood mapper discards them anyway, keeping a cell only
+  while it is no more than the stream pixel's depth plus
+  ``FLDPLN_Max_Drop_Below_Source`` (in ``floodmap_args``) below it, and that
+  depth comes from the same VDT as the segment's maximum depth, smoothed along
+  the stream. Set this a few meters more than ``FLDPLN_Max_Drop_Below_Source``
+  and the maps do not change: on a desert tile, 4 m more cut the library from
+  213 million rows to 10 million, and peak memory from 18.7 GB to 2.3 GB, with
+  every return period map identical, while equal values changed under 0.1% of
+  the wet cells. Cells left out do not count toward
+  ``fldpln_max_cells_per_segment``. Default None, which keeps them all.
+
+.. _json-fldpln_max_cells_per_segment:
+
+* ``fldpln_max_cells_per_segment`` (Integer, optional): The most floodplain
+  cells (FLDPLN library rows) one stream segment may contribute. On truly flat
+  ground, such as coastal plains, a segment's floodplain spreads level with
+  the stream rather than below it, so ``fldpln_max_drop_below_source`` cannot
+  shrink it, and a few segments can reach millions of cells each. A segment
+  that would exceed this stops at the depth where it fills up instead, exactly
+  as if its maximum depth were that depth, so its maximum depth is found from
+  the terrain rather than from the VDT; the cells it floods at no depth at all
+  are always kept. This bounds memory but is lossy: floods deeper than that
+  depth are mapped only as far as it. On a coastal plain tile pruned with
+  ``fldpln_max_drop_below_source``, 1,000,000 cut peak memory from 6.3 GB to
+  4.6 GB, leaving the 2 and 5 year maps unchanged but losing 0.9% of the 50
+  year and 4.3% of the 100 year wet area; 500,000 cut it to 3.4 GB and lost
+  5.2% and 8.4%. Needs ``fldpln_solver`` ``exact``. Default None, which lets
+  every segment flood to its full maximum depth.
 
 .. _json-fldpln_max_wse_rise:
 
@@ -934,6 +1089,9 @@ Required Inputs
 * ``Source DEM Files`` -> ``source_dems``
 * ``Bounding Box`` -> ``bbox``
 * ``Output Directory`` -> ``output_dir``
+* ``Folder Path Templates`` -> ``folder_paths``
+* ``Short File Names`` -> ``short_file_names``
+* ``File Names`` -> ``file_names``
 
 Key Workflow Switches
 ~~~~~~~~~~~~~~~~~~~~~
@@ -986,6 +1144,12 @@ Advanced Parameters
 * ``Stream Order Lower`` -> ``StrmOrder_Lower``
 * ``Stream Order Upper`` -> ``StrmOrder_Upper``
 * ``Baseflow Threshold`` -> ``q_baseflow_threshold``
+* ``Return Period File`` -> ``return_period_file``
+* ``Return Period Variables`` -> ``return_period_variables``
+* ``Include Flow Duration Curve Exceedances`` -> ``include_fdc``
+* ``Flow Duration Curve File`` -> ``fdc_file``
+* ``Flow Duration Curve Variable`` -> ``fdc_variable``
+* ``Error On River IDs Missing From Flow Datasets`` -> ``raise_errors_if_river_ids_missing``
 * ``Lake Filter JSON`` -> ``lake_filter_json``
 * ``Overwrite Forecast Floodmaps`` -> ``overwrite_floodmaps``
 * ``Remove Old Forecast Files`` -> ``remove_old_forecast_files``

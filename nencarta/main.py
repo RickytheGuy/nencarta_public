@@ -6,7 +6,7 @@ from pathlib import Path
 
 # local imports
 from nencarta.logger import LOG
-from nencarta.workspace import Workspace
+from nencarta.workspace import Workspace, check_workspaces_do_not_share_folders
 from nencarta.pipeline import build_pipeline
 from nencarta.core.enumerations import Mapper
 from nencarta.core.configs import NencartaConfig
@@ -116,6 +116,7 @@ def _make_console_lenient() -> None:
 
 def run_pipeline(workspaces: list[Workspace], executor=None):
     _make_console_lenient()
+    check_workspaces_do_not_share_folders(workspaces)
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
     num_workers = workspaces[0].configs.num_workers

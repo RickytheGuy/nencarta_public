@@ -56,10 +56,16 @@ DEFAULT_CONFIG = {
     "exclude": [],
     "exponent_depth": 0.21,
     "exponent_width": 0.34,
+    "fdc_file": None, # None uses GEOGLOWS' flow duration curves
+    "file_names": None, # None keeps every file's usual name
+    "fdc_variable": None, # None uses GEOGLOWS' hourly_annual, or a dataset's only flow duration curve
     "find_banks_based_on_landcover": True,
+    "folder_paths": None, # None puts every folder in {output_dir}/{name}/{folder}
     "fldpln_dh": 0.5,
     "fldpln_keep_spilling": False,
+    "fldpln_max_cells_per_segment": None, # None lets every segment flood to its full max depth
     "fldpln_max_depth": 25.0,
+    "fldpln_max_drop_below_source": None, # None keeps every floodplain cell below a stream pixel
     "fldpln_max_wse_rise": 0.01,
     "fldpln_min_depth": 0.1,
     "fldpln_parallel": False,
@@ -72,6 +78,7 @@ DEFAULT_CONFIG = {
     "forensic_forecast_date": None,
     "forensic_forecast_hour": None,
     "geoglows_vpu": None,
+    "include_fdc": True,
     "land_cover_cache": [],
     "land_watervalue": 80,
     "lake_filter_json": None,
@@ -101,9 +108,14 @@ DEFAULT_CONFIG = {
     "q_baseflow_threshold": None,
     "quiet": False,
     "raise_errors_if_nothing_in_domain": True,
+    "raise_errors_if_river_ids_missing": True,
     "reanalysis_file": None,
+    "reanalysis_storage_options": None, # None reads S3 anonymously
     "remove_old_forecast_files": False,
+    "return_period_file": None, # None uses GEOGLOWS' return periods
+    "return_period_variables": None, # None uses every variable of river_id and return_period
     "return_periods": [],
+    "short_file_names": False,
     "slope_high_percentile": 75,
     "slope_low_percentile": 25,
     "source_dems": [],

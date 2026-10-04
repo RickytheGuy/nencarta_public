@@ -15,9 +15,11 @@ def get_fist_inputs(workspace: Workspace, flow_file: Path) -> tuple:
     # SEED file for creating a GEOJSON for FIST
     if configs.floodmap_mode == FloodMapMode.FORECAST:
         # There will be only one file being used here for all forecasts
-        SEED_File = workspace.FIST_Folder / f'{workspace.FileName}_Seed.parquet'
+        SEED_File = workspace.file_path(workspace.FIST_Folder, 'Seed', 'parquet')
     elif configs.floodmap_mode == FloodMapMode.USER:
-        SEED_File = workspace.FIST_Folder / f"{workspace.FileName}_{flow_file.name.rsplit('.', 1)[0]}_Seed.parquet"
+        flow_name = flow_file.name.rsplit('.', 1)[0]
+        SEED_File = workspace.file_path(workspace.FIST_Folder, 'Seed', 'parquet', suffix=f"_{flow_name}",
+                                        legacy=f"{workspace.FileName}_{flow_name}_Seed.parquet")
 
     if SEED_File.exists() and not configs.overwrite:
         LOG.info(f"Seed file {SEED_File} already exists for domain {workspace.watershed}, skipping FIST GeoJSON generation.")
@@ -35,16 +37,18 @@ def get_fist_inputs(workspace: Workspace, flow_file: Path) -> tuple:
         if configs.floodmap_mode == FloodMapMode.FORECAST:
             # if it is a forecast, decifer the name of the forecast based upon the type of streamflow data and the presence of a forensic forecast date, and then name the geojson accordingly
             if configs.forensic_forecast_date is not None and configs.streamflow_source == StreamflowSource.GEOGLOWS:
-                GeoJSON_File = workspace.FIST_Folder / f"{workspace.FileName}_{configs.forensic_forecast_date}_{streamflow_column}.geojson"
+                geojson_suffix = f"_{configs.forensic_forecast_date}_{streamflow_column}"
             elif configs.forensic_forecast_date is None and configs.streamflow_source == StreamflowSource.GEOGLOWS:
-                GeoJSON_File = workspace.FIST_Folder / f"{workspace.FileName}_{configs.forecastdate}_{streamflow_column}.geojson"
+                geojson_suffix = f"_{configs.forecastdate}_{streamflow_column}"
             elif configs.forensic_forecast_date is not None and configs.streamflow_source.is_nwm():
-                GeoJSON_File = workspace.FIST_Folder / f"{workspace.FileName}_{configs.forensic_forecast_date}_{configs.forensic_forecast_hour}_{streamflow_column}.geojson"
+                geojson_suffix = f"_{configs.forensic_forecast_date}_{configs.forensic_forecast_hour}_{streamflow_column}"
             elif configs.forensic_forecast_date is None and configs.streamflow_source.is_nwm():
-                GeoJSON_File = workspace.FIST_Folder / f"{workspace.FileName}_{configs.forecastdate}_{configs.forecasthour}_{streamflow_column}.geojson"
+                geojson_suffix = f"_{configs.forecastdate}_{configs.forecasthour}_{streamflow_column}"
 
         elif configs.floodmap_mode == FloodMapMode.USER:
-            GeoJSON_File = workspace.FIST_Folder / f"{workspace.FileName}_{flow_file.name.rsplit('.', 1)[0]}_{streamflow_column}.geojson"
+            geojson_suffix = f"_{flow_file.name.rsplit('.', 1)[0]}_{streamflow_column}"
+        GeoJSON_File = workspace.file_path(workspace.FIST_Folder, 'FIST', 'geojson', suffix=geojson_suffix,
+                                           legacy=f"{workspace.FileName}{geojson_suffix}.geojson")
 
         # Always regenerate the FIST GeoJSON so reruns pick up CRS and
         # geometry fixes instead of silently reusing a stale output file.
@@ -56,7 +60,7 @@ def get_fist_inputs(workspace: Workspace, flow_file: Path) -> tuple:
             workspace.STRM_File_Clean,
             GeoJSON_File,
             OutProjection,
-            workspace.DEM_StrmShp,
+            workspace.model_StrmShp,
             configs.stream_id_field,
             configs.downstream_id_field,
             SEED_File,

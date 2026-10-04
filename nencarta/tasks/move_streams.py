@@ -1,5 +1,8 @@
 import os
 import math
+import shutil
+import weakref
+import tempfile
 import warnings
 from enum import Enum
 from pathlib import Path
@@ -67,7 +70,9 @@ def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | No
         return None
 
     if workspace.lake_raster.exists() and not workspace.configs.overwrite:
-        lakes = gdal.Open(str(workspace.lake_raster)).ReadAsArray().astype(np.uint8, copy=False)
+        # A boolean mask, as below: curve2flood indexes the DEM with it, and a 0/1 integer array would
+        # index rows 0 and 1 instead of the lake cells
+        lakes = gdal.Open(str(workspace.lake_raster)).ReadAsArray().astype(np.bool_, copy=False)
         return lakes
 
     lakes_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(str(workspace.lake_raster), dem_raster.shape[1], dem_raster.shape[0], 1, gdal.GDT_Byte, options=[f'COMPRESS={workspace.configs.compression}'])
@@ -113,28 +118,67 @@ def whitebox_callback(message: str) -> None:
 class _WhiteboxOutput:
     """Collects WhiteboxTools messages so a failure can report what the tool actually said."""
 
-    def __init__(self) -> None:
+    def __init__(self, log: bool = True) -> None:
         self.lines: list[str] = []
+        self.log = log
 
     def __call__(self, message: str) -> None:
         self.lines.append(message)
-        whitebox_callback(message)
+        if self.log:
+            whitebox_callback(message)
+
+
+def _private_whitebox(plugins: tuple[str, ...] = ()) -> WhiteboxTools:
+    """
+    Return a WhiteboxTools that runs its own copy of whitebox_tools (and of ``plugins``).
+
+    whitebox_tools and its plugins read their settings from a settings.json next to the
+    executable, and whitebox_tools rewrites that file whenever it is passed --compress_rasters or
+    --max_procs, which the Python wrapper does on every tool run. When many processes share one
+    install (a SLURM array, or a process pool), one reads the file while another is half way
+    through rewriting it, and the tool panics with "Failed to parse config_file.json file".
+    A private copy gives each run its own settings.json. Plugins are copied rather than
+    symlinked because a symlinked executable resolves back to the shared install's settings.
+
+    The copy is deleted when the returned object is garbage collected.
+    """
+    wbt = WhiteboxTools()
+    shared_dir = Path(wbt.exe_path)
+    private_dir = Path(tempfile.mkdtemp(prefix="nencarta_whitebox_"))
+    weakref.finalize(wbt, shutil.rmtree, private_dir, True)
+
+    shutil.copy2(shared_dir / wbt.exe_name, private_dir / wbt.exe_name)
+    (private_dir / "plugins").mkdir()
+    for plugin in plugins:
+        exe = plugin + wbt.ext
+        shutil.copy2(shared_dir / "plugins" / exe, private_dir / "plugins" / exe)
+        shutil.copy2(shared_dir / "plugins" / f"{plugin}.json", private_dir / "plugins" / f"{plugin}.json")
+
+    wbt.set_whitebox_dir(str(private_dir))
+    return wbt
 
 
 def _run_whitebox(tool, expected: Path, description: str, *args, **kwargs) -> int:
     """
-    Run one WhiteboxTools tool and fail loudly if it did not produce ``expected``.
+    Run one WhiteboxTools tool and fail loudly if it crashed or did not produce ``expected``.
 
     The WhiteboxTools Python wrapper reads the tool's stdout until EOF and then returns 0
     unconditionally -- it never waits on the child or looks at its exit status. With verbose
     mode off the tool prints nothing at all, so a crash is indistinguishable from success and
-    the only symptom is a missing output file. whitebox_tools.exe does crash: under a process
-    pool it panics (exit code 101) on a minority of runs, and without the child's real exit
-    status there is nothing to tell that apart from a bad input.
+    the only symptom is a missing output file. whitebox_tools.exe does crash: when processes
+    share one install it panics (exit code 101) on a minority of runs (see _private_whitebox),
+    and without the child's real exit status there is nothing to tell that apart from a bad input. Tools that rewrite their input
+    in place leave ``expected`` behind even when they crash, so the exit status is always checked.
+
+    The wrapper also only hands the tool's output to the callback in verbose mode, so with
+    verbose off a panic message is thrown away. Verbose is forced on for the call so the output
+    can be reported on failure; it is only logged if the caller had verbose on.
     """
     import whitebox.whitebox_tools as whitebox_module
 
-    output = _WhiteboxOutput()
+    wbt = tool.__self__
+    was_verbose = wbt.verbose
+    output = _WhiteboxOutput(log=was_verbose)
     launched = []
     original_popen = whitebox_module.Popen
 
@@ -144,13 +188,13 @@ def _run_whitebox(tool, expected: Path, description: str, *args, **kwargs) -> in
         return process
 
     whitebox_module.Popen = recording_popen
+    # Set the attribute directly: set_verbose_mode() also rewrites the shared settings.json
+    wbt.verbose = True
     try:
         code = tool(*args, callback=output, **kwargs)
     finally:
         whitebox_module.Popen = original_popen
-
-    if expected.exists():
-        return code
+        wbt.verbose = was_verbose
 
     exit_codes = []
     for process in launched:
@@ -158,16 +202,47 @@ def _run_whitebox(tool, expected: Path, description: str, *args, **kwargs) -> in
             exit_codes.append(process.wait(timeout=60))
         except Exception as exc:
             exit_codes.append(f"<{type(exc).__name__}>")
+
+    if expected.exists() and all(exit_code == 0 for exit_code in exit_codes):
+        return code
+
     reported = "\n".join(output.lines[-15:]) or "<the tool printed nothing>"
     panicked = " (101 is a Rust panic)" if 101 in exit_codes else ""
-    raise FileNotFoundError(
+    error = RuntimeError if expected.exists() else FileNotFoundError
+    raise error(
         f"{description} was not created successfully: {expected}. "
         f"whitebox_tools exited with {exit_codes}{panicked}. Output:\n{reported}"
     )
 
+# The only GeoTIFF compressions the WhiteboxTools decoder can read
+_WHITEBOX_TIFF_COMPRESSIONS = {"NONE", "PACKBITS", "LZW", "DEFLATE"}
 
-def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float:
-    wbt = WhiteboxTools()
+def _whitebox_readable_dem(dem_path: Path, scratch_path: Path) -> Path:
+    """
+    Return a path to ``dem_path`` that WhiteboxTools can read.
+
+    WhiteboxTools has its own GeoTIFF decoder that only supports PACKBITS, LZW, and DEFLATE,
+    and panics (exit code 101) on anything else. The burned DEM is written with
+    ``configs.compression``, so a ``compression: ZSTD`` run (or a VRT input) would crash the
+    fill step. In that case the DEM is copied to a DEFLATE GeoTIFF at ``scratch_path``.
+    """
+    ds: gdal.Dataset = gdal.Open(str(dem_path))
+    compression = (ds.GetMetadataItem("COMPRESSION", "IMAGE_STRUCTURE") or "NONE").upper()
+    is_geotiff = ds.GetDriver().ShortName == "GTiff"
+    ds = None
+    if is_geotiff and compression in _WHITEBOX_TIFF_COMPRESSIONS:
+        return dem_path
+
+    gdal.Translate(str(scratch_path), str(dem_path), format="GTiff", creationOptions=["COMPRESS=DEFLATE"])
+    return scratch_path
+
+
+def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, fixed_dem: np.ndarray, dem_for_conflation_path: Path) -> float | None:
+    """
+    Derive a stream network from the DEM with WhiteboxTools and return the buffer distance used
+    to conflate it, or None if there are no streams in the domain.
+    """
+    wbt = _private_whitebox(plugins=("repair_stream_vector_topology", "vector_stream_network_analysis"))
     wbt.set_compress_rasters(True)
     wbt.set_verbose_mode(LOG.level <= 20)  # INFO or lower
     wbt.set_max_procs(1)
@@ -176,9 +251,18 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
 
     # Though fill_depressions is more efficient thanfill_depressions_wang_and_liu,
     # fill_depressions_wang_and_liu is more stable and crashes less
-    _run_whitebox(wbt.fill_depressions_wang_and_liu, workspace.filled_dem,
-                f"Filled DEM from {dem_for_conflation_path}",
-                str(dem_for_conflation_path), str(workspace.filled_dem))
+    dem_for_conflation_path = Path(dem_for_conflation_path)
+    whitebox_dem = _whitebox_readable_dem(
+        dem_for_conflation_path,
+        workspace.dem_updated_folder / f"{dem_for_conflation_path.stem}_whitebox.tif"
+    )
+    try:
+        _run_whitebox(wbt.fill_depressions_wang_and_liu, workspace.filled_dem,
+                    f"Filled DEM from {dem_for_conflation_path}",
+                    str(whitebox_dem), str(workspace.filled_dem))
+    finally:
+        if whitebox_dem != dem_for_conflation_path:
+            whitebox_dem.unlink(missing_ok=True)
     _run_whitebox(wbt.d8_pointer, workspace.flowdir, "Flow direction file",
                   str(workspace.filled_dem), str(workspace.flowdir))
     _run_whitebox(wbt.d8_flow_accumulation, workspace.flowacc, "Flow accumulation file",
@@ -192,8 +276,9 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     snap_distance = (0.1/1000) * np.sqrt(dem_raster.native_cell_area / dem_raster.cell_area_km2) # 0.1 m snap distance in DEM units
 
     # Remove the vector rasters, since whitebox will not make some of them if they exist
+    # (only the whitebox vectors' own files: with file_names, another file's name could start with theirs)
     for file in workspace.new_StrmShp.parent.glob("*"):
-        if file.stem.startswith(workspace.new_StrmShp.stem):
+        if file.stem == workspace.new_StrmShp.stem or file.stem.startswith(workspace.new_StrmShp.stem + "_"):
             file.unlink()
 
     _run_whitebox(wbt.extract_streams, workspace.whitebox_stream_raster,
@@ -213,30 +298,35 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
     streams_ds.WriteArray(streams)
     streams_ds = None
 
-    wbt.raster_streams_to_vector(str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp), callback=whitebox_callback)
-    if not workspace.new_StrmShp.exists():
+    # Checked here rather than by whether raster_streams_to_vector wrote a file, so that a crashed
+    # whitebox run is not mistaken for a domain with no streams (e.g. a tile that is all ocean)
+    if not (streams > 0).any():
         if workspace.configs.raise_errors_if_nothing_in_domain:
-            raise FileNotFoundError(f"New stream shapefile {workspace.new_StrmShp} was not created successfully.")
-        else:
-            if workspace.new_StrmShp_matched.exists():
-                workspace.new_StrmShp_matched.unlink()
-            workspace.DEM_StrmShp = workspace.new_StrmShp_matched
-            return
+            raise ValueError(f"Whitebox found no streams in {dem_for_conflation_path}.")
+        if workspace.new_StrmShp_matched.exists():
+            workspace.new_StrmShp_matched.unlink()
+        workspace.DEM_StrmShp = workspace.new_StrmShp_matched
+        return None
 
-    wbt.repair_stream_vector_topology(str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance, callback=whitebox_callback)
-    wbt.run_tool(
+    _run_whitebox(wbt.raster_streams_to_vector, workspace.new_StrmShp, "Whitebox stream vector",
+                  str(workspace.whitebox_stream_raster), str(workspace.flowdir), str(workspace.new_StrmShp))
+    _run_whitebox(wbt.repair_stream_vector_topology, workspace.new_StrmShp, "Repaired whitebox stream vector",
+                  str(workspace.new_StrmShp), str(workspace.new_StrmShp), dist=snap_distance)
+    _run_whitebox(
+        wbt.run_tool,
+        workspace.new_StrmShp,
+        "Whitebox stream network analysis",
         "vector_stream_network_analysis",
         [
             f"--streams='{workspace.new_StrmShp}'",
             f"--output='{workspace.new_StrmShp}'",
             f"--snap={snap_distance}",
         ],
-        callback=whitebox_callback,
     )
 
     # Remove the other vectors that were created
     for file in workspace.new_StrmShp.parent.glob("*"):
-        if file.stem.startswith(workspace.new_StrmShp.stem) and file.stem != workspace.new_StrmShp.stem:
+        if file.stem.startswith(workspace.new_StrmShp.stem + "_"):
             file.unlink()
 
     # Whitebox does not insert the projection into the shapefile, so we need to do that here.
@@ -245,6 +335,12 @@ def derive_hydrography_using_whitebox(workspace: Workspace, dem_raster: Raster, 
         f.write(dem_raster.projection)
 
     return buffer_distance
+
+def _remove_whitebox_streams(workspace: Workspace) -> None:
+    """Remove the stream raster and shapefile, with its sidecars, that whitebox derived the conflated streams from."""
+    workspace.whitebox_stream_raster.unlink(missing_ok=True)
+    for ext in ('.shp', '.shx', '.dbf', '.prj'):
+        workspace.new_StrmShp.with_suffix(ext).unlink(missing_ok=True)
 
 def burn_streams_and_move_streams(workspace: Workspace) -> Path:
     """
@@ -291,6 +387,10 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
     if should_move_streams:
         lakes_gdf = load_lake_gdf(workspace, assigned_dem)
         buffer_distance = derive_hydrography_using_whitebox(workspace, assigned_dem, dem_for_conflation, dem_for_conflation_path)
+        if buffer_distance is None:
+            if configs.minimize_output_files:
+                _remove_whitebox_streams(workspace)
+            return None
 
         streams_gdf = _conflate_streams(
             source_gdf=source_gdf, 
@@ -304,6 +404,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             strm_order_col=configs.StrmOrder_Field,
             drop_multilinestrings=configs.drop_multilinestrings
         )
+        if configs.minimize_output_files:
+            _remove_whitebox_streams(workspace)
         if streams_gdf.empty:
             if configs.raise_errors_if_nothing_in_domain:
                 raise ValueError("No stream geometries remain after conflation.")
@@ -323,7 +425,6 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         Vector.save_any_geom(streams_gdf, workspace.new_StrmShp_matched, **kwargs)
         if configs.minimize_output_files:
             workspace.DEM_StrmShp.unlink()
-            workspace.new_StrmShp.unlink()
         _rasterize_streams(str(workspace.new_stream_raster), str(dem_for_conflation_path), str(workspace.new_StrmShp_matched), attribute=configs.stream_id_field)
 
         final_streams = gdal.Open(str(workspace.new_stream_raster)).ReadAsArray()
@@ -1665,8 +1766,9 @@ def fill_in_missing_branches(
         if fid in final_matches:
             continue
 
+        # A fid fill_in_paths_between_headwaters_and_outlets found no linkno for is in final_matches as None
         descendants = nx.descendants(GB, fid)
-        if not any(d in final_matches for d in descendants):
+        if not any(final_matches.get(d) is not None for d in descendants):
             continue
 
         # First off, do we intersect more than 50% with any source stream?
@@ -1692,7 +1794,7 @@ def fill_in_missing_branches(
 
         # Ensure that this linkno is either upstream of the same linkno of the linkno of the first matched descenant fid
         descendant_fid = next(GB.successors(fid))
-        while descendant_fid not in final_matches:
+        while final_matches.get(descendant_fid) is None:
             descendant_fid = next(GB.successors(descendant_fid))
         descendant_linkno = final_matches[descendant_fid]
         if not (best_linkno in A_reach_sig[descendant_linkno].ancestors or best_linkno == descendant_linkno):
@@ -2169,6 +2271,7 @@ def _create_stream_info_table(
 
     stream_info = pd.DataFrame(output_table,
                  columns=['start_pixel', 'end_pixel', 'length', 'stream_id'])
+    stream_info_file.parent.mkdir(parents=True, exist_ok=True)
     if stream_info_file.suffix.lower() in {".parquet", ".pq"}:
         stream_info.to_parquet(stream_info_file, index=False)
     else:

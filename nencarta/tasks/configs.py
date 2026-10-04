@@ -296,6 +296,7 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
     
     configs = workspace.configs
+    config_ext = 'yaml' if configs.use_yaml else 'txt'
     params = {'#ARC_Inputs': ''}
     if configs.disable_bathymetry:
         if configs.clean_dem:
@@ -339,7 +340,8 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
                 ending_of_forecast_file = f'Forecast_{configs.forecastdate}_{configs.forecasthour}'
             # rename the forecast of the extent raster based upon the type of NWM forecast we are using
             postfix = f"_{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}{ending_of_forecast_file}"
-            config_path = workspace.ARC_Folder / f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{'yaml' if configs.use_yaml else 'txt'}"
+            config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
+                                              legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
         elif configs.streamflow_source == StreamflowSource.GEOGLOWS:
             # create the end of the file name that describes the forecast
             if configs.forensic_forecast_date != None:
@@ -347,39 +349,48 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
             elif configs.forecastdate != None:
                 ending_of_forecast_file = f'Forecast_{configs.forecastdate}'
             postfix = ending_of_forecast_file
-            config_path = workspace.ARC_Folder / f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{'yaml' if configs.use_yaml else 'txt'}"
+            config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
+                                              legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
     elif configs.floodmap_mode == FloodMapMode.USER:
         postfix = f"_{flow_file.stem}"
         if not flow_file.exists():
             LOG.error(f"User provided flow file does not exist: {flow_file}")
             raise FileNotFoundError(f"User provided flow file does not exist: {flow_file}")
-        config_path = workspace.ARC_Folder / f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{configs.floodmap_id}{postfix}.{'yaml' if configs.use_yaml else 'txt'}"
+        config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input', config_ext, 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{configs.floodmap_id}{postfix}.{config_ext}")
     elif configs.floodmap_mode == FloodMapMode.RETURN_PERIOD:
-        postfix = f"_{flow_file.stem.rsplit('_')[-1]}"
-        config_path = workspace.ARC_Folder / f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{postfix}.{'yaml' if configs.use_yaml else 'txt'}"
+        return_period = next((rp for rp in configs.return_periods if workspace.return_period_flow_file(rp) == Path(flow_file)), None)
+        postfix = f"_rp{return_period}" if return_period is not None else f"_{flow_file.stem.rsplit('_')[-1]}"
+        config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input', config_ext, 'source', suffix=postfix,
+                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{postfix}.{config_ext}")
     else:
         LOG.error(f"Invalid floodmap_mode: {configs.floodmap_mode}")
         raise ValueError(f"Invalid floodmap_mode: {configs.floodmap_mode}")
 
-    floodmap_path = workspace.flood_folder / f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.tif"
+    floodmap_path = workspace.file_path(workspace.flood_folder, 'ARC_Flood', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.tif")
     params["OutFLD"] = floodmap_path
 
     if configs.floodmap_args.get('Make_Output_GPKG', DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
-        floodmap_vector = workspace.flood_folder / f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.gpkg"
+        floodmap_vector = workspace.file_path(workspace.flood_folder, 'ARC_Flood', 'gpkg', 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.gpkg")
         params["OutSHP"] = floodmap_vector
     else:
         params["Make_Output_GPKG"] = False
 
     if configs.make_velocity_maps:
-        velocity_path = workspace.flood_folder / f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodVEL{configs.floodmap_id}{postfix}.tif"
+        velocity_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodVEL', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodVEL{configs.floodmap_id}{postfix}.tif")
         params["OutVEL"] = velocity_path
 
     if configs.make_wse_maps:
-        wse_path = workspace.flood_folder / f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodWSE{configs.floodmap_id}{postfix}.tif"
+        wse_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodWSE', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodWSE{configs.floodmap_id}{postfix}.tif")
         params["OutWSE"] = wse_path
 
     if configs.make_depth_maps:
-        depth_path = workspace.flood_folder / f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodDepth{configs.floodmap_id}{postfix}.tif"
+        depth_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodDepth', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
+                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodDepth{configs.floodmap_id}{postfix}.tif")
         params["OutDEP"] = depth_path
 
     LOG.info(f"Writing Mapper config to {config_path}.")

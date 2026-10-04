@@ -37,7 +37,7 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
     if model_config.vdt_exists and not workspace.configs.overwrite and not representative_missing:
         return model_config
     
-    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+    if not workspace.model_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return model_config
     
     LOG.info("Running ARC...")
@@ -57,7 +57,7 @@ def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Mo
     return model_config
 
 def run_mapper_floodmaps(model_config: ModelConfig, workspace: Workspace) -> FloodMapperBulkOutput:
-    if not workspace.DEM_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
+    if not workspace.model_StrmShp.exists() and not workspace.configs.raise_errors_if_nothing_in_domain:
         return FloodMapperBulkOutput([])
     
     LOG.info("Running flood mapper to generate flood maps...")
@@ -93,11 +93,11 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         (workspace.fldpln_library.exists() and not workspace.configs.overwrite):
         return model_config
     
-    if (not workspace.DEM_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()):
+    if (not workspace.model_StrmShp.exists() or not workspace.stream_info_file.exists() or not workspace.VDT_File_Bathy.exists()):
         if not workspace.configs.raise_errors_if_nothing_in_domain:
             return model_config
-        if not workspace.DEM_StrmShp.exists():
-            raise FileNotFoundError(f"Stream shapefile not found at {workspace.DEM_StrmShp}. Cannot build FLDPLN library.")
+        if not workspace.model_StrmShp.exists():
+            raise FileNotFoundError(f"Stream shapefile not found at {workspace.model_StrmShp}. Cannot build FLDPLN library.")
         if not workspace.stream_info_file.exists():
             raise FileNotFoundError(f"Stream info file not found at {workspace.stream_info_file}. Cannot build FLDPLN library.")
         if not workspace.VDT_File_Bathy.exists():
@@ -135,7 +135,9 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         parallel = workspace.configs.fldpln_parallel,
         pbar = not workspace.configs.quiet,
         bg_mask=bg_mask,
-        solver=workspace.configs.fldpln_solver
+        solver=workspace.configs.fldpln_solver,
+        max_drop_below_source=workspace.configs.fldpln_max_drop_below_source,
+        max_cells_per_segment=workspace.configs.fldpln_max_cells_per_segment
     )
 
     return model_config

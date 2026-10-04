@@ -12,7 +12,11 @@ def make_water_mask(workspace: Workspace) -> Path:
     if workspace.bathy_water_mask.exists() and not configs.overwrite:
         LOG.info(f"{workspace.bathy_water_mask} already exists and we aren't making it again...")
         return workspace.bathy_water_mask
-    
+
+    # make_stream_raster() makes no stream raster when there are no streams in the domain
+    if not workspace.DEM_StrmShp.exists() and not configs.raise_errors_if_nothing_in_domain:
+        return None
+
     LOG.info("Creating water mask...")
     workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
     

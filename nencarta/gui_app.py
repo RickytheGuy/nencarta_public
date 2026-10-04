@@ -753,6 +753,17 @@ class FloodSimulationGUI(QMainWindow):
         self._add_multi_files(group, "user_flow_files", "User flow files", _default("user_flow_files"), "CSV Files (*.csv);;All Files (*)")
         self._add_return_periods(group, "return_periods", "Return periods", _default("return_periods"))
         self._add_path(group, "reanalysis_file", "Reanalysis file", "", file_filter="CSV Files (*.csv);;All Files (*)")
+        flow_datasets = "Streamflow Datasets (*.csv *.parquet *.nc);;All Files (*)"
+        self._add_path(group, "return_period_file", "Return period file", "", file_filter=flow_datasets,
+                       tooltip="Local path or s3:// URL to a CSV, Parquet, Zarr or NetCDF file. Empty uses GEOGLOWS.")
+        self._add_line(group, "return_period_variables", "Return period variables", "", parser="str_list",
+                       placeholder="Optional, comma separated")
+        self._add_checkbox(group, "include_fdc", "Include flow duration curve exceedances", _default("include_fdc"))
+        self._add_path(group, "fdc_file", "Flow duration curve file", "", file_filter=flow_datasets,
+                       tooltip="Local path or s3:// URL to a CSV, Parquet, Zarr or NetCDF file. Empty uses GEOGLOWS.")
+        self._add_line(group, "fdc_variable", "Flow duration curve variable", "", placeholder="Optional")
+        self._add_checkbox(group, "raise_errors_if_river_ids_missing", "Error on river IDs missing from flow datasets",
+                           _default("raise_errors_if_river_ids_missing"))
 
         group = self._make_group(run_tab, "Forecast")
         self._add_line(group, "forensic_forecast_date", "Forensic forecast date", "", placeholder="YYYYMMDD")
@@ -835,10 +846,17 @@ class FloodSimulationGUI(QMainWindow):
         group = self._make_group(outputs_tab, "Floodmap Arguments")
         self._add_dict(group, "floodmap_args", "Arguments", DEFAULT_FLOODMAP_ARGS)
 
+        group = self._make_group(outputs_tab, "Folder Paths")
+        self._add_dict(group, "folder_paths", "Folder path templates", {})
+        self._add_checkbox(group, "short_file_names", "Short file names", _default("short_file_names"))
+        self._add_dict(group, "file_names", "File names", {})
+
         group = self._make_group(advanced_tab, "FLDPLN")
         self._add_line(group, "fldpln_dh", "Depth interval", _default("fldpln_dh"), parser="float")
         self._add_line(group, "fldpln_min_depth", "Minimum depth", _default("fldpln_min_depth"), parser="float")
         self._add_line(group, "fldpln_max_depth", "Maximum depth", _default("fldpln_max_depth"), parser="float")
+        self._add_line(group, "fldpln_max_drop_below_source", "Maximum drop below source", "", parser="float", placeholder="Optional")
+        self._add_line(group, "fldpln_max_cells_per_segment", "Maximum cells per segment", "", parser="int", placeholder="Optional")
         self._add_line(group, "fldpln_max_wse_rise", "Maximum WSE rise", _default("fldpln_max_wse_rise"), parser="float")
         self._add_checkbox(group, "fldpln_keep_spilling", "Keep spilling cells", _default("fldpln_keep_spilling"))
         self._add_checkbox(group, "fldpln_parallel", "Run FLDPLN in parallel", _default("fldpln_parallel"))

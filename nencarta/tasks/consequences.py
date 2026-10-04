@@ -67,9 +67,9 @@ def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, work
             LOG.error(f"Error converting to WGS84: {e}, using original file")
             depth_file_wgs84 = depth_file
         
-        # Resolve container path based on workspace output mount (/data)
-        rel_depth_path = depth_file_wgs84.relative_to(workspace.output_dir).as_posix()
-        Container_Hazard_Path = f"/data/{rel_depth_path}"
+        # The depth raster's folder and the Consequences folder are mounted separately (see docker_command
+        # below) because folder_paths can put them anywhere, not just under output_dir
+        Container_Hazard_Path = f"/data/hazard/{depth_file_wgs84.name}"
 
         Forecast_Flood_Depth_Raster_Name = depth_file_wgs84.name
         Consequences_JSON_File = Forecast_Flood_Depth_Raster_Name.replace('.tif', '_consequences.json') 
@@ -79,15 +79,17 @@ def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, work
         LOG.info(f"Creating consequences file {Consequences_JSON_Path}")
         _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path, Consequences_Output_GPKG_File)
         # run the go-consequences Docker container
-        source_dir = workspace.output_dir
-        source_dir = source_dir.resolve().as_posix()
+        hazard_dir = depth_file_wgs84.parent.resolve().as_posix()
+        consequences_dir = workspace.Consequences_Folder.resolve().as_posix()
 
         docker_command = [
             "docker",
             "run",
             "--rm",
             "--mount",
-            f"type=bind,source={source_dir},target=/data",
+            f"type=bind,source={hazard_dir},target=/data/hazard",
+            "--mount",
+            f"type=bind,source={consequences_dir},target=/data/Consequences",
             "go-consequences:latest",
             f"/data/Consequences/{Consequences_JSON_File}",
         ]

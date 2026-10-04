@@ -1,3 +1,5 @@
+import os
+
 from osgeo import gdal
 
 from nencarta.logger import LOG
@@ -13,10 +15,10 @@ def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspac
     
     for file in floodmapper_output.existing_rasters():
         output_file = file.parent / file.name.replace('_buffered_', '_')
-        if output_file == file:
-            LOG.warning(f"Output file {output_file} has the same name as the input file {file}.")
+        # With short_file_names there is no '_buffered_' to drop, so the map is cropped in place
+        in_place = output_file == file
 
-        if output_file.exists() and not configs.overwrite_floodmaps:
+        if not in_place and output_file.exists() and not configs.overwrite_floodmaps:
             LOG.info(f"{output_file} already exists and we aren't making it again...")
             continue
             
@@ -54,6 +56,11 @@ def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspac
                                         height=unbuffered_height,
                                         creationOptions=[f"COMPRESS={configs.compression}", "PREDICTOR=2"]
                                         )
-        gdal.Warp(output_file, file, options=options)
+        target = file.with_name(f"{file.stem}_unbuffering{file.suffix}") if in_place else output_file
+        ds = gdal.Warp(target, file, options=options)
+        ds = None
 
-        file.unlink()  # Remove the buffered file after unbuffering
+        if in_place:
+            os.replace(target, file)
+        else:
+            file.unlink()  # Remove the buffered file after unbuffering

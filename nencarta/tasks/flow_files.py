@@ -12,12 +12,18 @@ from nencarta.workspace import Workspace
 from nencarta.core.floodmapper_output import FloodMapperOutput
 from nencarta import Download_Process_ForecastData as ForecastFlows
 
+def _forecast_flow_file(workspace: Workspace, forecastdate, forecasthour) -> Path:
+    configs = workspace.configs
+    when = f"_{forecastdate}_{forecasthour}" if configs.streamflow_source.is_nwm() else f"_{forecastdate}"
+    return workspace.file_path(workspace.FLOW_Folder, 'forecast', 'csv', suffix=when,
+                               legacy=f"{workspace.FileName}{when}_{configs.streamflow_source}_forecast.csv")
+
 def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
     # now lets download the forecast streamflows
     #Forecast flow data from GeoGLOWS
     # parquet_file_from_geoglows = 'v2-model-table.parquet'     #http://geoglows-v2.s3-website-us-west-2.amazonaws.com/#tables/
     configs = workspace.configs
-    rivids = Vector(workspace.DEM_StrmShp, not workspace.configs.parallel).to_geopandas(columns=[configs.stream_id_field])[configs.stream_id_field].astype(int).tolist()
+    rivids = Vector(workspace.model_StrmShp, not workspace.configs.parallel).to_geopandas(columns=[configs.stream_id_field])[configs.stream_id_field].astype(int).tolist()
     
     forecastdate = configs.forensic_forecast_date
     forecasthour = configs.forensic_forecast_hour
@@ -28,13 +34,8 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
         else:
             forecasthour = None
         
-        if configs.streamflow_source.is_nwm():
-            flow_file_name = f'{workspace.FileName}_{str(forecastdate)}_{forecasthour}_{configs.streamflow_source}_forecast.csv'
-        else:
-            flow_file_name = f'{workspace.FileName}_{str(forecastdate)}_{configs.streamflow_source}_forecast.csv'
-            
         try:
-            ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
+            ForecastFlowFile = _forecast_flow_file(workspace, forecastdate, forecasthour)
             if not ForecastFlowFile.exists() or configs.overwrite:
                 ForecastFlows.Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, ForecastFlowFile, configs.streamflow_source, configs.nwm_api_key)
         except Exception as e:
@@ -46,16 +47,10 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
         for fd in range(0,13):
             for fh in range(0,24):
                 try:
-                    ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
                     forecastdate, forecasthour = ForecastFlows.Get_Date_For_Forecast(fd, fh, configs.streamflow_source) 
                     LOG.info(f"Attempting to download forecast for date: {forecastdate} and hour: {forecasthour}...")
                     # we only need the forecast date for GEOGLOWS, for NWM we need the forecast hour as well               
-                    if configs.streamflow_source.is_nwm():
-                        flow_file_name = f'{workspace.FileName}_{str(forecastdate)}_{forecasthour}_{configs.streamflow_source}_forecast.csv'
-                    else:
-                        flow_file_name = f'{workspace.FileName}_{str(forecastdate)}_{configs.streamflow_source}_forecast.csv'
-
-                    ForecastFlowFile = workspace.FLOW_Folder / flow_file_name
+                    ForecastFlowFile = _forecast_flow_file(workspace, forecastdate, forecasthour)
                     if not ForecastFlowFile.exists() or configs.overwrite:
                         ForecastFlows.Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, ForecastFlowFile, configs.streamflow_source, configs.nwm_api_key)
 
@@ -128,7 +123,7 @@ def make_return_period_flow_file(workspace: Workspace) -> list[Path]:
     
     files = []
     for rp in configs.return_periods:
-        return_period_flow_file = workspace.FLOW_Folder / f'{workspace.FileName}_rp{rp}.csv'
+        return_period_flow_file = workspace.return_period_flow_file(rp)
         files.append(return_period_flow_file)
 
         if return_period_flow_file.exists() and not configs.overwrite:
