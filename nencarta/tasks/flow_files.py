@@ -1,7 +1,6 @@
 import re
 from pathlib import Path
-from functools import cache
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -9,19 +8,24 @@ from nencarta.logger import LOG
 from nencarta.core.vector import Vector
 from nencarta.core.configs import NencartaConfig
 from nencarta.workspace import Workspace
-from nencarta.core.floodmapper_output import FloodMapperOutput
+from nencarta.tasks.configs import flood_map_paths, forecast_postfix
 from nencarta import Download_Process_ForecastData as ForecastFlows
 
+# The date, and for NWM the hour, of the forecast a flood map's name says it was made for
+_FORECAST_IN_NAME = re.compile(r"Forecast_(\d{8})(?:_([^._]+))?")
+
 def _forecast_flow_file(workspace: Workspace, forecastdate, forecasthour) -> Path:
+    """The forecast flow file of one forecast."""
     configs = workspace.configs
     when = f"_{forecastdate}_{forecasthour}" if configs.streamflow_source.is_nwm() else f"_{forecastdate}"
     return workspace.file_path(workspace.FLOW_Folder, 'forecast', 'csv', suffix=when,
                                legacy=f"{workspace.FileName}{when}_{configs.streamflow_source}_forecast.csv")
 
 def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
-    # now lets download the forecast streamflows
-    #Forecast flow data from GeoGLOWS
-    # parquet_file_from_geoglows = 'v2-model-table.parquet'     #http://geoglows-v2.s3-website-us-west-2.amazonaws.com/#tables/
+    """
+    Download the forecast flows of the domain's reaches: the forecast of forensic_forecast_date, or the newest one
+    of the last 12 days. Returns the forecast flow file.
+    """
     configs = workspace.configs
     rivids = Vector(workspace.model_StrmShp, not workspace.configs.parallel).to_geopandas(columns=[configs.stream_id_field])[configs.stream_id_field].astype(int).tolist()
     
@@ -71,45 +75,41 @@ def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
     return [ForecastFlowFile]
 
 def assign_user_flow_files(configs: NencartaConfig,) -> list[Path]:
+    """The user flow files, as paths."""
     flow_files = []
     if configs.user_flow_files:
         for file in configs.user_flow_files:
             flow_files.append(Path(file))
     return flow_files
 
-def remove_old_forecast_files(workspace: Workspace, forecast_floodmap_basename: str):
-    # check and see if forecasts past a specified date exist and if so, delete them
-    for filename in workspace.flood_folder.iterdir():
-        if not filename.name.startswith(forecast_floodmap_basename[:-12]) or not filename.is_file():
+def remove_old_forecast_files(workspace: Workspace) -> None:
+    """
+    Delete this DEM's forecast flood maps, and the files named after them (such as a depth map's WGS84 copy), whose
+    forecast was issued at least age_of_forecast_days ago (UTC). The forecast being mapped is kept.
+    """
+    configs = workspace.configs
+    if not workspace.flood_folder.is_dir():
+        return
+    current = configs.forensic_forecast_date or configs.forecastdate
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=configs.age_of_forecast_days)
+    for path in sorted(workspace.flood_folder.iterdir()):
+        match = _FORECAST_IN_NAME.search(path.name)
+        if match is None or match[1] == current or not path.is_file():
             continue
-
-        # Regular expression to extract the date
-        date_pattern = re.compile(r'\d{8}')
-        match = date_pattern.search(filename.name)
-
-        if not match:
-            LOG.warning("No valid date found in the filename.")
+        try:
+            issued = datetime.strptime(match[1], "%Y%m%d").date()
+        except ValueError:
             continue
-
-        # Extracted date string
-        date_str = match.group()
-        
-        # Convert to datetime object
-        file_date = datetime.strptime(date_str, '%Y%m%d')
-        
-        # Calculate the date
-        date_threshold = datetime.now() - timedelta(days=workspace.configs.age_of_forecast_days)
-        
-        # Check if the file is older than the specified number of days
-        if file_date <= date_threshold:
-            # If the file is as old or older than the specified number of days, delete the file
-            filename.unlink()
-            LOG.info(f"File {filename} has been deleted.")
-        else:
-            LOG.info(f"File {filename} is not old enough to be deleted.")
+        if issued > cutoff:
+            continue
+        # Only this DEM's maps of that forecast, named as the mapper configs name them, and the files named after them
+        flood_maps = flood_map_paths(workspace, forecast_postfix(configs, match[1], match[2]))
+        if any(path.name.startswith(f"{flood_map.stem}{separator}") for flood_map in flood_maps.values() for separator in "._"):
+            path.unlink()
+            LOG.info(f"Deleted the old forecast file {path}.")
 
 def make_return_period_flow_file(workspace: Workspace) -> list[Path]:
-    # make a flow file with return period flows for each reach based on the specified field in the source flow file
+    """Write a flow file for each of return_periods, from the rp<N> column of the flow statistics. GEOGLOWS only."""
     configs = workspace.configs
     if configs.streamflow_source.is_nwm():
         LOG.error("Return period flow file generation is not currently supported for NWM streamflow source.")

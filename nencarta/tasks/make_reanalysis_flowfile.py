@@ -30,6 +30,7 @@ class MissingRiverIdsError(ValueError):
 
 @cache
 def get_daily_ds():
+    """GEOGLOWS' daily retrospective flows."""
     return xr.open_zarr(GEOGLOWS_DAILY_URL, storage_options={'anon': True})
 
 def _storage_options(source: str, configs: NencartaConfig) -> dict | None:
@@ -197,6 +198,10 @@ def _fdc_flows_from_daily(daily_ds: xr.Dataset, river_ids: np.ndarray) -> pd.Dat
     return fdc_df[~fdc_df.index.duplicated(keep='first')]
 
 def _get_geoglows_rp(river_ids: np.ndarray, configs: NencartaConfig) -> pd.DataFrame:
+    """
+    The return period flows (rp<N>) and, with include_fdc, flow duration curve flows (p_exceed_<P>) of each river,
+    plus rp100_premium and p_exceed_0_premium.
+    """
     rp_source = configs.return_period_file or GEOGLOWS_RETURN_PERIODS_URL
     rp_ds = _open_flows(rp_source, "return_period", configs)
     river_ids = _river_ids_in(rp_ds, river_ids, rp_source, configs)
@@ -229,17 +234,15 @@ def _get_geoglows_rp(river_ids: np.ndarray, configs: NencartaConfig) -> pd.DataF
     for col in ['p_exceed_0', 'rp100']:
         if col not in final_df.columns:
             continue
-        # I think this is a better way of buffering the maximum flow
-        # Multiping by 1.5 seems to be a reasonable esimate of the maximum high flow, while adding 50 helps small rivers with tiny
-        # return period 100 flows (close to 0)
-        # Going too big means the VDT has bigger gaps to fill, which can lead to worse performance and less accurate rating curves
+        # A high flow for the rating curves to reach: 1.5 times the flow, plus 50 m3/s for rivers whose 100 year flow
+        # is close to 0. Much higher would leave bigger gaps between the VDT's flows, and less accurate curves.
         final_df[f'{col}_premium'] = (final_df[col] * 1.5) + 50
-        # final_df[f'{col}_premium'] = final_df[col] * 10
 
     final_df = final_df.round(3)
     return final_df
 
 def _get_nwm_rp(comids: list[int], nwm_api_key: str):
+    """The NWM return period flows (rp<N>) of each river from the NWM API, plus rp100_premium."""
     if not nwm_api_key:
         raise ValueError("nwm_api_key is required for NWM return period requests.")
 
@@ -276,8 +279,10 @@ def _get_nwm_rp(comids: list[int], nwm_api_key: str):
 
 def make_reanalysis_file(workspace: Workspace) -> Path:
     """
-    This function generates a CSV file containing base and maximum flow values for each stream segment in the domain, based on the stream geometry and precomputed flow datasets. The flow values are derived from a Return Period (RP) dataset (return_period_file, GEOGLOWS' by default) and, when include_fdc is set, a Flow Duration Curve (FDC) dataset (fdc_file, GEOGLOWS' by default), which are accessed via Dask arrays for efficient computation. The resulting CSV file includes columns for various return periods and exceedance probabilities, as well as "premium" flow values calculated as 1.5 times the base flow plus 50.
-    This is inspired by nencarta's equivalent function.
+    Write the flow statistics of each reach in the domain (workspace.DEM_Reanalsyis_FlowFile): its return period
+    flows and, for GEOGLOWS with include_fdc, its flow duration curve flows, plus the "premium" high flows
+    (1.5 times the flow, plus 50 m3/s). Reaches whose baseflow is below q_baseflow_threshold are left out. When
+    reanalysis_file is given, it is used instead.
     """
     configs = workspace.configs
     if configs.reanalysis_file:

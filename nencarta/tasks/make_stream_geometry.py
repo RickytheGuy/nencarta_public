@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pandas as pd
 import geopandas as gpd
-import shapely
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
@@ -11,8 +10,7 @@ from nencarta.core.vector import Vector
 from nencarta.workspace import Workspace
 
 def _filter_streams_with_lake_json(lake_filter_json: str, stream_df: gpd.GeoDataFrame, rivid_field: str) -> gpd.GeoDataFrame:
-    # First let's remove the stream reaches that are in the stream_ids_in_lake_list
-    # filter out the streams that are in the stream_ids_in_lake_list by using the "LINKNO values in stream_ids_in_lake_list"
+    """Drop the reaches the lake filter JSON lists as inside a lake: {"<lake>": {"inside": [<reach ID>, ...]}}."""
     with open(lake_filter_json, 'r') as f:
         lake_filter: dict[str, dict[str, list[int]]] = json.load(f)
         stream_ids_in_lake_list = []
@@ -24,6 +22,7 @@ def _filter_streams_with_lake_json(lake_filter_json: str, stream_df: gpd.GeoData
     return stream_df[~stream_df[rivid_field].isin(stream_ids_in_lake_list)]
 
 def _filter_streams_by_stream_order(stream_df: gpd.GeoDataFrame, strm_order_field: str, strm_order_low: float | None, strm_order_high: float | None) -> gpd.GeoDataFrame:
+    """Keep the reaches whose stream order is between the two bounds (inclusive). A None bound is no limit."""
     if strm_order_field not in stream_df.columns:
         LOG.warning(f"StrmOrder_Field '{strm_order_field}' not found in stream shapefile; skipping stream order filter.")
         return stream_df
@@ -38,6 +37,11 @@ def _filter_streams_by_stream_order(stream_df: gpd.GeoDataFrame, strm_order_fiel
 
 
 def make_stream_geometry(workspace: Workspace,) -> Path:
+    """
+    Write the domain's streams (workspace.DEM_StrmShp): the reaches of flowline or source_flowlines that overlap the
+    DEM, in the DEM's CRS, less those removed by lake_filter_json, the stream order bounds and exclude. A
+    downstream ID outside the domain becomes -1.
+    """
     configs = workspace.configs
     if workspace.DEM_StrmShp.exists() and not configs.overwrite:
         LOG.info(f"{workspace.DEM_StrmShp} already exists and we aren't making it again...")
@@ -88,12 +92,13 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         gdf = _filter_streams_by_stream_order(gdf, configs.StrmOrder_Field, configs.StrmOrder_Lower, configs.StrmOrder_Upper)
 
 
-    # TODO
     if configs.exclude:
         gdf = gdf[~gdf[configs.stream_id_field].isin(configs.exclude)]
 
     gdf['geometry'] = gdf.geometry.line_merge()
-    if configs.drop_multilinestrings and not configs.mapper.is_curve2flood_fldpln_mapper():
+    # Streams that are moved keep them until the moved network is made: they are relocated, burned and matched with
+    # the rest, and dropped from it then (see move_streams.move_streams_onto_flow_directions)
+    if configs.drop_multilinestrings and not configs.move_stream_network_to_thalweg             and not configs.mapper.is_curve2flood_fldpln_mapper():
         gdf = gdf[gdf.geometry.geom_type != 'MultiLineString'].copy()
 
     if gdf.empty:

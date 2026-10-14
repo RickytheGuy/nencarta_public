@@ -23,6 +23,11 @@ from nencarta.core.model_config import ModelConfig
 from nencarta.core.enumerations import FloodMapMode
 
 def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
+    """
+    Make every input one DEM needs, in order: the DEM, Manning's n, land cover, streams, flow statistics, stream
+    raster, water mask, burned and moved streams, cleaned DEM, flow files, and the ARC and flood mapper configs.
+    Files that exist are reused unless overwrite. Returns the configs.
+    """
     DEM = workspace.assigned_dem
     configs = workspace.configs
     if not DEM.suffix.lower() in {'.tif', '.vrt', '.img', '.tiff', '.btiff', '.bil', '.dem'}:
@@ -38,7 +43,8 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     if not configs.move_stream_network_to_thalweg or not configs.disable_bathymetry:
         make_stream_raster(workspace)
 
-    if configs.clean_dem or not configs.disable_bathymetry or configs.burn_streams or configs.move_stream_network_to_thalweg:
+    if configs.clean_dem or not configs.disable_bathymetry or configs.burn_streams or configs.move_stream_network_to_thalweg \
+            or configs.flood_bathy_mask:
         make_water_mask(workspace)
 
 
@@ -52,7 +58,7 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     if configs.floodmap_mode == FloodMapMode.FORECAST:
         flow_files = make_flow_file_from_forecast(workspace)
         if configs.remove_old_forecast_files:
-            remove_old_forecast_files(workspace, flow_files[0].name)
+            remove_old_forecast_files(workspace)
     elif configs.floodmap_mode == FloodMapMode.USER:
         flow_files = assign_user_flow_files(configs)
     elif configs.floodmap_mode == FloodMapMode.RETURN_PERIOD:

@@ -40,7 +40,7 @@ def _build_options(bbox, vrt, src_proj, out_proj, xres=None, yres=None):
     return gdal.Warp, gdal.WarpOptions(**option_dict)
 
 def _validate_dem_coordinate_system(dem: Path):
-    #Check the coordinate system of the rasters and if they are not in meters or degrees, end with log an error message and stop processing
+    """Whether the DEM's coordinates are in metres or degrees. Logs the reason when they aren't."""
     unit_aliases = {
         'meter': 'meter',
         'meters': 'meter',
@@ -73,6 +73,11 @@ def _validate_dem_coordinate_system(dem: Path):
     return True
 
 def assign_and_validate_dem(workspace: Workspace) -> Path:
+    """
+    Make the DEM the workspace maps (workspace.assigned_dem): the input DEM itself, checked to be in metres or
+    degrees, or a DEM cut from source_dems to bbox, or to the input DEM's extent grown by buffer_distance.
+    project_to_utm projects a cut DEM to its UTM zone.
+    """
     configs = workspace.configs
     if workspace.original_dem == workspace.assigned_dem and workspace.assigned_dem.exists() and not configs.overwrite:
         LOG.info(f"{workspace.assigned_dem} exists")

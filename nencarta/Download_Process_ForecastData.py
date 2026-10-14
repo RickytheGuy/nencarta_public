@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Apr 10 16:47:37 2024
+Download forecast streamflow from GEOGLOWS or the National Water Model, and USGS DEMs where GEOGLOWS forecasts
+flooding.
 
 @author: mike, with a TON of help from Riley
 """
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta, datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import io
 import s3fs
 import requests
 import xarray as xr
 import pandas as pd
-import geopandas as gpd
 
 import nencarta.Download_USGS_DEM as Download_USGS_DEM
 from nencarta.logger import LOG
@@ -29,23 +29,6 @@ NWM_GOOGLE_STORAGE_URL = "https://storage.googleapis.com/national-water-model"
 #Stream Line Data=>  http://geoglows-v2.s3-website-us-west-2.amazonaws.com/#streams/
 #Links to all the Data=>  https://data.geoglows.org/available-data
 
-
-def Get_RIVIDs_From_Shapefile(StrmShpFile):
-    df = gpd.read_file(StrmShpFile)
-
-    #df = df[df['TerminalLink'] == TermLinkNumber]   #This gathers all of the streams that drain to this point.
-    
-    rivids = df['LINKNO'].astype(int).values
-    return rivids
-
-def Get_RIVIDs_From_Terminal_Link(parquet_file_from_geoglows, TermLinkNumber):
-    
-    df = pd.read_parquet(parquet_file_from_geoglows)   #http://geoglows-v2.s3-website-us-west-2.amazonaws.com/#tables/
-
-    df = df[df['TerminalLink'] == TermLinkNumber]   #This gathers all of the streams that drain to this point.
-    
-    rivids = df['LINKNO'].values
-    return rivids
 
 def _normalize_rivids(rivids):
     return pd.Index(pd.Series(rivids).dropna().astype(int).unique())
@@ -270,6 +253,12 @@ def _read_nwm_google_storage_forecast(forecastdate, forecasthour, rivids, stream
     ).reset_index()
 
 def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File_Name, streamflow_source: StreamflowSource, nwm_api_key=None):
+    """
+    Write each river's forecast peak flow to ``CSV_File_Name`` and return it: the median, minimum and maximum,
+    across the ensemble members, of each member's highest flow. NWM forecasts come from the NWM API, or NOAA's
+    public Google Storage bucket if that fails. If no forecast can be read, the retrospective flow on that date is
+    used instead.
+    """
     try:
         if streamflow_source == StreamflowSource.GEOGLOWS:
             LOG.info('Pulling ' + str(len(rivids)) + ' river ids from GeoGLOWS Forecast Bucket')
@@ -400,6 +389,12 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
     return df_max
 
 def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_forecast_date):
+    """
+    Download the USGS 1/3 arc-second DEM tiles, in CONUS, around the rivers of GEOGLOWS VPU ``vpu`` that are
+    forecast to flood (exceed a return period) on ``forensic_forecast_date``, or on the newest forecast of the last
+    week when that is None. Returns the DEM paths. Tiles that don't exist are listed in ``bad_urls.csv`` in
+    ``DEM_save_dir`` and skipped from then on.
+    """
     # Configuration
     ODP_FORECAST_S3_BUCKET_URI = 's3://geoglows-v2-forecast-products'
     ODP_S3_BUCKET_REGION = 'us-west-2'
@@ -474,7 +469,7 @@ def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_fo
     rivids = warning_flag_df['comid'].unique()
 
     # get the latitude and longitude for the comids in the warning flag dataframe
-    parquet_path = f's3://geoglows-v2/tables/package-metadata-table.parquet'
+    parquet_path = 's3://geoglows-v2/tables/package-metadata-table.parquet'
     lat_lon_df = pd.read_parquet(parquet_path, engine='pyarrow', filesystem=s3)
 
     # filter the lat_lon_df using rivids from the warning flags df
@@ -519,24 +514,16 @@ def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_fo
     return DEMs_with_flooding_forecast
     
 
-def Get_RIVID_Values(Riv_Method, parquet_file_from_geoglows, TermLinkNumber, StrmShpFile):
-    
-    if Riv_Method == 'TerminalLink':
-        rivids = Get_RIVIDs_From_Terminal_Link(parquet_file_from_geoglows, TermLinkNumber)
-    
-    if Riv_Method == 'Shapefile':
-        rivids = Get_RIVIDs_From_Shapefile(StrmShpFile)
-    
-    #rivids = [280706358, 280759351]
-    return rivids
-
 def Get_Date_For_Forecast(day_back, hour_back, streamflow_source: StreamflowSource):
+    """
+    Return the date (YYYYMMDD) and hour (HH, or None for GEOGLOWS, whose forecasts are daily) of the forecast
+    issued ``day_back`` days and ``hour_back`` hours before now (UTC), snapped to a cycle the source publishes.
+    """
 
     # get the date and time in UTC
     today = datetime.now(timezone.utc)
-    # today = date.today()
     LOG.info('Current date:  ' + str(today))
-    
+
     new_date = today - timedelta(days=day_back, hours=hour_back)
     LOG.info('Forecast date: ' + str(new_date))
     forecastdate = new_date.strftime("%Y%m%d")
@@ -553,8 +540,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source: StreamflowSour
         h = int(forecasthour) - 2
         if h < 0:
             # roll back a day and wrap hour into prior day
-            base = base - timedelta(days=1)
-            forecastdate = base.strftime("%Y%m%d")
+            forecastdate = (new_date - timedelta(days=1)).strftime("%Y%m%d")
             h += 24
         forecasthour = f"{h:02d}"
 

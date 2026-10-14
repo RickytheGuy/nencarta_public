@@ -8,7 +8,10 @@ from nencarta.workspace import Workspace
 from nencarta.core.floodmapper_output import FloodMapperBulkOutput
 
 def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspace) -> None:
-    """Crop a buffered flood map back to the source DEM extent and remove ocean cells."""
+    """
+    Crop each buffered flood map back to the input DEM's extent (or the bbox, without a DEM). The cropped map
+    replaces the buffered one, named without '_buffered'.
+    """
     configs = workspace.configs
     if not configs.buffer:
         return 
@@ -30,7 +33,6 @@ def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspac
         if workspace.original_dem:
             raster = Raster(workspace.original_dem)
             minx, miny, maxx, maxy = raster.bbox
-            raster.shape
             unbuffered_height, unbuffered_width = raster.shape
         else:
             # Calculate from bbox
@@ -50,8 +52,9 @@ def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspac
             continue
 
         LOG.info(f"Unbuffering flood map {file} to {output_file}...")
+        # GDAL takes (minx, miny, maxx, maxy); giving it maxy first writes the map upside down (south-up)
         options = gdal.WarpOptions(format='GTiff',
-                                        outputBounds=(minx, maxy, maxx, miny),
+                                        outputBounds=(minx, miny, maxx, maxy),
                                         width=unbuffered_width,
                                         height=unbuffered_height,
                                         creationOptions=[f"COMPRESS={configs.compression}", "PREDICTOR=2"]

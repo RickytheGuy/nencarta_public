@@ -1,38 +1,19 @@
 """
 Move a source stream network onto a DEM's D8 flow paths.
 
-FLDPLN, ARC and Curve2Flood all read the stream network off the flow direction raster: FLDPLN walks each reach
-down the D8 pointers, and a reach that leaves its D8 path mid-way stops being one reach. A source network
-(TDX-Hydro, GEOGLOWS, NHD...) was drawn from some other DEM, so its lines drift on and off this DEM's flow
-paths. This module moves every source reach onto the D8 path it follows, keeping its id so the flows keyed by
-that id still apply.
+ARC, Curve2Flood and FLDPLN follow streams along the DEM's flow directions, but a source network (TDX-Hydro,
+GEOGLOWS, NHD, ...) was drawn from another DEM, so its lines drift on and off them. Each source reach is moved
+onto the D8 path it follows, keeping its ID so the flows keyed by that ID still apply:
 
-It works from the source network down, not from a DEM-derived network up:
+1. Each reach is sampled about once a cell, from upstream down, and matched onto the channel cells of the D8
+   network as a hidden Markov model (map matching, Newson & Krumm 2009). The best-fitting stretch is kept; a
+   reach that doesn't follow the DEM at all is left out.
+2. The matched reaches are painted onto the D8 network in flow order, each from its matched start to where the
+   next reach starts. Where two meet without a confluence in the source network, the source network decides
+   which carries on, and otherwise the larger river does.
 
-1. Every source reach is sampled about once a cell, from its upstream end down, and matched onto the D8 network
-   as a hidden Markov model (map matching, Newson & Krumm 2009). The hidden states at a sample are the channel
-   cells near it; a state can only be followed by one downstream of it on the D8 network; and a transition costs
-   however much farther, or shorter, the flow path runs between the two cells than the source line runs between
-   the two samples. The best local alignment is kept, so a reach that only partly follows the DEM keeps the part
-   that does, and a reach that doesn't follow it at all is left out rather than forced somewhere wrong.
-2. The matched reaches are painted onto the D8 network in flow order. A reach runs from its matched start down
-   to where the next reach starts. Where the flow paths of two reaches meet somewhere the source network has
-   no confluence, the source network decides who carries on: a reach downstream of the others in the source
-   network wins, two reaches that the source network joins into a third start that third reach where they
-   meet, and otherwise the larger river wins. A reach that meets no other reach ends where its match ended.
-
-Because every reach is matched on its own, a reach the DEM disagrees with costs only that reach, never the
-basin above it. The consequences, which the alternative of labelling a DEM-derived network did not have:
-
-- Reaches split exactly where the source network splits them, including the many breaks that are not
-  confluences, without having to cut a DEM-derived network first.
-- An endorheic source reach ends where its source line ends, even though a filled DEM routes its flow onwards
-  over the basin's spill point: no reach is downstream of it, so nothing carries its id past its own match.
-- A river leaving the domain, or flowing out through the wrong side of a flat reservoir, is still matched up to
-  where it leaves.
-- Lakes can be cut out: cells inside a lake are never matched and stop a reach that flows into them.
-
-The stream raster is the painted D8 network itself, so every reach is one unbroken D8 path.
+Each reach is matched on its own, so a reach the DEM disagrees with costs only that reach. Reaches split where
+the source network splits them, lakes can cut the network, and every reach is one unbroken D8 path.
 """
 from __future__ import annotations
 
@@ -49,7 +30,7 @@ from osgeo import osr
 
 from nencarta.logger import LOG
 
-# WhiteboxTools D8 pointer codes, mapped to the (row, col) offset of the cell each
+# D8 pointer codes, numbered as WhiteboxTools numbers them, mapped to the (row, col) offset of the cell each
 # code drains into. Curve2Flood's FLDPLN spreader walks the stream info table with
 # this same encoding, so the table has to be built against it.
 D8_OFFSETS = {
@@ -72,18 +53,23 @@ def d8_offset_tables() -> tuple[np.ndarray, np.ndarray]:
 @dataclass
 class ConflationSettings:
     """
-    How the source network is matched onto the D8 network. Distances are in DEM cells, except those named in metres.
+    How the source network is matched onto the D8 network.
 
-    The defaults suit a ~30 m DEM with the source streams burned into it, where the D8 paths and the source lines
-    rarely disagree by more than a cell or two.
+    How far a source line can be from its river, and how far it can stray, are distances on the ground, so they
+    are in metres and mean the same on any DEM; a floor in cells keeps them above what a coarse DEM can resolve.
+    What D8 itself gets wrong -- its staircase paths, and how few cells make a path -- is in cells. The defaults
+    suit the source streams burned into the DEM, where the D8 paths and the source lines rarely disagree by more
+    than a cell or two.
     """
     # A cell is a channel cell, and so a candidate for a source line to match onto, when this much area drains
     # through it. Well below where any source network starts its streams, so that small source headwaters still
     # find a channel to match.
     min_channel_area_km2: float = 0.25
-    # How far from a source sample a channel cell may be and still be a candidate, and how many of the nearest
-    # candidates are kept. The radius grows with the river (see search_radius_per_sqrt_km2).
-    search_radius_cells: float = 5.0
+    # How far from a source sample a channel cell may be and still be a candidate (but at least
+    # min_search_radius_cells), and how many of the nearest candidates are kept. The radius grows with the river
+    # (see search_radius_per_sqrt_km2).
+    search_radius_m: float = 150.0
+    min_search_radius_cells: float = 3.0
     max_candidates: int = 16
     # Wide rivers' centrelines and thalwegs can be far apart: the radius grows by this many metres per square
     # root of drainage area (km2), up to max_search_radius_m. 1.0 gives ~300 m at 100 000 km2.
@@ -91,27 +77,28 @@ class ConflationSettings:
     max_search_radius_m: float = 600.0
     # Sample spacing along a source line, in cells.
     sample_spacing_cells: float = 1.0
-    # A sample's fit to a cell is 1 - (distance / sigma)^2 / 2: positive within ~1.4 sigma.
-    sigma_cells: float = 1.5
+    # A sample's fit to a cell is 1 - (distance / sigma)^2 / 2: positive within ~1.4 sigma. sigma is this share of
+    # the sample's search radius.
+    sigma_per_radius: float = 0.3
     # A transition costs (|D8 path length - source line length| - slack) / beta between consecutive samples.
     beta_cells: float = 1.0
     slack_cells: float = 0.5
-    # How many samples a match may skip in a row (a short stretch where the source line strays off the channel),
-    # and what each skipped sample costs on top of losing its fit.
-    max_gap_samples: int = 6
+    # How long a stretch a match may skip in a row (where the source line strays off the channel), and what each
+    # skipped sample costs on top of losing its fit.
+    max_gap_m: float = 180.0
     gap_penalty: float = 0.25
     # A match must cover at least this many samples, and this fraction of the samples that could have been matched
-    # (inside the domain and outside lakes), to be kept. On real tiles the matches below a quarter are a few
-    # hundred metres of a reach that hardly follows the DEM, nearly all in the buffer along the domain's edge.
+    # (inside the domain and outside lakes), to be kept
     min_matched_samples: int = 3
     min_matched_fraction: float = 0.25
     # A reach whose match ends short of the reach the source network sends it to may carry on down its D8 path to
     # reach it, for at most this far. Covers the gap left by a short reach that could not be matched, and a
     # tributary the DEM routes alongside the main stem before the two meet.
     max_extension_m: float = 3000.0
-    # A reach whose match ends this close to some other matched reach is joined to it, whatever the source
-    # network says about the two.
-    snap_cells: float = 3.0
+    # A reach whose match ends this close to some other matched reach (but at least min_snap_cells) is joined to
+    # it, whatever the source network says about the two.
+    snap_m: float = 90.0
+    min_snap_cells: float = 2.0
     # Reaches covering fewer cells than this are folded into the reach upstream of them.
     min_reach_cells: int = 2
 
@@ -282,13 +269,13 @@ def _step_lengths(cells: np.ndarray, down: np.ndarray, ncols: int, dx_m: np.ndar
 
 
 @njit(cache=True)
-def _add_inflow(down: np.ndarray, area: np.ndarray, cells: np.ndarray, amount: float) -> None:
-    """Add ``amount`` to the drainage area of each of ``cells`` and of every cell downstream of it, in place."""
+def _add_inflow(down: np.ndarray, area: np.ndarray, cells: np.ndarray, amounts: np.ndarray) -> None:
+    """Add ``amounts[k]`` to the drainage area of ``cells[k]`` and of every cell downstream of it, in place."""
     for k in range(cells.size):
         cell = cells[k]
         steps = 0
         while cell >= 0 and steps < down.size:
-            area[cell] += amount
+            area[cell] += amounts[k]
             cell = down[cell]
             steps += 1
 
@@ -323,17 +310,22 @@ class FlowNetwork:
             LOG.warning(f"The flow direction raster has {cut} cells on flow cycles; they were cut from the network.")
         self.channel_cells = np.empty(0, np.int64)
 
-    def build_channels(self, min_channel_area_km2: float, inflow_cells: np.ndarray | None = None) -> None:
+    def build_channels(self, min_channel_area_km2: float, inflow_cells: np.ndarray | None = None,
+                       inflow_km2: np.ndarray | None = None) -> None:
         """
         Make the cells draining at least ``min_channel_area_km2`` the channel network.
 
         A river flowing in across the edge of the domain drains almost nothing within it where it enters, so the
-        flow path from each of ``inflow_cells`` is counted as draining the threshold area on top of its own.
+        flow path from each of ``inflow_cells`` is counted as draining ``inflow_km2`` (default: the threshold
+        area) on top of its own. The result is ``channel_area_km2``.
         """
         area = self.area_km2
         if inflow_cells is not None and len(inflow_cells):
+            cells = np.asarray(inflow_cells, np.int64)
+            amounts = np.full(cells.size, min_channel_area_km2, np.float32) if inflow_km2 is None else np.asarray(inflow_km2, np.float32)
             area = area.copy()
-            _add_inflow(self.down, area, np.asarray(inflow_cells, np.int64), np.float32(min_channel_area_km2))
+            _add_inflow(self.down, area, cells, amounts)
+        self.channel_area_km2 = area
         self.channel_cells = np.flatnonzero((area >= min_channel_area_km2) & self.valid.ravel())
         self.channel_id = np.full(self.down.size, -1, np.int64)
         self.channel_id[self.channel_cells] = np.arange(self.channel_cells.size)
@@ -380,11 +372,10 @@ def _main_stem(parts: list, outlet_score) -> shapely.LineString:
     One line through a reach drawn in several pieces: from its outlet up the longest way through the pieces,
     drawn from upstream down.
 
-    A reach whose pieces line_merge can't join is usually Y-shaped. TDX-Hydro folds first-order streams into the
-    reach below them, which leaves a quarter of the reaches at the FIM benchmark sites as two headwater branches
-    and the trunk below where they meet. The trunk carries the reach's flow, so it is the part that has to be
-    matched, and the longer branch carries it on upstream; the other branch can't be on the same D8 path. Pieces
-    are joined where their ends touch; ``outlet_score`` ranks the ends, and the highest is the outlet.
+    Such a reach is usually Y-shaped: two headwater branches and the trunk below where they meet (TDX-Hydro folds
+    first-order streams into the reach below). The trunk and its longer branch are matched, since the other branch
+    can't be on the same D8 path. Pieces join where their ends touch; the end ``outlet_score`` ranks highest is
+    the outlet.
     """
     tolerance = 1e-6 * sum(p.length for p in parts)
     ends = [(np.asarray(p.coords[0][:2]), np.asarray(p.coords[-1][:2])) for p in parts]
@@ -638,8 +629,12 @@ def _resample(xs: np.ndarray, ys: np.ndarray, offsets: np.ndarray, spacing: floa
 @njit(cache=True)
 def _find_candidates(rows_f: np.ndarray, cols_f: np.ndarray, usable: np.ndarray, radius_m: np.ndarray,
                      k_max: int, channel_id: np.ndarray, excluded: np.ndarray, nrows: int, ncols: int,
-                     dx_m: np.ndarray, dy_m: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The ``k_max`` nearest channel cells (as channel ids) within ``radius_m`` of each usable sample."""
+                     dx_m: np.ndarray, dy_m: float, area: np.ndarray, min_area: np.ndarray,
+                     max_area: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    The ``k_max`` nearest channel cells (as channel ids) within ``radius_m`` of each usable sample, of those whose
+    ``area`` is within the sample's ``min_area`` and ``max_area``.
+    """
     n = rows_f.size
     cand = np.full((n, k_max), -1, np.int64)
     cand_dist = np.full((n, k_max), np.inf, np.float64)
@@ -657,7 +652,7 @@ def _find_candidates(rows_f: np.ndarray, cols_f: np.ndarray, usable: np.ndarray,
             for c in range(max(c_mid - reach_c, 0), min(c_mid + reach_c + 1, ncols)):
                 cell = r * ncols + c
                 k = channel_id[cell]
-                if k < 0 or excluded[cell]:
+                if k < 0 or excluded[cell] or area[cell] < min_area[s] or area[cell] > max_area[s]:
                     continue
                 d = math.sqrt(((c + 0.5 - cf) * dx_m[r]) ** 2 + ((r + 0.5 - rf) * dy_m) ** 2)
                 if d > radius_m[s]:
@@ -1110,7 +1105,7 @@ def conflate_to_flow_directions(
         flow: FlowNetwork | None = None,
 ) -> ConflationResult:
     """
-    Move ``source_gdf``'s reaches onto the D8 network of ``flowdir`` (WhiteboxTools pointer codes).
+    Move ``source_gdf``'s reaches onto the D8 network of ``flowdir`` (D8 pointer codes, see D8_OFFSETS).
 
     ``source_gdf`` must be in the raster's CRS. Its reaches keep their ids and every other column; each reach's
     line becomes the centres of the D8 cells it was matched onto, from upstream to downstream, and its downstream
@@ -1144,47 +1139,37 @@ def conflate_to_flow_directions(
     stop = np.zeros(nrows * ncols, np.bool_) if lake_mask is None else \
         np.ascontiguousarray(lake_mask, dtype=np.bool_).ravel()
 
-    # Sample each line in pixel space, scaled to metres so the spacing is even on a geographic grid
-    gt = flow.geotransform
-    coords, index = shapely.get_coordinates(source.geometry, return_index=True)
-    cols_f = (coords[:, 0] - gt[0]) / gt[1]
-    rows_f = (coords[:, 1] - gt[3]) / gt[5]
-    dx_mid = float(np.median(flow.dx_m))
-    offsets = np.searchsorted(index, np.arange(n + 1)).astype(np.int64)
-    sx, sy, along, sample_offsets = _resample(cols_f * dx_mid, rows_f * flow.dy_m, offsets,
-                                              settings.sample_spacing_cells * flow.cell_size_m)
-    s_cols = sx / dx_mid
-    s_rows = sy / flow.dy_m
+    spacing_m = settings.sample_spacing_cells * flow.cell_size_m
+    s_rows, s_cols, along, sample_offsets, cell_of_sample, inside = _sample_lines(source.geometry, flow, spacing_m)
     reach_of_sample = np.repeat(np.arange(n), np.diff(sample_offsets))
-
-    inside = (s_rows >= 0) & (s_rows < nrows) & (s_cols >= 0) & (s_cols < ncols)
-    cell_of_sample = np.where(inside, np.floor(s_rows).clip(0, nrows - 1).astype(np.int64) * ncols
-                              + np.floor(s_cols).clip(0, ncols - 1).astype(np.int64), 0)
     usable = inside & flow.valid.ravel()[cell_of_sample] & ~stop[cell_of_sample]
 
-    flow.build_channels(settings.min_channel_area_km2, _inflow_cells(sample_offsets, usable, cell_of_sample))
+    flow.build_channels(settings.min_channel_area_km2,
+                        _inflow_cells(sample_offsets, usable, cell_of_sample, flow)[1])
     if flow.channel_cells.size == 0:
         return empty_result()
 
     # Search wider, and fit looser, along big rivers
     reach_area = np.where(source.area > 0, source.area, 0.0)
     reach_area = np.maximum(reach_area, _approximate_areas(source, flow))
-    radius = np.clip(settings.search_radius_cells * flow.cell_size_m
-                     + settings.search_radius_per_sqrt_km2 * np.sqrt(reach_area),
-                     settings.search_radius_cells * flow.cell_size_m, settings.max_search_radius_m)
-    sigma = settings.sigma_cells * flow.cell_size_m * radius / (settings.search_radius_cells * flow.cell_size_m)
+    base_radius = max(settings.search_radius_m, settings.min_search_radius_cells * flow.cell_size_m)
+    radius = np.clip(base_radius + settings.search_radius_per_sqrt_km2 * np.sqrt(reach_area), base_radius,
+                     max(settings.max_search_radius_m, base_radius))
+    sigma = settings.sigma_per_radius * radius
     sample_radius = radius[reach_of_sample]
     sample_sigma = sigma[reach_of_sample]
 
     cand, cand_dist, count = _find_candidates(s_rows, s_cols, usable, sample_radius, settings.max_candidates,
-                                              flow.channel_id, stop, nrows, ncols, flow.dx_m, flow.dy_m)
+                                              flow.channel_id, stop, nrows, ncols, flow.dx_m, flow.dy_m,
+                                              flow.channel_area_km2, np.zeros(s_rows.size),
+                                              np.full(s_rows.size, np.inf))
     # How much of each reach could have been matched at all: inside the domain and outside lakes
     usable_length = np.bincount(reach_of_sample[usable], minlength=n).astype(np.float64)
     usable &= count > 0
     score, first_sample, last_sample, first_cid, last_cid, matched = _align_reaches(
         sample_offsets, usable, along, cand, cand_dist, count, flow.tin, flow.tout, flow.to_outlet_m, sample_sigma,
-        settings.beta_cells * flow.cell_size_m, settings.slack_cells * flow.cell_size_m, settings.max_gap_samples,
-        settings.gap_penalty)
+        settings.beta_cells * flow.cell_size_m, settings.slack_cells * flow.cell_size_m,
+        max(1, round(settings.max_gap_m / spacing_m)), settings.gap_penalty)
 
     matched_fraction = np.where((matched > 0) & (usable_length > 0),
                                 (last_sample - first_sample + 1) / np.maximum(usable_length, 1), 0.0)
@@ -1195,7 +1180,7 @@ def conflate_to_flow_directions(
 
     claim_end = _extend_ends(start, end, flow.down, flow.channel_id, flow.to_outlet_m, stop, source.ds,
                              source.tin, source.tout, settings.max_extension_m,
-                             settings.snap_cells * flow.cell_size_m)
+                             max(settings.snap_m, settings.min_snap_cells * flow.cell_size_m))
     cells, label, first, last = _paint(start, claim_end, flow.down, flow.channel_id, flow.tin, flow.tout,
                                        flow.to_outlet_m, source.ds, source.tin, source.tout, source.order,
                                        reach_area, score, settings.max_extension_m)
@@ -1216,18 +1201,62 @@ def conflate_to_flow_directions(
     return ConflationResult(streams, raster, fraction)
 
 
-def _inflow_cells(sample_offsets: np.ndarray, usable: np.ndarray, cell_of_sample: np.ndarray) -> np.ndarray:
+def _sample_lines(lines: np.ndarray, flow: FlowNetwork, spacing_m: float):
     """
-    Where water the domain's DEM doesn't drain flows in along a source reach: the first usable sample of each
-    reach that starts outside the domain, on nodata or in a lake.
+    Points every ``spacing_m`` along each line, sampled in pixel space scaled to metres so the spacing is even on
+    a geographic grid. Returns their fractional rows and columns, distance along their line, the offsets of each
+    line's points, the cell under each point, and whether it is inside the grid.
     """
-    cells = []
+    gt = flow.geotransform
+    coords, index = shapely.get_coordinates(lines, return_index=True)
+    cols_f = (coords[:, 0] - gt[0]) / gt[1]
+    rows_f = (coords[:, 1] - gt[3]) / gt[5]
+    dx_mid = float(np.median(flow.dx_m))
+    offsets = np.searchsorted(index, np.arange(lines.size + 1)).astype(np.int64)
+    sx, sy, along, sample_offsets = _resample(cols_f * dx_mid, rows_f * flow.dy_m, offsets, spacing_m)
+    s_cols = sx / dx_mid
+    s_rows = sy / flow.dy_m
+    nrows, ncols = flow.nrows, flow.ncols
+    inside = (s_rows >= 0) & (s_rows < nrows) & (s_cols >= 0) & (s_cols < ncols)
+    cell_of_sample = np.where(inside, np.floor(s_rows).clip(0, nrows - 1).astype(np.int64) * ncols
+                              + np.floor(s_cols).clip(0, ncols - 1).astype(np.int64), 0)
+    return s_rows, s_cols, along, sample_offsets, cell_of_sample, inside
+
+
+def _inflow_cells(sample_offsets: np.ndarray, usable: np.ndarray, cell_of_sample: np.ndarray, flow: FlowNetwork,
+                  max_candidates: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Where water the domain's DEM doesn't drain flows in along a source reach: on each reach that starts outside the
+    domain, on nodata or in a lake, the first usable sample whose D8 path carries it into the domain (see
+    _runs_inward). Near the domain's edge a D8 path often runs straight back out of it, which would lose the
+    inflow. Returns the reaches and their cells.
+    """
+    reaches, cells = [], []
     for r in range(sample_offsets.size - 1):
         a, b = sample_offsets[r], sample_offsets[r + 1]
         ok = np.flatnonzero(usable[a:b])
-        if ok.size and ok[0] > 0:
-            cells.append(cell_of_sample[a + ok[0]])
-    return np.unique(np.asarray(cells, np.int64))
+        if not ok.size or ok[0] == 0:
+            continue
+        candidates = cell_of_sample[a + ok]
+        cell = next((c for c in candidates[:max_candidates] if _runs_inward(flow, int(c))), candidates[0])
+        reaches.append(r)
+        cells.append(cell)
+    return np.asarray(reaches, np.int64), np.asarray(cells, np.int64)
+
+
+def _runs_inward(flow: FlowNetwork, cell: int, min_run: int = 10, depth: int = 20, max_steps: int = 500) -> bool:
+    """
+    Whether the D8 path from ``cell`` goes on for at least ``min_run`` cells and gets ``depth`` cells in from the
+    grid's edge (or goes on for ``max_steps`` cells without ending).
+    """
+    for step in range(max_steps):
+        row, col = divmod(cell, flow.ncols)
+        if step >= min_run and min(row, col, flow.nrows - 1 - row, flow.ncols - 1 - col) >= depth:
+            return True
+        cell = flow.down[cell]
+        if cell < 0:
+            return False
+    return True
 
 
 def _approximate_areas(source: SourceNetwork, flow: FlowNetwork) -> np.ndarray:

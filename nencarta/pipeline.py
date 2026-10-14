@@ -3,6 +3,10 @@ from pipefunc import Pipeline, PipeFunc
 import nencarta.tasks as tasks
 
 def build_pipeline(profile: bool) -> Pipeline:
+    """
+    The steps every workspace runs through: prepare the inputs, run ARC, add the bathymetry to the DEM, build the
+    FLDPLN library, map the floods, crop buffered maps, and write the FIST inputs and consequences.
+    """
     funcs = [
         PipeFunc(
             tasks.prepare_inputs_for_dem,

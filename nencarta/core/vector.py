@@ -15,6 +15,7 @@ from .abc_geo import GISDataSource
 from .geo_cache import LMDBCache
 
 class Vector(GISDataSource, LMDBCache):
+    """A vector file. Its CRS and bounds are cached (see geo_cache)."""
     def __init__(self, filepath: str, use_threads: bool = True):
         self.filepath = Path(filepath).resolve()
         self.use_threads = use_threads
@@ -110,10 +111,7 @@ class Vector(GISDataSource, LMDBCache):
         }
 
     def to_geopandas(self, bbox_epsg_4326: list[float] = None, columns: list[str] = None) -> gpd.GeoDataFrame:
-
-        """
-        Read any geometry file (shapefile, geojson, geoparquet) into a GeoDataFrame. Bbox in 4326.
-        """
+        """Read the file (shapefile, GeoPackage, GeoJSON, GeoParquet, ...), or the part in a bbox (EPSG:4326)."""
         if bbox_epsg_4326 is not None:
             # If bbox is provided, we need to make sure it's in the same CRS as the data. We can check the CRS of the data by reading just the metadata with pyogrio, and then reprojecting the bbox if necessary.
             data_crs = self.projection
@@ -172,7 +170,7 @@ class Vector(GISDataSource, LMDBCache):
 
     @classmethod
     def get_streamlines_in_extent(cls, bounds: tuple[float, float, float, float], streamlines: list[str]) -> list[str]:
-        """Return the stream parquet files whose stored bounds intersect a DEM tile. Bounds should be in EPSG:4326."""
+        """The stream files whose bounds intersect ``bounds`` (EPSG:4326)."""
         streamlines_to_clip = []
         for stream in streamlines:
             if cls._streamline_is_in_dem_bounds(stream, bounds):

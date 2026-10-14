@@ -10,6 +10,10 @@ from nencarta.workspace import Workspace
 gdal.UseExceptions()
 
 def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path, Consequences_Output_GPKG_File):
+    """
+    Write a Go-Consequences config: damage to the National Structure Inventory's structures from a depth raster,
+    written to a GeoPackage. The paths are inside the Docker container.
+    """
     config = {
         "structure_provider_info": {
             "structure_provider_type": "NSIAPI"
@@ -34,6 +38,7 @@ def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path
     return
 
 def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: Workspace) -> list:
+    """The Docker commands that run Go-Consequences on each depth map, reprojected to WGS84 first."""
     if not workspace.configs.estimate_consequences:
         return []
 
@@ -98,6 +103,7 @@ def _get_consequences_tasks(floodmapper_bulk_output: FloodMapperBulkOutput, work
     return tasks
 
 def run_consequences(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: Workspace) -> None:
+    """Estimate flood damage on each depth map with the go-consequences Docker image (estimate_consequences)."""
     consequences_tasks = _get_consequences_tasks(floodmapper_bulk_output, workspace)
     for docker_command in consequences_tasks:
         LOG.info(f"Running consequences estimation with command: {' '.join(docker_command)}")

@@ -1,3 +1,4 @@
+"""The steps of the pipeline (see pipeline.py)."""
 from .assign_dem import assign_and_validate_dem
 from .create_mannings_n import Create_BaseLine_Manning_n_File_ESA
 from .make_land_cover import make_land_cover

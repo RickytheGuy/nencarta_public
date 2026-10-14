@@ -8,10 +8,13 @@ from osgeo import gdal, ogr
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
 
 @njit(cache=True)
 def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """
+    Thin rasterized streams: remove cells that stick out of a stream, then cells that make a reach two cells
+    wide at a bend. ``array`` has a one-cell border of zeros. Returns it and the cells each kind of pass removed.
+    """
     mask = array > 0
     array = np.where(mask, array, 0)
     (RR,CC) = np.where(mask)
@@ -80,7 +83,7 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
     return array, first_pass, second_pass
 
 def _clean_stream_raster(stream_ds: gdal.Dataset) -> None:
-    # Get stream raster
+    """Thin the streams of an open stream raster, in place."""
     shape = (stream_ds.RasterYSize + 2, stream_ds.RasterXSize + 2)
     array = np.zeros(shape, dtype=np.int64)
     array[1:-1, 1:-1] = stream_ds.ReadAsArray()
@@ -93,6 +96,10 @@ def _clean_stream_raster(stream_ds: gdal.Dataset) -> None:
     stream_ds.WriteArray(array[1:-1, 1:-1])
 
 def make_stream_raster(workspace: Workspace) -> Path:
+    """
+    Rasterize the domain's streams onto the DEM's grid (workspace.STRM_File_Clean), each cell holding its reach's
+    ID, and thin them.
+    """
     configs = workspace.configs
     if workspace.STRM_File_Clean.exists() and not configs.overwrite:
         LOG.info(f"{workspace.STRM_File_Clean} already exists and we aren't making it again...")

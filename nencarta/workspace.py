@@ -3,27 +3,23 @@ from pathlib import Path
 from nencarta.core.enumerations import  Mapper, StreamflowSource
 from nencarta.core.configs import NencartaConfig
 
-# whitebox_tools splits its arguments on '=' and strips quotes out of them, so it cannot open a
-# path containing any of these: '=' makes it panic, and quotes make it report a missing file
-WHITEBOX_UNSAFE_PATH_CHARACTERS = ('=', "'", '"')
-
 # The folders a workspace writes to, which 'folder_paths' can move, and where they go by default
 WORKSPACE_FOLDERS = ('DEM', 'ARC_InputFiles', 'FloodMap', 'Bathymetry', 'DEM_Updated', 'STRM', 'LAND',
-                     'FLOW', 'VDT', 'ESA_LC', 'FIST', 'Consequences', 'FlowDirection', 'FLDPLN')
+                     'FLOW', 'VDT', 'FIST', 'Consequences', 'FlowDirection', 'FLDPLN')
 DEFAULT_FOLDER_PATH = '{name}/{folder}'
 
 # What each kind of file is called after its '<source>_<DEM>_' or '<DEM>_' prefix, which 'file_names' can change
 FILE_BLURBS = (
     'dem', 'fixed', 'filled', 'fixed_Clean', 'Clean',
     'flowdir',
-    'StrmShp', 'STRM_Raster', 'STRM_Raster_Clean', 'matched', 'lakes', 'stream_info', 'fldpln_library',
+    'StrmShp', 'StrmShp_relocated', 'STRM_Raster_Clean', 'matched', 'lakes', 'stream_info', 'fldpln_library',
     'LAND_Raster', 'AR_Manning_n_MED',
     'Reanalysis', '2yr_flow_initial', 'rp', 'forecast', 'Flow_COMID_Q',
     'ARC_Input_Bathy', 'ARC_Input_InitialFlood', 'ARC_Input_FloodForecast', 'ARC_Input',
-    'VDT_Database_Initial', 'VDT_Database_Bathy', 'AP_Database_Bathy', 'CurveFile', 'CurveFile_Initial',
+    'VDT_Database_Initial', 'VDT_Database_Bathy', 'AP_Database_Bathy', 'CurveFile_Initial',
     'CurveFile_Bathy', 'XS', 'Representative_XS',
     'water_mask', 'ARC_Bathy', 'FS_Bathy',
-    'ARC_Flood', 'ARC_Flood_Initial', 'ARC_Flood_Bathy', 'ARC_Depth', 'ARC_FloodDepth', 'ARC_FloodWSE', 'ARC_FloodVEL',
+    'ARC_Flood', 'ARC_Flood_Initial', 'ARC_FloodDepth', 'ARC_FloodWSE', 'ARC_FloodVEL',
     'Seed', 'FIST',
 )
 
@@ -46,7 +42,7 @@ def check_workspaces_do_not_share_folders(workspaces: list['Workspace']) -> None
                 )
 
 class Workspace:
-    """Paths and per-DEM state for one watershed processing run."""
+    """The input and output paths for mapping one DEM of a watershed."""
 
     def __init__(self, configs: NencartaConfig, dem: Path | None = None):
         self.configs = configs
@@ -83,7 +79,6 @@ class Workspace:
         self.land_folder = self.folder_path('LAND')
         self.FLOW_Folder = self.folder_path('FLOW')
         self.VDT_Folder = self.folder_path('VDT')
-        self.ESA_LC_Folder = self.folder_path('ESA_LC')
         self.FIST_Folder = self.folder_path('FIST')
         self.Consequences_Folder = self.folder_path('Consequences')
         self.Flow_Direction_Folder = self.folder_path('FlowDirection')
@@ -119,13 +114,12 @@ class Workspace:
         streamflow_source: StreamflowSource = configs.streamflow_source
         self.DEM_StrmShp = self.file_path(self.strm_folder, 'StrmShp', stream_output_ext, 'source',
                                           legacy=f"{streamflow_source}_{self.FileName}_StrmShp.{stream_output_ext}")
+        self.relocated_StrmShp = self.file_path(self.strm_folder, 'StrmShp_relocated', stream_output_ext, 'source')
         self.DEM_Reanalsyis_FlowFile = self.file_path(self.FLOW_Folder, 'Reanalysis', 'csv', 'source',
                                                       legacy=f"{streamflow_source}_{self.FileName}_Reanalysis.csv")
         self.COMID_Q_File = self.file_path(self.FLOW_Folder, '2yr_flow_initial', 'csv')
 
-        # isolating the NWM or GEOGLOWS text in the streamflow_source variable
         strm_source = self.strm_source
-        # these will only vary based upon if they are NWM or GEOGLOWS
         self.ARC_FileName_Bathy = self.file_path(self.ARC_Folder, 'ARC_Input_Bathy', self.config_end, 'source',
                                                  legacy=f"{strm_source}_ARC_Input_{self.FileName}_Bathy.{self.config_end}")
         self.ARC_FileName_for_DEM_Cleaner = self.file_path(self.ARC_Folder, 'ARC_Input_InitialFlood', 'txt', 'source',
@@ -134,7 +128,6 @@ class Workspace:
             self.DEM_File_Clean = self.file_path(dem_updated, 'fixed_Clean', 'tif')
         else:
             self.DEM_File_Clean = self.file_path(dem_updated, 'Clean', 'tif')
-        self.STRM_File = self.file_path(self.strm_folder, 'STRM_Raster', 'tif', 'source')
         self.STRM_File_Clean = self.file_path(self.strm_folder, 'STRM_Raster_Clean', 'tif', 'source')
 
         vdt_ext = configs.vdt_file_extension
@@ -143,7 +136,6 @@ class Workspace:
 
         self.AP_File = self.file_path(self.VDT_Folder, 'AP_Database_Bathy', vdt_ext, 'source')
 
-        self.Curve_File = self.file_path(self.VDT_Folder, 'CurveFile', 'csv', 'source')
         self.Curve_File_Initial = self.file_path(self.VDT_Folder, 'CurveFile_Initial', 'csv', 'source')
         self.Curve_File_Bathy = self.file_path(self.VDT_Folder, 'CurveFile_Bathy', 'csv', 'source')
 
@@ -151,50 +143,29 @@ class Workspace:
         self.Representative_Cross_Section_File = self.file_path(self.VDT_Folder, 'Representative_XS',
                                                                 'parquet' if vdt_ext == 'parquet' else 'csv', 'source')
 
-        # self.LU_and_Streams_Water_Map = self.flood_folder / f"{strm_source}_{self.FileName}_ARC_Flood_Initial.tif"
         self.bathy_water_mask = self.file_path(self.bathy_file_folder, 'water_mask', 'tif', 'source')
-        self.DepthMapFile = self.file_path(self.flood_folder, 'ARC_Depth', 'tif', 'source')
         self.ARC_BathyFile = self.file_path(self.bathy_file_folder, 'ARC_Bathy', 'tif', 'source')
         self.FS_BathyFile = self.file_path(self.bathy_file_folder, 'FS_Bathy', 'tif', 'source')
 
-        self.floodmap_id = configs.floodmap_identifier
-        if self.floodmap_id:
-            self.floodmap_id = f"_{self.floodmap_id}"
-        else:
-            self.floodmap_id = ''
+        self.floodmap_id = configs.floodmap_id
 
+        # The DEM cleaner's initial flood map
         flood_map = f"{strm_source}_{self.FileName}_ARC_Flood{self.floodmap_id}"
-        self.FloodMapFile = self.file_path(self.flood_folder, 'ARC_Flood', 'tif', 'source', suffix=self.floodmap_id)
         self.FloodMapFile_Initial = self.file_path(self.flood_folder, 'ARC_Flood_Initial', 'tif', 'source', suffix=self.floodmap_id,
                                                    legacy=f"{flood_map}_Initial.tif")
         self.FloodMapFile_Initial_SHP = self.file_path(self.flood_folder, 'ARC_Flood_Initial', 'shp', 'source', suffix=self.floodmap_id,
                                                        legacy=f"{flood_map}_Initial.shp")
-        self.FloodMapFile_Bathy = self.file_path(self.flood_folder, 'ARC_Flood_Bathy', 'tif', 'source', suffix=self.floodmap_id,
-                                                 legacy=f"{flood_map}_Bathy.tif")
-        self.FloodMapFile_Bathy_SHP = self.file_path(self.flood_folder, 'ARC_Flood_Bathy', 'shp', 'source', suffix=self.floodmap_id,
-                                                     legacy=f"{flood_map}_Bathy.shp")
-
-        # these variables will have the full specifics of the streamflow source 
-        self.ARC_FileName_FloodForecast = self.file_path(self.ARC_Folder, 'ARC_Input_FloodForecast', 'txt', 'source',
-                                                         legacy=f"{strm_source}_ARC_Input_{self.FileName}_FloodForecast.txt")
-        self.FloodDepthFile = self.file_path(self.flood_folder, 'ARC_FloodDepth', 'tif', 'source', suffix=self.floodmap_id)
-        self.FloodWSEFile = self.file_path(self.flood_folder, 'ARC_FloodWSE', 'tif', 'source', suffix=self.floodmap_id)
-        self.FloodVELFile = self.file_path(self.flood_folder, 'ARC_FloodVEL', 'tif', 'source', suffix=self.floodmap_id)
 
         if configs.mapper == Mapper.CURVE2FLOOD_FLDPLNPY:
             self.setup_fldpln_files()
 
         if configs.file_names or configs.short_file_names:
             self.check_file_paths_are_unique()
-        if configs.move_stream_network_to_thalweg:
-            self.check_whitebox_paths()
 
     def check_file_paths_are_unique(self):
         """
-        Raise if file_names or short_file_names gives two of this workspace's files the same path.
-
-        The DEM is the one file allowed two names: without a buffer or bbox the assigned DEM is the original DEM
-        itself (see setup_dem). Any other file landing on it still raises, since it would overwrite the input.
+        Raise if file_names or short_file_names give two files the same path. Only the DEM may have two names:
+        without a buffer or bbox, the DEM nencarta works on is the input DEM itself.
         """
         owners = {}
         for attr, path in vars(self).items():
@@ -204,45 +175,32 @@ class Workspace:
             if other != attr and {other, attr} != {'original_dem', 'assigned_dem'}:
                 raise ValueError(f"Watershed '{self.watershed}': 'file_names' gives {other} and {attr} the same path, {path}.")
 
-    def check_whitebox_paths(self):
-        """
-        Raise if WhiteboxTools, which moving the stream network to the thalweg runs, would be given
-        a path it cannot open. Checked here so a bad output_dir, name or DEM fails before any processing.
-        """
-        paths = [self.fixed_dem, self.filled_dem, self.flowdir]
-        if not self.configs.burn_streams:
-            # Without burning, whitebox reads the assigned DEM instead of the fixed DEM
-            paths.append(self.assigned_dem)
-
-        for path in paths:
-            path = Path(path).absolute()
-            found = [char for char in WHITEBOX_UNSAFE_PATH_CHARACTERS if char in str(path)]
-            if found:
-                raise ValueError(
-                    f"Watershed '{self.watershed}': WhiteboxTools cannot open {path} because it contains "
-                    f"{' and '.join(repr(char) for char in found)}. Remove "
-                    f"{', '.join(repr(char) for char in WHITEBOX_UNSAFE_PATH_CHARACTERS)} from 'output_dir', "
-                    f"'name' and the DEM path, or set 'move_stream_network_to_thalweg' to False."
-                )
-
     @property
     def model_StrmShp(self) -> Path:
         """
-        The stream network the models run on: the network moved to the thalweg when moving streams,
-        otherwise the source network. Steps after the move should use this rather than
-        DEM_StrmShp, which minimize_output_files deletes once the moved network is written.
+        The stream network the models use: the moved network when moving streams, otherwise the source streams.
+        Use this rather than DEM_StrmShp after the move, since minimize_output_files deletes DEM_StrmShp.
         """
         if self.configs.move_stream_network_to_thalweg:
             return self.new_StrmShp_matched
         return self.DEM_StrmShp
 
     @property
+    def model_dem(self) -> Path:
+        """The DEM ARC runs on: the cleaned DEM with clean_dem, else the burned DEM with burn_streams, else the DEM."""
+        if self.configs.clean_dem:
+            return self.DEM_File_Clean
+        if self.configs.burn_streams:
+            return self.fixed_dem
+        return self.assigned_dem
+
+    @property
     def config_end(self) -> str:
-        """Return the ARC/mapper config extension for this workspace."""
+        """The extension of the ARC and Curve2Flood input files."""
         return 'yaml' if self.configs.use_yaml else 'txt'
 
     def setup_dem_name(self, dem: Path | None):
-        """Resolve the DEM's name and the file name stem used for its outputs."""
+        """Set the DEM's name, and the name its output files start with (FileName)."""
         if dem:
             self.dem_name = Path(dem).stem
         elif self.configs.bbox:
@@ -261,9 +219,8 @@ class Workspace:
 
     def folder_path(self, folder: str) -> Path:
         """
-        Where ``folder``, one of WORKSPACE_FOLDERS, goes: its template in configs.folder_paths, else
-        the 'default' template there, else '{name}/{folder}'. Templates can use {output_dir}, {name}
-        (the watershed name), {dem} (the DEM's name) and {folder}; relative paths are relative to output_dir.
+        Where ``folder`` (one of WORKSPACE_FOLDERS) goes: its template in folder_paths, else the 'default' one,
+        else '{name}/{folder}'. Relative paths are inside output_dir.
         """
         folder_paths = self.configs.folder_paths or {}
         template = str(folder_paths.get(folder, folder_paths.get('default', DEFAULT_FOLDER_PATH)))
@@ -280,13 +237,13 @@ class Workspace:
     def file_path(self, folder: Path, blurb: str, ext: str, prefix: str | None = 'dem', suffix: str = '',
                   legacy: str | None = None) -> Path:
         """
-        A file in ``folder`` named '<prefix><blurb><suffix>.<ext>'. ``blurb``, one of FILE_BLURBS, says what
-        the file is and is what configs.file_names renames; ``suffix`` is the part that varies between files
-        of that kind, like '_rp100'. ``prefix`` is 'source' for '<source>_<FileName>_', 'dem' for
-        '<FileName>_' or None, and configs.short_file_names drops it. ``legacy`` is the name the file had
-        before these options, for files that don't follow that pattern, and is kept unless they change it.
-        An empty name in configs.file_names drops the blurb, naming the file by its suffix alone, like
-        'rp100', or by its blurb if it has no suffix.
+        A file in ``folder`` named '<prefix><blurb><suffix>.<ext>'.
+
+        ``blurb`` (one of FILE_BLURBS) says what the file is, and is the name file_names replaces; an empty
+        replacement leaves just the suffix. ``suffix`` tells files of one kind apart, e.g. '_rp100'. ``prefix``
+        is 'source' for '<source>_<FileName>_', 'dem' for '<FileName>_', or None; short_file_names drops it.
+        ``legacy`` is the usual name of a file that doesn't follow this pattern, used unless file_names or
+        short_file_names changes it.
         """
         renamed = (self.configs.file_names or {}).get(blurb)
         if legacy is not None and renamed is None and not self.configs.short_file_names:
@@ -301,7 +258,7 @@ class Workspace:
         return self.file_path(self.FLOW_Folder, 'rp', 'csv', suffix=str(return_period))
 
     def setup_dem(self, dem: Path | None):
-        """Resolve the assigned working DEM path."""
+        """Set the DEM nencarta works on: the input DEM, or one cut from source DEMs with bbox or buffer."""
         self.original_dem = dem
         if dem and not self.configs.bbox and not self.configs.buffer:
             self.assigned_dem = Path(dem)
@@ -310,7 +267,7 @@ class Workspace:
             self.assigned_dem = self.file_path(self.DEM_folder, 'dem', ext, legacy=f"{self.FileName}.{ext}")
 
     def setup_fldpln_files(self):
-        """Add FLDPLN-specific working files to the workspace."""
+        """Add the FLDPLN library's path."""
         self.fldpln_library = self.file_path(self.FLDPLN_Folder, 'fldpln_library', 'parquet', None)
 
     def __repr__(self):

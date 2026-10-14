@@ -7,84 +7,60 @@ from nencarta.logger import LOG
 from nencarta.core.defaults import DEFAULT_CONFIG, VALID_RETURN_PERIODS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
-def normalize_mapper_name(mapper: str | None) -> str:
-    if mapper is None:
-        return "Curve2Flood-Kernel Weighted"
-    mapper = str(mapper).strip()
-    if mapper == "":
-        return "Curve2Flood-Kernel Weighted"
-    return mapper
+# The reach ID and downstream reach ID attributes of each source's stream networks
+STREAM_ID_FIELDS = {"GEOGLOWS": ("LINKNO", "DSLINKNO"), "NWM": ("COMID", "TOCOMID")}
 
-
-def is_curve2flood_fldpln_mapper(mapper: str | None) -> bool:
-    return normalize_mapper_name(mapper) == "Curve2Flood-FLDPLNpy"
+# The hours each NWM forecast is issued at
+NWM_FORECAST_HOURS = {
+    StreamflowSource.NWM_SHORT_RANGE: tuple(f"{hour:02d}" for hour in range(24)),
+    StreamflowSource.NWM_MEDIUM_RANGE: ("00", "06", "12", "18"),
+    StreamflowSource.NWM_LONG_RANGE: ("00",),
+}
 
 def norm_or_none(path: str):
     return os.path.normpath(path) if path else None
 
-def float_or_none(value):
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid q_baseflow_threshold: {value}") from exc
-
-def get_streamids_from_source(streamflow_source: str):
-    if streamflow_source.upper().startswith("NWM"):
-        return 'COMID', 'TOCOMID'
-    
-    if streamflow_source.upper() == "GEOGLOWS":
-        return 'LINKNO', 'DSLINKNO'
-    
-    LOG.error(f"streamflow_source {streamflow_source} not recognized, please use either 'NWM' or 'GEOGLOWS'")
-    raise ValueError(f"streamflow_source {streamflow_source} not recognized, please use either 'NWM' or 'GEOGLOWS'")
-
 
 class NencartaConfig:
-    """Validated user configuration for a watershed run."""
+    """
+    One watershed's settings: a config dictionary (keys in core/defaults.py), checked, with defaults filled in for
+    missing keys and keys set to None.
+    """
 
     def __init__(self, config_dict: dict):
         self.config_dict = config_dict
         self.setup()
 
-    
     def validate_forecast_hour(self):
-        """Return a zero-padded forecast hour or None."""
-        forensic_forecast_hour = self.get("forensic_forecast_hour")
-        if forensic_forecast_hour:
-            try:
-                forensic_forecast_hour = int(forensic_forecast_hour)
-                if forensic_forecast_hour not in range(0, 24):
-                    raise ValueError("forensic_forecast_hour must be between 0 and 23")
-                forensic_forecast_hour = f"{forensic_forecast_hour:02d}"
-            except ValueError:
-                raise ValueError(f"Invalid forensic_forecast_hour: {forensic_forecast_hour}")
-                
-        return forensic_forecast_hour
+        """Return forensic_forecast_hour as two digits, e.g. '06', or None."""
+        hour = self.get("forensic_forecast_hour")
+        if hour is None or hour == "":
+            return None
+        try:
+            hour = int(hour)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid forensic_forecast_hour: {hour}")
+        if hour not in range(24):
+            raise ValueError(f"Invalid forensic_forecast_hour: {hour}. It must be between 0 and 23.")
+        return f"{hour:02d}"
 
     def validate_forecast_hours(self):
-        """Validate NWM forecast-hour rules for the selected source."""
-        # if the streamflow_source is "NWM_short_range" the forensic_forecast_hour can be between 0 and 23, the forensic_forecast_hour must be provided as a two-digit string
-        short_range_forecast_hours = [f"{i:02d}" for i in range(0, 24)]
-        medium_range_forecast_hours = ["00", "06", "12", "18"]
-        long_range_forecast_hours = ["00"]
-        if self.streamflow_source == StreamflowSource.NWM_SHORT_RANGE and (self.forensic_forecast_hour and self.forensic_forecast_hour not in short_range_forecast_hours):
-            raise ValueError(f"Watershed '{self.watershed_name}' requires 'forensic_forecast_hour' to be between 0 and 23 when 'streamflow_source' is 'NWM_short_range'.")
-        # if the streamflow_source is "NWM_medium_range" the forensic_forecast_hour can be between one of 0, 6, 12, or 18
-        if self.streamflow_source == StreamflowSource.NWM_MEDIUM_RANGE and (self.forensic_forecast_hour and self.forensic_forecast_hour not in medium_range_forecast_hours):
-            raise ValueError(f"Watershed '{self.watershed_name}' requires 'forensic_forecast_hour' to be one of 0, 6, 12, or 18 when 'streamflow_source' is 'NWM_medium_range'.")
-        # if the streamflow_source is "NWM_long_range" the forensic_forecast_hour can be only 0
-        if self.streamflow_source == StreamflowSource.NWM_LONG_RANGE and (self.forensic_forecast_hour and self.forensic_forecast_hour not in long_range_forecast_hours):
-            raise ValueError(f"Watershed '{self.watershed_name}' requires 'forensic_forecast_hour' to be 0 when 'streamflow_source' is 'NWM_long_range'.")
+        """Check forensic_forecast_hour is an hour the selected NWM forecast is issued at."""
+        allowed = NWM_FORECAST_HOURS.get(self.streamflow_source)
+        if self.forensic_forecast_hour and allowed and self.forensic_forecast_hour not in allowed:
+            raise ValueError(
+                f"Watershed '{self.watershed_name}' requires 'forensic_forecast_hour' to be one of "
+                f"{', '.join(allowed)} when 'streamflow_source' is '{self.streamflow_source}'."
+            )
 
     def validate_nwm_api_key(self):
         """Require an API key for NWM sources."""
-        if self.streamflow_source.upper().startswith("NWM") and not self.nwm_api_key:
-            raise ValueError(f"Watershed '{self.watershed_name}' requires 'nwm_api_key' when 'streamflow_source' is NWM.")
+        if self.streamflow_source.is_nwm() and not self.nwm_api_key:
+            raise ValueError(f"Watershed '{self.watershed_name}' requires 'nwm_api_key' (or the NWM_API_KEY "
+                             "environment variable) when 'streamflow_source' is NWM.")
 
     def validate_specified_depths(self):
-        """Validate bathymetry mask depth count for cleaner and non-cleaner runs."""
+        """Check there are as many bathymetry mask depths as the run uses: two with clean_dem, otherwise one."""
         if self.use_specified_depth_for_bathy_mask:
             if not self.specify_depths_for_bathy_mask or not isinstance(self.specify_depths_for_bathy_mask, list) or len(self.specify_depths_for_bathy_mask) not in {1, 2}:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of 1-2 floats when 'use_specified_depth_for_bathy_mask' is True.")
@@ -94,29 +70,20 @@ class NencartaConfig:
                 raise ValueError(f"Watershed '{self.watershed_name}' requires 'specify_depths_for_bathy_mask' as a list of one float when 'clean_dem' is False.")
 
     def validate_forecast_date(self):
-        """Return a valid forensic forecast date string or None."""
-        # check if forensic_forecast_date and forensic_forecast_hour is provided in the watershed dictionary and if not set forensic_forecast_date=None
-        # get forensic forecast date (string like "20231125" or "2023-11-25 06:00:00 UTC")
-        forensic_forecast_date: str = self.get("forensic_forecast_date")
-        if forensic_forecast_date:
+        """Return forensic_forecast_date (YYYYMMDD) or None."""
+        date = self.get("forensic_forecast_date")
+        if not date:
+            return None
+        for date_format in ('%Y%m%d', '%Y-%m-%d %H:%M:%S %Z'):
             try:
-                # First try YYYYMMDD format
-                forensic_forecast_date_dt = datetime.strptime(forensic_forecast_date, '%Y%m%d')
+                datetime.strptime(date, date_format)
+                return date
             except ValueError:
-                try:
-                    # Fallback for full timestamp
-                    forensic_forecast_date_dt = datetime.strptime(forensic_forecast_date, '%Y-%m-%d %H:%M:%S %Z')
-                except ValueError:
-                    raise ValueError(f"Invalid forensic_forecast_date format: {forensic_forecast_date}")
-                
-        else:
-            forensic_forecast_date = None
-            LOG.info("Forensic forecast date not provided; defaulting to None.")
-
-        return forensic_forecast_date
+                pass
+        raise ValueError(f"Invalid forensic_forecast_date format: {date}")
 
     def verify_required_keys(self):
-        """Validate the minimum inputs needed to build workspaces."""
+        """Check for a name, an output folder, a DEM source and a stream network."""
         required_keys = ["name", "output_dir",]
         for key in required_keys:
             if key not in self.config_dict:
@@ -126,8 +93,14 @@ class NencartaConfig:
         if not any(key in self.config_dict for key in ["flowline", "source_flowlines"]):
             raise KeyError(f"Watershed '{self.get('name', 'unknown')}' must have at least one of the following keys: 'flowline', or 'source_flowlines'.")
 
+    def warn_about_unknown_keys(self):
+        """Warn about keys nencarta doesn't use, such as misspelt or retired ones."""
+        unknown = sorted(set(self.config_dict) - set(DEFAULT_CONFIG))
+        if unknown:
+            LOG.warning(f"Watershed '{self.watershed_name}': ignoring unknown keys {unknown}.")
+
     def warn_if_multiple_primary_dems(self):
-        """Warn when both primary DEM input modes are supplied."""
+        """Warn when both dem and dem_dir are given."""
         if self.get_path("dem") and self.get_path("dem_dir"):
             LOG.warning(
                 f"Watershed '{self.watershed_name}' has both 'dem' and 'dem_dir'. "
@@ -136,24 +109,24 @@ class NencartaConfig:
             )
 
     def validate_user_floodmaps(self):
-        """Validate and normalize user-supplied flood map flow files."""
+        """Return the flood map mode and the user flow files, as a list of paths."""
         floodmap_mode = self.get("floodmap_mode", "forecast")
         floodmap_mode = FloodMapMode.from_string(floodmap_mode)
 
         user_flow_files = self.get("user_flow_files", [])
         if isinstance(user_flow_files, str):
             user_flow_files = [user_flow_files]
-            
+
         if floodmap_mode == FloodMapMode.USER and not isinstance(user_flow_files, list):
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}' requires 'user_flow_files' as either a filepath string or a list of file paths when 'floodmap_mode' is 'user'.")
-        
+
         if user_flow_files:
             user_flow_files = [os.path.normpath(f) for f in user_flow_files]
 
         return floodmap_mode, user_flow_files
-    
+
     def validate_bbox(self):
-        """Return a four-value bounding box as floats when provided."""
+        """Return bbox as four floats, or None."""
         bbox = self.get("bbox")
         if bbox:
             if not isinstance(bbox, Sequence) or len(bbox) != 4:
@@ -163,41 +136,40 @@ class NencartaConfig:
             except ValueError:
                 raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has non-numeric values in 'bbox': {bbox}. All coordinates must be convertible to float.")
         return bbox
-    
+
     def validate_return_periods(self):
-        """Validate requested return periods for return-period mode."""
+        """Return the return periods as ints, checked to be ones nencarta has flows for."""
         return_periods = self.get("return_periods")
         if return_periods and self.floodmap_mode == FloodMapMode.RETURN_PERIOD:
-            if isinstance(return_periods, str):
-                return_periods = [return_periods]
-            elif not isinstance(return_periods, Sequence):
+            if isinstance(return_periods, str) or not isinstance(return_periods, Sequence):
                 return_periods = [return_periods]
             try:
                 return_periods = [int(rp) for rp in return_periods]
             except ValueError:
-                raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has non-numeric values in 'return_periods': {return_periods}. All return periods must be convertible to float.")
-        
-            assert all(rp in VALID_RETURN_PERIODS for rp in return_periods), \
-                f"Invalid return periods. Must be a subset of {set(VALID_RETURN_PERIODS)}. Received: {return_periods}"
-            
+                raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has non-numeric values in 'return_periods': {return_periods}. All return periods must be whole numbers.")
+
+            invalid = [rp for rp in return_periods if rp not in VALID_RETURN_PERIODS]
+            if invalid:
+                raise ValueError(f"Invalid return periods {invalid}. Must be a subset of {set(VALID_RETURN_PERIODS)}.")
+
         return return_periods
-        
+
     def get(self, key: str, default=None):
-        """Return a config value, treating None as missing when a default exists."""
+        """Return a copy of a config value, or its default when it is missing or None."""
         if default is None and key in DEFAULT_CONFIG:
             default = DEFAULT_CONFIG[key]
         value = self.config_dict.get(key, default)
         if value is None and default is not None:
             return deepcopy(default)
         return deepcopy(value)
-    
+
     def get_path(self, key: str, default=None):
         """Return a normalized path string or None."""
         value = self.get(key, default)
         return norm_or_none(value)
 
     def get_num_workers(self):
-        """Return the number of workers for parallel processing."""
+        """Return num_workers as a positive int, or None."""
         num_workers = self.get("num_workers")
         if num_workers is None:
             return None
@@ -208,23 +180,23 @@ class NencartaConfig:
         except (TypeError, ValueError):
             raise ValueError(f"Invalid 'num_workers' value: {num_workers}. Must be a positive integer.")
         return num_workers
-        
+
     def setup(self):
-        """Populate validated attributes used by the processing pipeline."""
+        """Check the config and set its values as attributes."""
         self.verify_required_keys()
         self.watershed_name: str = self.get("name")
+        self.warn_about_unknown_keys()
         self.warn_if_multiple_primary_dems()
 
         self.streamflow_source: StreamflowSource = StreamflowSource.from_string(self.get("streamflow_source"))
-        self.stream_id_field = self.get("stream_id_field")
-        self.downstream_id_field = self.get("downstream_id_field")
-        if not self.stream_id_field or not self.downstream_id_field:
-            self.stream_id_field, self.downstream_id_field = get_streamids_from_source(self.streamflow_source)
+        source_id_fields = STREAM_ID_FIELDS["NWM" if self.streamflow_source.is_nwm() else "GEOGLOWS"]
+        self.stream_id_field: str = self.get("stream_id_field") or source_id_fields[0]
+        self.downstream_id_field: str = self.get("downstream_id_field") or source_id_fields[1]
         self.forensic_forecast_date: str | None = self.validate_forecast_date()
-        self.forensic_forecast_hour: int = self.validate_forecast_hour()
+        self.forensic_forecast_hour: str | None = self.validate_forecast_hour()
         self.validate_forecast_hours()
 
-        self.nwm_api_key: str = self.get("nwm_api_key")
+        self.nwm_api_key: str = self.get("nwm_api_key") or os.getenv("NWM_API_KEY")
         self.validate_nwm_api_key()
 
         self.use_specified_depth_for_bathy_mask: bool = self.get("use_specified_depth_for_bathy_mask")
@@ -244,19 +216,21 @@ class NencartaConfig:
             self.dem_filter = "*"
 
         self.move_stream_network_to_thalweg: bool = self.get("move_stream_network_to_thalweg")
-        self.stream_order_threshold: float = float_or_none(self.get("new_strm_threshold_km2"))  # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
-        if self.move_stream_network_to_thalweg and self.stream_order_threshold is None:
-            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'new_strm_threshold_km2' must be specified when moving stream network.")
+        try:
+            self.new_strm_threshold_km2: float = float(self.get("new_strm_threshold_km2"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Watershed '{self.watershed_name}': 'new_strm_threshold_km2' must be a number, "
+                             f"not {self.get('new_strm_threshold_km2')!r}.") from exc
 
         self.mapper: Mapper = Mapper.from_string(self.get('mapper'))
 
         self.streams_as_parquet: bool = self.get("streams_as_parquet")
-        
-        self.floodmap_id: str = self.get('floodmap_identifier')
+
+        # Flood map names end with '_<floodmap_identifier>'
+        self.floodmap_identifier: str = self.get("floodmap_identifier")
+        self.floodmap_id: str = self.floodmap_identifier
         if self.floodmap_id:
-            self.floodmap_id = f"_{self.floodmap_id}"if not self.floodmap_id.startswith("_") else self.floodmap_id
-        else:
-            self.floodmap_id = ''
+            self.floodmap_id = f"_{self.floodmap_id}" if not self.floodmap_id.startswith("_") else self.floodmap_id
 
         self.bbox: tuple[float, ...] = self.validate_bbox()
         self.flowline: str = self.get_path("flowline")
@@ -274,11 +248,13 @@ class NencartaConfig:
         self.disable_bathymetry: bool = self.get("disable_bathymetry")
         self.bathy_use_banks: bool = self.get("bathy_use_banks")
         self.flood_waterlc_and_strm_cells: bool = self.get("flood_waterlc_and_strm_cells")
+        self.flood_bathy_mask: bool = self.get("flood_bathy_mask")
         self.land_watervalue: int = self.get("land_watervalue")
         self.overwrite: bool = self.get("overwrite")
         self.age_of_forecast_days: int = self.get("age_of_forecast_days")
         self.find_banks_based_on_landcover: bool = self.get("find_banks_based_on_landcover")
         self.create_reach_average_curve_file: bool = self.get("create_reach_average_curve_file")
+        self.standard_step: bool = self.get("standard_step")
         self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem")
         self.geoglows_vpu: str = self.get("geoglows_vpu")
         self.specified_bathyflow_field: str = self.get("specified_bathyflow_field")
@@ -305,8 +281,6 @@ class NencartaConfig:
         self.make_depth_maps: bool = self.get("make_depth_maps")
         self.make_velocity_maps: bool = self.get("make_velocity_maps")
         self.make_wse_maps: bool = self.get("make_wse_maps")
-        self.floodmap_identifier: str = self.get("floodmap_identifier")
-        self.new_strm_threshold_km2: float = self.get("new_strm_threshold_km2") # TDX-Hydro uses 5 km2. It makes the conflation step easier if we can match
         self.quiet: bool = self.get("quiet")
         self.source_dems: list = self.get("source_dems")
         self.buffer: bool = self.get("buffer")
@@ -316,6 +290,7 @@ class NencartaConfig:
         self.land_cover_cache: list[str] = self.get("land_cover_cache")
         self.use_parquet: bool = self.get("use_parquet")
         self.use_yaml: bool = self.get("use_yaml")
+        # The date and hour of the newest forecast, once it has been found
         self.forecastdate: str = None
         self.forecasthour: str = None
         self.profile: bool = self.get("profile")
@@ -343,6 +318,7 @@ class NencartaConfig:
         self.fldpln_solver: str = self.get("fldpln_solver")
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
+        self.relocate_misplaced_streams: bool = self.get("relocate_misplaced_streams")
         self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry")
         self.area_m2_field: str = self.get("area_m2_field")
         self.area_km2_field: str = self.get("area_km2_field")
@@ -360,6 +336,13 @@ class NencartaConfig:
         if self.parallel and self.fldpln_parallel:
             LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
             raise ValueError("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
+
+        if not self.make_vdt and not self.make_curvefile:
+            raise ValueError(f"Watershed '{self.watershed_name}': the flood maps need ARC's VDT database or curve file, "
+                             "so 'make_vdt' and 'make_curvefile' can't both be False.")
+        if not self.make_vdt and self.mapper.is_curve2flood_fldpln_mapper():
+            raise ValueError(f"Watershed '{self.watershed_name}': the Curve2Flood-FLDPLNpy mapper needs ARC's VDT "
+                             "database, so 'make_vdt' must be True.")
 
         if self.use_power_laws_for_bathymetry and not all([self.coefficient_depth, self.coefficient_width, self.exponent_depth, self.exponent_width]):
             LOG.error("When 'use_power_laws_for_bathymetry' is True, all of 'coefficient_depth', 'coefficient_width', 'exponent_depth', and 'exponent_width' must be provided.")

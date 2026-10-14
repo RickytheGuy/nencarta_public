@@ -5,8 +5,9 @@ import yaml
 
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
+from nencarta.core.configs import NencartaConfig
 from nencarta.core.defaults import DEFAULT_BATHY_ARGS, DEFAULT_CONFIG, DEFAULT_FLOODMAP_ARGS
-from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.core.enumerations import FloodMapMode, Mapper
 
 def _arc_inputs(dem: Path,
                 stream_raster: Path,
@@ -19,7 +20,7 @@ def _arc_inputs(dem: Path,
                 bathy_args: dict,
                 include_baseflow: bool = True,
                 ):
-    # Keep key names + ordering aligned with the legacy configs produced by main.py.
+    """The input section of an ARC config, with the ARC settings found in ``bathy_args``."""
     params = {
         "#ARC_Inputs": "",
         "DEM_File": dem,
@@ -61,6 +62,7 @@ def _arc_inputs(dem: Path,
     return params
 
 def _fldpln_inputs(workspace: Workspace):
+    """The FLDPLN section of a Curve2Flood config."""
     output = {
         "# FLDPLN_Inputs": "",
         "Flow_Direction_File": workspace.flowdir,
@@ -80,6 +82,10 @@ def _fldpln_inputs(workspace: Workspace):
     return output
 
 def _write_config(config_path: Path, params: dict):
+    """
+    Write an ARC or Curve2Flood config: YAML for a .yaml path, otherwise tab-separated text. Keys starting with
+    '#' are section headers.
+    """
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, 'w') as f:
         if config_path.suffix.lower() in {'.yaml', '.yml'}:
@@ -109,16 +115,39 @@ def _write_config(config_path: Path, params: dict):
                 first_line = False
 
 def _has_required_arc_outputs(workspace: Workspace) -> bool:
-    required_files = [workspace.VDT_File_Bathy]
-    if workspace.Curve_File_Bathy:
-        required_files.append(workspace.Curve_File_Bathy)
-    if workspace.AP_File:
-        required_files.append(workspace.AP_File)
-    if workspace.configs.make_representative_cross_section_file:
-        required_files.append(workspace.Representative_Cross_Section_File)
-    return all(path.exists() for path in required_files)
+    """Whether every output ARC is asked for (VDT, curve file, AP database, representative cross sections) exists."""
+    configs = workspace.configs
+    asked_for = (
+        (workspace.VDT_File_Bathy, configs.make_vdt),
+        (workspace.Curve_File_Bathy, configs.make_curvefile),
+        (workspace.AP_File, configs.make_ap_database),
+        (workspace.Representative_Cross_Section_File, configs.make_representative_cross_section_file),
+    )
+    return all(path.exists() for path, wanted in asked_for if wanted)
+
+def forecast_postfix(configs: NencartaConfig, date: str, hour: str | None) -> str:
+    """The end of the flood map names of the forecast issued on ``date`` (and at ``hour``, for NWM)."""
+    if configs.streamflow_source.is_nwm():
+        return f"_{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}Forecast_{date}_{hour}"
+    return f"Forecast_{date}"
+
+def flood_map_paths(workspace: Workspace, postfix: str) -> dict[str, Path]:
+    """The flood maps whose names end with ``postfix``, by the mapper config key that writes each."""
+    configs = workspace.configs
+    suffix = f"{configs.floodmap_id}{postfix}"
+
+    def path(blurb: str, ext: str) -> Path:
+        return workspace.file_path(workspace.flood_folder, blurb, ext, 'source', suffix=suffix,
+                                   legacy=f"{configs.streamflow_source}_{workspace.FileName}_{blurb}{suffix}.{ext}")
+
+    return {"OutFLD": path('ARC_Flood', 'tif'), "OutSHP": path('ARC_Flood', 'gpkg'), "OutVEL": path('ARC_FloodVEL', 'tif'),
+            "OutWSE": path('ARC_FloodWSE', 'tif'), "OutDEP": path('ARC_FloodDepth', 'tif')}
                 
 def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
+    """
+    Write the config of the DEM cleaner's ARC run (initial rating curves) and, with
+    use_specified_depth_for_bathy_mask, of its initial flood map at the first specified depth.
+    """
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
     workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
@@ -155,6 +184,8 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     
     params["reach_id"] = configs.stream_id_field
     params["downstream_reach_id"] = configs.downstream_id_field
+    if configs.standard_step:
+        params["Standard_Step"] = True
     if configs.use_power_laws_for_bathymetry:
         params["drainage_area_field"] = configs.area_km2_field
         params["coefficient_depth"] = configs.coefficient_depth
@@ -188,6 +219,10 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     return workspace.ARC_FileName_for_DEM_Cleaner
 
 def define_arc_configs(workspace: Workspace,) -> Path:
+    """
+    Write the config of ARC's main run (rating curves and bathymetry), which the flood mapper also reads to put the
+    bathymetry into the DEM. Without bathymetry, nothing is rewritten if ARC's outputs exist.
+    """
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
     workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
@@ -197,23 +232,16 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         LOG.info(f"Domain {workspace.watershed} has required ARC outputs and bathymetry is disabled, skipping ARC.")
         return workspace.ARC_FileName_Bathy
 
-    if configs.clean_dem:
-        dem = workspace.DEM_File_Clean
-    elif configs.burn_streams:
-        dem = workspace.fixed_dem
-    else:
-        dem = workspace.assigned_dem
-
     if configs.move_stream_network_to_thalweg:
         stream_raster = workspace.new_stream_raster
         stream_vector = workspace.new_StrmShp_matched
-    else: 
+    else:
         stream_raster = workspace.STRM_File_Clean
         stream_vector = workspace.DEM_StrmShp
 
 
     params = _arc_inputs(
-        dem=dem,
+        dem=workspace.model_dem,
         stream_raster=stream_raster,
         land_cover=workspace.LAND_File,
         mannings_n_file=workspace.mannings_n_text_file,
@@ -244,6 +272,11 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     params["StrmShp_File"] = stream_vector
     params["Slope_Low_Percentile"] = configs.slope_low_percentile
     params["Slope_High_Percentile"] = configs.slope_high_percentile
+    if configs.standard_step:
+        # ARC links the cross sections down the stream network, so it needs each reach's id and the one below it
+        params["Standard_Step"] = True
+        params["reach_id"] = configs.stream_id_field
+        params["downstream_reach_id"] = configs.downstream_id_field
 
     if not configs.disable_bathymetry:
         params["reach_id"] = configs.stream_id_field
@@ -293,26 +326,24 @@ def define_arc_configs(workspace: Workspace,) -> Path:
     return workspace.ARC_FileName_Bathy
 
 def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
+    """
+    Write the flood mapper's config for one flow file: a forecast, a user flow file or a return period. Its flood
+    maps are named after the flows.
+    """
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
     
     configs = workspace.configs
     config_ext = 'yaml' if configs.use_yaml else 'txt'
     params = {'#ARC_Inputs': ''}
-    if configs.disable_bathymetry:
-        if configs.clean_dem:
-            params["DEM_File"] = workspace.DEM_File_Clean
-        elif configs.burn_streams:
-            params["DEM_File"] = workspace.fixed_dem
-        else:
-            params["DEM_File"] = workspace.assigned_dem
-    else:
-        params["DEM_File"] = workspace.FS_BathyFile
+    params["DEM_File"] = workspace.model_dem if configs.disable_bathymetry else workspace.FS_BathyFile
     params["Stream_File"] = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
     params["LU_Manning_n"] = workspace.mannings_n_text_file
 
     params["# VDT_Output_File_and_CurveFile"] = ""
-    
-    params["Print_VDT_Database"] = workspace.VDT_File_Bathy
+
+    # The mapper reads the VDT when it is given, and otherwise the curve file
+    if configs.make_vdt:
+        params["Print_VDT_Database"] = workspace.VDT_File_Bathy
     if configs.make_curvefile:
         params["Print_Curve_File"] = workspace.Curve_File_Bathy
     
@@ -330,27 +361,17 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         params["Flood_WaterLC_and_STRM_Cells"] = configs.flood_waterlc_and_strm_cells
         params["LU_Raster_SameRes"] = workspace.LAND_File
         params["LAND_WaterValue"] = configs.land_watervalue
+    if configs.flood_bathy_mask:
+        params["Flood_Bathy_Mask"] = True
+        params["BathyWaterMask"] = workspace.bathy_water_mask
 
     if configs.floodmap_mode == FloodMapMode.FORECAST:
-        if configs.streamflow_source.is_nwm():
-            # create the end of the file name that describes the forecast
-            if configs.forensic_forecast_date != None:
-                ending_of_forecast_file = f'Forecast_{configs.forensic_forecast_date}_{configs.forensic_forecast_hour}'
-            elif configs.forecastdate != None:
-                ending_of_forecast_file = f'Forecast_{configs.forecastdate}_{configs.forecasthour}'
-            # rename the forecast of the extent raster based upon the type of NWM forecast we are using
-            postfix = f"_{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}{ending_of_forecast_file}"
-            config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
-                                              legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
-        elif configs.streamflow_source == StreamflowSource.GEOGLOWS:
-            # create the end of the file name that describes the forecast
-            if configs.forensic_forecast_date != None:
-                ending_of_forecast_file = f'Forecast_{configs.forensic_forecast_date}'
-            elif configs.forecastdate != None:
-                ending_of_forecast_file = f'Forecast_{configs.forecastdate}'
-            postfix = ending_of_forecast_file
-            config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
-                                              legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
+        if configs.forensic_forecast_date:
+            postfix = forecast_postfix(configs, configs.forensic_forecast_date, configs.forensic_forecast_hour)
+        else:
+            postfix = forecast_postfix(configs, configs.forecastdate, configs.forecasthour)
+        config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
+                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
     elif configs.floodmap_mode == FloodMapMode.USER:
         postfix = f"_{flow_file.stem}"
         if not flow_file.exists():
@@ -367,31 +388,22 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         LOG.error(f"Invalid floodmap_mode: {configs.floodmap_mode}")
         raise ValueError(f"Invalid floodmap_mode: {configs.floodmap_mode}")
 
-    floodmap_path = workspace.file_path(workspace.flood_folder, 'ARC_Flood', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.tif")
-    params["OutFLD"] = floodmap_path
+    flood_maps = flood_map_paths(workspace, postfix)
+    params["OutFLD"] = flood_maps["OutFLD"]
 
     if configs.floodmap_args.get('Make_Output_GPKG', DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
-        floodmap_vector = workspace.file_path(workspace.flood_folder, 'ARC_Flood', 'gpkg', 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_Flood{configs.floodmap_id}{postfix}.gpkg")
-        params["OutSHP"] = floodmap_vector
+        params["OutSHP"] = flood_maps["OutSHP"]
     else:
         params["Make_Output_GPKG"] = False
 
     if configs.make_velocity_maps:
-        velocity_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodVEL', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodVEL{configs.floodmap_id}{postfix}.tif")
-        params["OutVEL"] = velocity_path
+        params["OutVEL"] = flood_maps["OutVEL"]
 
     if configs.make_wse_maps:
-        wse_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodWSE', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodWSE{configs.floodmap_id}{postfix}.tif")
-        params["OutWSE"] = wse_path
+        params["OutWSE"] = flood_maps["OutWSE"]
 
     if configs.make_depth_maps:
-        depth_path = workspace.file_path(workspace.flood_folder, 'ARC_FloodDepth', 'tif', 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                legacy=f"{configs.streamflow_source}_{workspace.FileName}_ARC_FloodDepth{configs.floodmap_id}{postfix}.tif")
-        params["OutDEP"] = depth_path
+        params["OutDEP"] = flood_maps["OutDEP"]
 
     LOG.info(f"Writing Mapper config to {config_path}.")
     _write_config(config_path, params)

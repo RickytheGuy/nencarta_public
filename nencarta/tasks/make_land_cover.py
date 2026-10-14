@@ -16,6 +16,7 @@ from nencarta.workspace import Workspace
 from nencarta._constants import CACHED_ESA_GRID
 
 def _get_esa_tiles(bbox):
+    """The names of the ESA WorldCover tiles overlapping ``bbox`` (EPSG:4326), e.g. 'N36W120'."""
     if CACHED_ESA_GRID.exists():
         try:
             return set(gpd.read_parquet(CACHED_ESA_GRID, bbox=bbox)['ll_tile'])
@@ -33,6 +34,7 @@ def _get_esa_tiles(bbox):
     return set(grid[grid.intersects(box(*bbox))]['ll_tile'])
 
 def _download_grid_with_retry(url, max_retries=10, wait_seconds=10):
+    """Read the ESA WorldCover tile grid from ``url``, retrying on failure."""
     attempt = 0
     while attempt < max_retries:
         try:
@@ -53,6 +55,10 @@ def _download_grid_with_retry(url, max_retries=10, wait_seconds=10):
 
 def make_land_cover(workspace: Workspace,
                     year: Literal[2020, 2021] = 2021):
+    """
+    Make the land cover raster on the DEM's grid (workspace.LAND_File) from ESA WorldCover tiles, read from
+    land_cover_cache or the ESA bucket. Without tiles (e.g. far out at sea) every cell is tree cover (10).
+    """
     if workspace.LAND_File.exists() and not workspace.configs.overwrite:
         LOG.info(f"Land cover file already exists at {workspace.LAND_File}, skipping generation.")
         return workspace.LAND_File

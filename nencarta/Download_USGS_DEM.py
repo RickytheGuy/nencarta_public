@@ -7,13 +7,7 @@ from .logger import LOG
 USGS_BASE_URL = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current"
 
 def get_dem_filename(lat, lon):
-    """
-    Constructs the filename for the DEM tile based on latitude and longitude.
-    USGS 1/3 arc-second DEM tiles follow a specific naming convention:
-    - 'n' for north latitude, 's' for south latitude
-    - 'e' for east longitude, 'w' for west longitude
-    Example: n47w122.tif for (47°N, 122°W)
-    """
+    """Return the USGS tile name, e.g. 'n47w122', and its file name, 'n47w122.tif', for a latitude and longitude."""
     lat_prefix = "n" if lat >= 0 else "s"
     lon_prefix = "e" if lon >= 0 else "w"
     
@@ -26,9 +20,10 @@ def get_dem_filename(lat, lon):
 
 def download_dem(lat, lon, bad_url_list, save_dir):
     """
-    Downloads the 1/3 arc-second DEM raster file from USGS.
-    Saves the file locally and returns the file path.
-    Skips download if file already exists or if the file returns a 404.
+    Download the USGS 1/3 arc-second DEM tile for ``lat`` and ``lon`` to ``save_dir``, unless it is already there.
+
+    Returns ``(path, file name, bad_url_list)``; the path is None when the download failed. A tile USGS doesn't
+    have (404) is added to ``bad_url_list``, and URLs already in it are skipped.
     """
     lat_long_str, filename = get_dem_filename(lat, lon)
     dem_url = f"{USGS_BASE_URL}/{lat_long_str}/USGS_13_{filename}"
@@ -76,17 +71,3 @@ def download_dem(lat, lon, bad_url_list, save_dir):
         LOG.warning(f"Error downloading {dem_url}: {e}")
 
     return (None, None, bad_url_list)
-
-
-if __name__ == "__main__":
-    # Example: Mount Rainier, WA (46.85°N, -121.75°W)
-    latitude = 37.1862
-    longitude = -86.1000
-
-    latitude = latitude + 1.0
-    longitude = longitude - 1.0
-
-    save_dir = r"C:\Projects\2024_GEOGLOWS\KY_TestCase\DEM"
-    
-    # Download DEM
-    dem_file_path = download_dem(latitude, longitude, save_dir)

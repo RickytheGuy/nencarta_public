@@ -1,3 +1,7 @@
+"""
+The NenCarta GUI: a form with a field for every config key (see core/defaults.py) that runs process_watershed
+and shows its log. Field values are remembered between sessions.
+"""
 # built-in imports
 import io
 import json
@@ -41,6 +45,7 @@ from PyQt5.QtWidgets import (
 # local imports
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.defaults import (
+    CONFIG_OPTIONS,
     DEFAULT_BATHY_ARGS,
     DEFAULT_CONFIG,
     DEFAULT_FLOODMAP_ARGS,
@@ -69,6 +74,10 @@ def _streamflow_label(value):
 
 
 class QtLogStream(io.TextIOBase):
+    """
+    A text stream that sends each line to a Qt signal. A line ending in a carriage return replaces the one before,
+    as progress bars do.
+    """
     def __init__(self, qt_signal):
         super().__init__()
         self.qt_signal = qt_signal
@@ -106,6 +115,7 @@ class QtLogStream(io.TextIOBase):
 
 
 class QtLogHandler(logging.Handler):
+    """A logging handler that sends each message to a Qt signal."""
     def __init__(self, signal):
         super().__init__()
         self.signal = signal
@@ -118,6 +128,7 @@ class QtLogHandler(logging.Handler):
 
 
 class WorkerThread(QThread):
+    """Runs process_watershed in the background, sending its log and any error to the window."""
     finished_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
@@ -178,6 +189,7 @@ class WorkerThread(QThread):
 
 
 class PathPicker(QWidget):
+    """A text box with a Browse button, for a file or folder."""
     def __init__(self, mode="file", default_path="", dialog_title="Select Path", file_filter="All Files (*)"):
         super().__init__()
         self.mode = mode
@@ -220,6 +232,7 @@ class PathPicker(QWidget):
 
 
 class MultiFilePicker(QWidget):
+    """A list of files with Add, Remove and Clear buttons."""
     changed_signal = pyqtSignal()
 
     def __init__(self, default_paths=None, dialog_title="Select Files", file_filter="All Files (*)"):
@@ -295,6 +308,7 @@ class MultiFilePicker(QWidget):
 
 
 class ReturnPeriodPicker(QWidget):
+    """A checkbox for each return period."""
     def __init__(self, selected=None):
         super().__init__()
         selected = {int(value) for value in (selected or [])}
@@ -319,6 +333,7 @@ class ReturnPeriodPicker(QWidget):
 
 
 class DictTable(QWidget):
+    """An editable table of a dictionary's keys and values."""
     def __init__(self, data=None, defaults=None):
         super().__init__()
         self.defaults = dict(defaults or {})
@@ -450,6 +465,12 @@ def _default(key, fallback=""):
     return DEFAULT_CONFIG.get(key, fallback)
 
 
+def _help(key):
+    """The config key's description, shown as its field's tooltip."""
+    option = CONFIG_OPTIONS.get("name" if key == "watershed_name" else key)
+    return option.help if option else None
+
+
 def _split_list(value):
     text = str(value or "").replace(",", "\n")
     return [part.strip() for part in text.splitlines() if part.strip()]
@@ -526,6 +547,7 @@ def _dialog_options(*options):
 
 
 class FloodSimulationGUI(QMainWindow):
+    """The main window: the settings in tabs, a preview of them, and the run's log."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NenCarta")
@@ -643,6 +665,7 @@ class FloodSimulationGUI(QMainWindow):
         row = layout.rowCount()
         label_widget = QLabel(label)
         label_widget.setWordWrap(True)
+        tooltip = tooltip or _help(key)
         if tooltip:
             label_widget.setToolTip(tooltip)
             widget.setToolTip(tooltip)
@@ -655,6 +678,7 @@ class FloodSimulationGUI(QMainWindow):
     def _add_checkbox(self, layout, key, label, default=False, tooltip=None):
         widget = QCheckBox(label)
         widget.setChecked(settings.value(key, default, type=bool))
+        tooltip = tooltip or _help(key)
         if tooltip:
             widget.setToolTip(tooltip)
         row = layout.rowCount()
@@ -735,13 +759,15 @@ class FloodSimulationGUI(QMainWindow):
         self._add_line(group, "bbox", "Bounding box", "", parser="bbox", placeholder="minx, miny, maxx, maxy")
         self._add_checkbox(group, "buffer", "Buffer DEM from source DEMs", _default("buffer"))
         self._add_line(group, "buffer_distance", "Buffer distance", _default("buffer_distance"), parser="float")
-        self._add_checkbox(group, "use_vrt", "Create assigned DEM as VRT", _default("use_vrt"))
+        self._add_checkbox(group, "use_vrt", "Write the cut DEM as a VRT", _default("use_vrt"))
         self._add_checkbox(group, "use_warning_flags_to_download_dem", "Use warning flags to download DEM", _default("use_warning_flags_to_download_dem"))
         self._add_line(group, "dem_filter", "DEM filter", _default("dem_filter"), placeholder="*.tif")
 
         group = self._make_group(inputs_tab, "Flowline Source")
         self._add_path(group, "flowline", "Flowline file", "", file_filter=vector_files)
         self._add_multi_files(group, "source_flowlines", "Source flowline files", _default("source_flowlines"), vector_files)
+        self._add_line(group, "stream_id_field", "Stream ID field", "", placeholder="LINKNO for GEOGLOWS, COMID for NWM")
+        self._add_line(group, "downstream_id_field", "Downstream ID field", "", placeholder="DSLINKNO for GEOGLOWS, TOCOMID for NWM")
 
         group = self._make_group(run_tab, "Core")
         self._add_combo(group, "mapper", "Mapper", Mapper.list_names(), default=_default("mapper"))
@@ -754,22 +780,23 @@ class FloodSimulationGUI(QMainWindow):
         self._add_return_periods(group, "return_periods", "Return periods", _default("return_periods"))
         self._add_path(group, "reanalysis_file", "Reanalysis file", "", file_filter="CSV Files (*.csv);;All Files (*)")
         flow_datasets = "Streamflow Datasets (*.csv *.parquet *.nc);;All Files (*)"
-        self._add_path(group, "return_period_file", "Return period file", "", file_filter=flow_datasets,
-                       tooltip="Local path or s3:// URL to a CSV, Parquet, Zarr or NetCDF file. Empty uses GEOGLOWS.")
+        self._add_path(group, "return_period_file", "Return period file", "", file_filter=flow_datasets)
         self._add_line(group, "return_period_variables", "Return period variables", "", parser="str_list",
                        placeholder="Optional, comma separated")
         self._add_checkbox(group, "include_fdc", "Include flow duration curve exceedances", _default("include_fdc"))
-        self._add_path(group, "fdc_file", "Flow duration curve file", "", file_filter=flow_datasets,
-                       tooltip="Local path or s3:// URL to a CSV, Parquet, Zarr or NetCDF file. Empty uses GEOGLOWS.")
+        self._add_path(group, "fdc_file", "Flow duration curve file", "", file_filter=flow_datasets)
         self._add_line(group, "fdc_variable", "Flow duration curve variable", "", placeholder="Optional")
         self._add_checkbox(group, "raise_errors_if_river_ids_missing", "Error on river IDs missing from flow datasets",
                            _default("raise_errors_if_river_ids_missing"))
+
+        group = self._make_group(run_tab, "Remote Flow Datasets")
+        self._add_dict(group, "reanalysis_storage_options", "Storage options", {})
 
         group = self._make_group(run_tab, "Forecast")
         self._add_line(group, "forensic_forecast_date", "Forensic forecast date", "", placeholder="YYYYMMDD")
         self._add_combo(group, "forensic_forecast_hour", "Forensic forecast hour", [""] + [f"{hour:02d}" for hour in range(24)], default="")
         self._add_spin(group, "age_of_forecast_days", "Forecast age days", _default("age_of_forecast_days"), 1, 365)
-        self._add_combo(group, "geoglows_vpu", "GEOGLOWS VPU", ["", "704", "702", "703", "715", "714", "706", "713", "712", "709"], default="")
+        self._add_combo(group, "geoglows_vpu", "GEOGLOWS VPU", ["", "704", "702", "703", "715", "714", "706", "713", "712", "709"], default="", editable=True)
 
         group = self._make_group(run_tab, "Execution")
         self._add_checkbox(group, "parallel", "Run workspaces in parallel", _default("parallel"))
@@ -783,13 +810,16 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "overwrite", "Overwrite existing products", _default("overwrite"))
         self._add_checkbox(group, "move_stream_network_to_thalweg", "Move stream network to thalweg", _default("move_stream_network_to_thalweg"))
         self._add_checkbox(group, "burn_streams", "Burn streams into DEM", _default("burn_streams"))
-        self._add_checkbox(group, "project_to_utm", "Project everything to UTM", _default("project_to_utm"))
+        self._add_checkbox(group, "relocate_misplaced_streams", "Relocate streams the DEM shows are misplaced", _default("relocate_misplaced_streams"))
+        self._add_checkbox(group, "project_to_utm", "Project the cut DEM to UTM", _default("project_to_utm"))
         self._add_checkbox(group, "streams_as_parquet", "Write streams as parquet", _default("streams_as_parquet"))
-        self._add_checkbox(group, "use_parquet", "Use parquet intermediates", _default("use_parquet"))
+        self._add_checkbox(group, "use_parquet", "Write the FLDPLN stream info table as parquet", _default("use_parquet"))
+        self._add_checkbox(group, "drop_multilinestrings", "Drop reaches drawn in several pieces", _default("drop_multilinestrings"))
+        self._add_checkbox(group, "minimize_output_files", "Delete the source streams after moving them", _default("minimize_output_files"))
         self._add_line(group, "new_strm_threshold_km2", "New stream threshold km2", _default("new_strm_threshold_km2"), parser="float")
         self._add_line(group, "q_baseflow_threshold", "Baseflow threshold", "", parser="float")
-        self._add_line(group, "slope_low_percentile", "Slope low percentile", _default("slope_low_percentile"), parser="float")
-        self._add_line(group, "slope_high_percentile", "Slope high percentile", _default("slope_high_percentile"), parser="float")
+        self._add_line(group, "slope_low_percentile", "Slope low percentile", _default("slope_low_percentile"), parser="int")
+        self._add_line(group, "slope_high_percentile", "Slope high percentile", _default("slope_high_percentile"), parser="int")
 
         group = self._make_group(hydro_tab, "Stream and Lake Filters")
         self._add_line(group, "StrmOrder_Field", "Stream order field", "")
@@ -802,6 +832,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_multi_files(group, "land_cover_cache", "Land cover cache files", _default("land_cover_cache"), raster_files)
         self._add_line(group, "land_watervalue", "Land water value", _default("land_watervalue"), parser="int")
         self._add_checkbox(group, "flood_waterlc_and_strm_cells", "Flood water land-cover and stream cells", _default("flood_waterlc_and_strm_cells"))
+        self._add_checkbox(group, "flood_bathy_mask", "Flood the bathymetry water mask", _default("flood_bathy_mask"))
 
         group = self._make_group(bathy_tab, "Bathymetry")
         self._add_checkbox(group, "disable_bathymetry", "Disable bathymetry", _default("disable_bathymetry"))
@@ -812,6 +843,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_combo(group, "specified_bathyflow_field", "Bathymetry flow field", FLOW_FIELD_OPTIONS, default=_default("specified_bathyflow_field"), editable=True)
         self._add_combo(group, "specified_highflow_field", "High flow field", FLOW_FIELD_OPTIONS, default=_default("specified_highflow_field"), editable=True)
         self._add_checkbox(group, "create_reach_average_curve_file", "Create reach-average curve file", _default("create_reach_average_curve_file"))
+        self._add_checkbox(group, "standard_step", "Link water surfaces by the standard step", _default("standard_step"))
         self._add_checkbox(group, "use_dem_derived_channel_mask", "Use DEM-derived channel mask", _default("use_dem_derived_channel_mask"))
         self._add_checkbox(group, "use_power_laws_for_bathymetry", "Use power laws for bathymetry", _default("use_power_laws_for_bathymetry"))
         self._add_line(group, "area_m2_field", "Area m2 field", _default("area_m2_field"))
@@ -858,6 +890,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_line(group, "fldpln_max_drop_below_source", "Maximum drop below source", "", parser="float", placeholder="Optional")
         self._add_line(group, "fldpln_max_cells_per_segment", "Maximum cells per segment", "", parser="int", placeholder="Optional")
         self._add_line(group, "fldpln_max_wse_rise", "Maximum WSE rise", _default("fldpln_max_wse_rise"), parser="float")
+        self._add_combo(group, "fldpln_solver", "Solver", CONFIG_OPTIONS["fldpln_solver"].choices, default=_default("fldpln_solver"))
         self._add_checkbox(group, "fldpln_keep_spilling", "Keep spilling cells", _default("fldpln_keep_spilling"))
         self._add_checkbox(group, "fldpln_parallel", "Run FLDPLN in parallel", _default("fldpln_parallel"))
 
@@ -929,9 +962,10 @@ class FloodSimulationGUI(QMainWindow):
         if streamflow_label:
             params["streamflow_source"] = STREAMFLOW_SOURCE_LABELS.get(streamflow_label, streamflow_label)
 
+        # Empty fields are left out, so they take their default
         clean_params = {}
         for key, value in params.items():
-            if value is None or value == "" or value == []:
+            if value is None or value == "" or value == [] or value == {}:
                 continue
             clean_params[key] = value
         return clean_params

@@ -12,9 +12,7 @@ except ImportError:
     from typing_extensions import Self
 
 class NencartaEnum(StrEnum):
-    """
-    Base class for all nencarta enumerations. Inherit from this instead of StrEnum to ensure that the enum values are always strings, which is important for serialization and user-friendliness.
-    """
+    """A string enum read from a config value. from_string ignores case."""
     @classmethod
     def from_string(cls, value: str) -> Self:
         try:
@@ -59,6 +57,7 @@ class StreamflowSource(NencartaEnum):
         return self.value[:3].upper() + self.value[3:]
 
 class Mapper(NencartaEnum):
+    """The flood mappers. Unlike the other enums, their names are case sensitive; None or '' is Kernel Weighted."""
     FLOODSPREADER = 'FloodSpreader'
     CURVE2FLOOD_KERNEL_WEIGHTED = 'Curve2Flood-Kernel Weighted'
     CURVE2FLOOD_FLDPLNPY = 'Curve2Flood-FLDPLNpy'

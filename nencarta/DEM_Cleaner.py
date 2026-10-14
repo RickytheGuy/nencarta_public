@@ -1,7 +1,11 @@
+"""
+The DEM cleaner: smooths the stream channels of a DEM.
 
-#This code looks at a DEM raster to find the dimensions, then writes a script to create a STRM raster.
-
-import os, subprocess
+An initial flood map shows where each reach's channel is. The stream cells are given elevations that fall
+steadily between reach ends and confluences, and those elevations are spread across the channel. The result is
+written as ``<DEM>_Clean.tif``.
+"""
+import os
 from pathlib import Path
 
 import numpy as np
@@ -12,16 +16,10 @@ from nencarta.logger import LOG
 
 def convert_cell_size(dem_cell_size, dem_lower_left, dem_upper_right):
     """
-    Determines the x and y cell sizes based on the geographic location
+    Return the cell width and height in metres, and the metres per map unit, for a DEM's cell size.
 
-    Parameters
-    ----------
-    None. All input data is available in the parent object
-
-    Returns
-    -------
-    None. All output data is set into the object
-
+    A cell size above 0.5 is taken to be in metres already. Otherwise it is in degrees and is converted using the
+    DEM's mean latitude, from ``dem_lower_left`` and ``dem_upper_right``.
     """
 
     ### Get the cell size ###
@@ -122,6 +120,7 @@ def convert_cell_size(dem_cell_size, dem_lower_left, dem_upper_right):
     return x_cell_size, y_cell_size, projection_conversion_factor
 
 def FindFlowRateForEachCOMID(FlowFileName, COMID_Unique, COMID_to_ID, MinCOMID, MaxCOMID):
+    """Each reach's flow, read from a 'COMID,Q' CSV, in the order of COMID_Unique."""
     num_unique = len(COMID_Unique)
     COMID_Unique_Flow = np.zeros(num_unique)
     LOG.info(f'Opening and Reading {FlowFileName}')
@@ -138,6 +137,10 @@ def FindFlowRateForEachCOMID(FlowFileName, COMID_Unique, COMID_to_ID, MinCOMID, 
     return COMID_Unique_Flow
 
 def Calculate_TW_D_ForEachCOMID_ARC(CurveParamFileName, COMID_Unique_Flow, COMID_Unique, COMID_to_ID, MinCOMID, MaxCOMID, Q_Fraction):
+    """
+    Each reach's mean top width and depth at Q_Fraction of its flow, from ARC's curve file, and the largest top
+    width.
+    """
     num_unique = len(COMID_Unique)
     COMID_Unique_TW = np.zeros(num_unique)
     COMID_Unique_Depth = np.zeros(num_unique)
@@ -205,24 +208,8 @@ def Calculate_TW_D_ForEachCOMID_ARC(CurveParamFileName, COMID_Unique_Flow, COMID
 
     
 
-def Get_Raster_Details(DEM_File):
-    LOG.info(DEM_File)
-    gdal.Open(DEM_File, gdal.GA_ReadOnly)
-    data = gdal.Open(DEM_File)
-    geoTransform = data.GetGeoTransform()
-    ncols = int(data.RasterXSize)
-    nrows = int(data.RasterYSize)
-    minx = geoTransform[0]
-    dx = geoTransform[1]
-    maxy = geoTransform[3]
-    dy = geoTransform[5]
-    maxx = minx + dx * ncols
-    miny = maxy + dy * nrows
-    Rast_Projection = data.GetProjectionRef()
-    data = None
-    return minx, miny, maxx, maxy, dx, dy, ncols, nrows, geoTransform, Rast_Projection
-
 def Read_Raster_GDAL(InRAST_Name):
+    """Read a raster's first band, with its size, cell size, extent, mean latitude, geotransform and projection."""
     dataset = gdal.Open(InRAST_Name, gdal.GA_ReadOnly)     
     # Retrieve dimensions of cell size and cell count then close DEM dataset
     geotransform = dataset.GetGeoTransform()
@@ -251,15 +238,8 @@ def Read_Raster_GDAL(InRAST_Name):
     LOG.info('   xur = ' + str(xur))
     return RastArray, ncols, nrows, cellsize, yll, yur, xll, xur, lat, geotransform, Rast_Projection
 
-def GetListOfDEMs(inputfolder):
-    DEM_Files = []
-    for file in os.listdir(inputfolder):
-        #if file.startswith('return_') and file.endswith('.geojson'):
-        if file.endswith('.tif') or file.endswith('.img'):
-            DEM_Files.append(file)
-    return DEM_Files
-
 def Write_Output_Raster(s_output_filename, raster_data, ncols, nrows, dem_geotransform, dem_projection, s_file_format, s_output_type, compression: str):   
+    """Write an array as a single-band raster."""
     o_driver: gdal.Driver = gdal.GetDriverByName(s_file_format)  #Typically will be a GeoTIFF "GTiff"
     #o_metadata = o_driver.GetMetadata()
     
@@ -288,124 +268,9 @@ def Write_Output_Raster(s_output_filename, raster_data, ncols, nrows, dem_geotra
     o_output_file = None
 
 
-def Clean_STRM_Raster(STRM_File, STRM_File_Clean):
-    LOG.info('\nCleaning up the Stream File.')
-    (SN, ncols, nrows, cellsize, yll, yur, xll, xur, lat, dem_geotransform, dem_projection) = Read_Raster_GDAL(STRM_File)
-    
-    #Create an array that is slightly larger than the STRM Raster Array
-    B = np.zeros((nrows+2,ncols+2))
-    
-    #Imbed the STRM Raster within the Larger Zero Array
-    B[1:(nrows+1), 1:(ncols+1)] = SN
-    
-    #Added this because sometimes the non-stream values end up as -9999
-    B = np.where(B>0,B,0)
-    #(RR,CC) = B.nonzero()
-    (RR,CC) = np.where(B>0)
-    num_nonzero = len(RR)
-    
-    for filterpass in range(2):
-        #First pass is just to get rid of single cells hanging out not doing anything
-        p_count = 0
-        p_percent = (num_nonzero+1)/100.0
-        n=0
-        for x in range(num_nonzero):
-            if x>=p_count*p_percent:
-                p_count = p_count + 1
-                LOG.info(' ' + str(p_count), end =" ")
-            r=RR[x]
-            c=CC[x]
-            V = B[r,c]
-            if V>0:
-                #Left and Right cells are zeros
-                if B[r,c+1]==0 and B[r,c-1]==0:
-                    #The bottom cells are all zeros as well, but there is a cell directly above that is legit
-                    if (B[r+1,c-1]+B[r+1,c]+B[r+1,c+1])==0 and B[r-1,c]>0:
-                        B[r,c] = 0
-                        n=n+1
-                    #The top cells are all zeros as well, but there is a cell directly below that is legit
-                    elif (B[r-1,c-1]+B[r-1,c]+B[r-1,c+1])==0 and B[r+1,c]>0:
-                        B[r,c] = 0
-                        n=n+1
-                #top and bottom cells are zeros
-                if B[r,c]>0 and B[r+1,c]==0 and B[r-1,c]==0:
-                    #All cells on the right are zero, but there is a cell to the left that is legit
-                    if (B[r+1,c+1]+B[r,c+1]+B[r-1,c+1])==0 and B[r,c-1]>0:
-                        B[r,c] = 0
-                        n=n+1
-                    elif (B[r+1,c-1]+B[r,c-1]+B[r-1,c-1])==0 and B[r,c+1]>0:
-                        B[r,c] = 0
-                        n=n+1
-        LOG.info('\nFirst pass removed ' + str(n) + ' cells')
-        
-        
-        #This pass is to remove all the redundant cells
-        n=0
-        p_count = 0
-        p_percent = (num_nonzero+1)/100.0
-        for x in range(num_nonzero):
-            if x>=p_count*p_percent:
-                p_count = p_count + 1
-                LOG.info(' ' + str(p_count), end =" ")
-            r=RR[x]
-            c=CC[x]
-            V = B[r,c]
-            if V>0:
-                if B[r+1,c]==V and (B[r+1,c+1]==V or B[r+1,c-1]==V):
-                    if sum(B[r+1,c-1:c+2])==0:
-                        B[r+1,c] = 0
-                        n=n+1
-                elif B[r-1,c]==V and (B[r-1,c+1]==V or B[r-1,c-1]==V):
-                    if sum(B[r-1,c-1:c+2])==0:
-                        B[r-1,c] = 0
-                        n=n+1
-                elif B[r,c+1]==V and (B[r+1,c+1]==V or B[r-1,c+1]==V):
-                    if sum(B[r-1:r+1,c+2])==0:
-                        B[r,c+1] = 0
-                        n=n+1
-                elif B[r,c-1]==V and (B[r+1,c-1]==V or B[r-1,c-1]==V):
-                    if sum(B[r-1:r+1,c-2])==0:
-                            B[r,c-1] = 0
-                            n=n+1
-        LOG.info('\nSecond pass removed ' + str(n) + ' redundant cells')
-        
-        #This pass is to remove all the redundant cells that may be connected to a different stream
-        n=0
-        p_count = 0
-        p_percent = (num_nonzero+1)/100.0
-        for x in range(num_nonzero):
-            if x>=p_count*p_percent:
-                p_count = p_count + 1
-                LOG.info(' ' + str(p_count), end =" ")
-            r=RR[x]
-            c=CC[x]
-            V = B[r,c]
-            if V>0:
-                if B[r+1,c]>0 and (B[r+1,c+1]>0 or B[r+1,c-1]>0):
-                    if sum(B[r+1,c-1:c+2])==0:
-                        B[r+1,c] = 0
-                        n=n+1
-                elif B[r-1,c]>0 and (B[r-1,c+1]>0 or B[r-1,c-1]>0):
-                    if sum(B[r-1,c-1:c+2])==0:
-                        B[r-1,c] = 0
-                        n=n+1
-                elif B[r,c+1]>0 and (B[r+1,c+1]>0 or B[r-1,c+1]>0):
-                    if sum(B[r-1:r+1,c+2])==0:
-                        B[r,c+1] = 0
-                        n=n+1
-                elif B[r,c-1]>0 and (B[r+1,c-1]>0 or B[r-1,c-1]>0):
-                    if sum(B[r-1:r+1,c-2])==0:
-                            B[r,c-1] = 0
-                            n=n+1
-        LOG.info('\nThird pass removed ' + str(n) + ' redundant cells')
-    
-    LOG.info('Writing Output File ' + STRM_File_Clean)
-    Write_Output_Raster(STRM_File_Clean, B[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Int32)
-    #return B[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur
-    return
-
 @njit(cache=True, nogil=True)
 def FindStreamCharacteristics( E, B, COMID_to_ID, MinCOMID, RR, CC, num_comids):
+    """Each reach's lowest and highest stream cell elevation."""
     E_Min = np.full(num_comids, 99999999.9, dtype=np.float64)
     E_Max = np.zeros(num_comids, dtype=np.float64)
     
@@ -427,7 +292,11 @@ def FindStreamCharacteristics( E, B, COMID_to_ID, MinCOMID, RR, CC, num_comids):
 
 @njit(cache=True, nogil=True)
 def Find_SEED_and_CONNECTIONS(RR, CC, B, E_Min, E_Max, COMID_to_ID, MinCOMID, nrows, ncols, SEED_Val, CON_Val, yur, xll, dx, dy):
-    # todo: doc string
+    """
+    Find the seed cells (reach ends, and stream cells on the raster's edge) and the connection cells (where
+    reaches meet). Returns the seeds' rows and columns, and a raster marking seeds with ``SEED_Val`` and
+    connections with ``CON_Val``.
+    """
 
     ### Define the placeholder arrays ###
     SEED_r = []
@@ -478,114 +347,11 @@ def Find_SEED_and_CONNECTIONS(RR, CC, B, E_Min, E_Max, COMID_to_ID, MinCOMID, nr
     return SEED_r, SEED_c, SEEDCONNECT
 
 
-def Clean_Connections_NewMethod(SEEDCONNECT, B, nrows, ncols, ConnectVal, sd):
-    #Clean-up the Connections
-    CON_r = []
-    CON_c = []
-    
-    #SEEDCONNECT is nrows, ncols
-    #B is nrows+2, ncols+2
-    
-    #LOG.info(SEEDCONNECT.shape)
-    #LOG.info(B.shape)
-    
-    # (CON_RR,CON_CC) = SEEDCONNECT.nonzero()
-    (CON_RR,CON_CC) = np.where(SEEDCONNECT > 0)
-    num_nonzero = len(CON_RR)
-    num_cleaned = 0
-    for i in range(num_nonzero):
-        r = CON_RR[i]
-        c = CON_CC[i]
-        if SEEDCONNECT[r,c]>0 and r>sd and r<(nrows-sd) and c>sd and c<(ncols-sd):
-            n = np.count_nonzero(SEEDCONNECT[r-sd:r+sd+1,c-sd:c+sd+1]==ConnectVal)
-            if n>1:
-                Current_COMID = B[r+1,c+1]
-                SEED_Times_B = B[r+1-sd:r+1+sd+1,c+1-sd:c+1+sd+1]*SEEDCONNECT[r-sd:r+sd+1,c-sd:c+sd+1]
-                n_same = np.count_nonzero(SEED_Times_B==Current_COMID*ConnectVal)  #Within the Stream network, this is how many have the same COMID value
-                
-                if n_same>1:
-                    SEED_Times_B = SEED_Times_B.astype(int)
-                    (R_Same, C_Same) = np.where(SEED_Times_B==Current_COMID*ConnectVal)
-                    
-                #Do we have multiple CONNECT cells with the same stream ID in the same area?
-                    if n_same>3:
-                        #We have a bunch, so let's just find the centroid-ish and use it.
-                        r_avg = 0.0 
-                        c_avg = 0.0
-                        n_avg = 0
-                        r1=-999
-                        c1=-999
-                        for rrr in range(r-sd,r+sd+1):
-                            for ccc in range(c-sd,c+sd+1):
-                                if SEEDCONNECT[rrr,ccc]==ConnectVal and B[rrr+1,ccc+1]==Current_COMID:
-                                    if r1<-99:
-                                        r1=rrr
-                                        c1=ccc
-                                    n_avg = n_avg + 1
-                                    r_avg = r_avg + rrr
-                                    c_avg = c_avg + ccc
-                                    num_cleaned = num_cleaned + 1
-                                    SEEDCONNECT[rrr,ccc] = 0 
-                        #Now set the cell towards the center of the mass of cells
-                        r_use = int(round(r_avg/n_avg,0))
-                        c_use = int(round(c_avg/n_avg,0))
-                        #Do this if the most center cell doesn't actually have the value we're after.
-                        if B[r_use+1,c_use+1]!=Current_COMID:
-                            r_use = r1
-                            c_use = c1
-                    else:
-                        LOG.info(SEED_Times_B)
-                        
-                        LOG.info(R_Same)
-                        LOG.info(C_Same)
-                        
-                        n_connections_max = 0
-                        for xyz in range(n_same):
-                            r_temp = R_Same[xyz]
-                            c_temp = C_Same[xyz]
-                            n_connections_local = np.count_nonzero(B[r+1-sd:r+1+sd+1,c+1-sd:c+1+sd+1]*SEEDCONNECT[r-sd:r+sd+1,c-sd:c+sd+1])
-                        
-                    CON_r.append(r_use)
-                    CON_c.append(c_use)
-    '''
-                r_avg = 0.0 
-                c_avg = 0.0
-                n_avg = 0
-                r1=-999
-                c1=-999
-                for rrr in range(r-sd,r+sd+1):
-                    for ccc in range(c-sd,c+sd+1):
-                        if SEEDCONNECT[rrr,ccc]==ConnectVal:
-                            if r1<-99:
-                                r1=rrr
-                                c1=ccc
-                            n_avg = n_avg + 1
-                            r_avg = r_avg + rrr
-                            c_avg = c_avg + ccc
-                            num_cleaned = num_cleaned + 1
-                            SEEDCONNECT[rrr,ccc] = 0 
-                #Now set the cell towards the center of the mass of cells
-                r_use = int(round(r_avg/n_avg,0))
-                c_use = int(round(c_avg/n_avg,0))
-                if B[r_use+1,c_use+1]==0:
-                    LOG.info('Adjusting due to non-value')
-                    r_use = r1
-                    c_use = c1
-                CON_r.append(r_use)
-                CON_c.append(c_use)
-    #Refill Raster with Connected Values
-    num_connect = len(CON_r)
-    for i in range(num_connect): 
-        r = CON_r[i]
-        c = CON_c[i]
-        SEEDCONNECT[r,c] = ConnectVal
-    '''
-    LOG.info('SEEDCONNECT Cleaned ' + str(num_cleaned))
-    return SEEDCONNECT, CON_r, CON_c
-
-
 def Clean_Connections(SEEDCONNECT, B, nrows, ncols, ConnectVal, sd):
-    # todo: doc string
+    """
+    Merge connection cells within ``sd`` cells of each other into one cell near their centre. With ``sd`` of 0
+    nothing is merged, and every marked cell is returned.
+    """
 
     #Clean-up the Connections
     CON_r = []
@@ -651,6 +417,10 @@ def Clean_Connections(SEEDCONNECT, B, nrows, ncols, ConnectVal, sd):
 @njit(cache=True, nogil=True)
 def FindNext(r, c, ncols, RC, B, ANCHOR, INDEXVALS):
     #Trying to find a connection, but prefer at first prefer it is NOT and Acnhor and that it has the SAME COMID value
+    """
+    The next stream cell from (r, c), and the step's length: an unvisited neighbour on the same reach, else an
+    unvisited anchor, else -9999s.
+    """
     COMID_Current = B[r,c]
     for (rrr,ccc,d)in INDEXVALS:
         rtest = int(r+rrr)
@@ -659,26 +429,7 @@ def FindNext(r, c, ncols, RC, B, ANCHOR, INDEXVALS):
 
         if rc not in RC and (B[rtest,ctest]==COMID_Current) and ANCHOR[rtest,ctest]<=0:
             return rtest, ctest, d
-    
-    '''
-    #Trying to find a connection, but prefer at first if it is NOT an Anchor
-    for (rrr,ccc,d)in INDEXVALS:
-        rtest = r+rrr
-        ctest = c+ccc
-        rc = rtest*(ncols+2)+ctest
-        #LOG.info(str(rrr) + '  ' + str(ccc) + '  ' + str(rtest) + ' ' + str(ctest) + '  ' + str(B[rtest,ctest]))
-        #if rc not in RC_List and (B[rtest,ctest]!=0 or ANCHOR[rtest,ctest]!=0):
-        if rc not in RC_List and (B[rtest,ctest]!=0) and ANCHOR[rtest,ctest]<=0:
-            return rtest, ctest, d
-    
-    #If no non-Anchor connection could be found, run again but this time the connection can be an anchor
-    for (rrr,ccc,d)in INDEXVALS:
-        rtest = r+rrr
-        ctest = c+ccc
-        rc = rtest*(ncols+2)+ctest
-        if rc not in RC_List and (B[rtest,ctest]!=0):
-            return rtest, ctest, d
-    '''
+
     #Can't find a connection to a similar stream type (COMID), therefore search for an ANCHOR
     for (rrr,ccc,d)in INDEXVALS:
         rtest = int(r+rrr)
@@ -690,6 +441,10 @@ def FindNext(r, c, ncols, RC, B, ANCHOR, INDEXVALS):
 
 @njit(cache=True, nogil=True)
 def FindPathToNextAnchor(r_start, c_start, ncols, ANCHOR, B, E, dx, dy, dz, num_limit):
+    """
+    Walk the stream from an anchor to the next one. Returns the cells (higher end first), the two anchors, their
+    elevations, the lowest elevation on the way, and the step lengths.
+    """
     R_List=[] 
     C_List=[]
     D_List=[]
@@ -738,16 +493,7 @@ def FindPathToNextAnchor(r_start, c_start, ncols, ANCHOR, B, E, dx, dy, dz, num_
             r=-9999
             #A2 = r*(ncols+2)+c
             A2 = -9999
-    
-    
-    '''
-    #Make sure we have the correct Elevations (surrounding cells may be a little lower)
-    if search_dist_perp_cells>0:
-        E_Start = Adjust_Elevations_By_Perpendicular_Cells(E_Start, 0, R_List, C_List, nrows, ncols, B, DEM, search_dist_perp_cells)
-        E_End = Adjust_Elevations_By_Perpendicular_Cells(E_End, (len(R_List)-1), R_List, C_List, nrows, ncols, B, DEM, search_dist_perp_cells)
-    '''
-    
-    
+
     #In reality, we want E_Start to be the higher elevation
     if E_Start > E_End:
         return R_List, C_List, A1, A2, E_Start, E_End, E_Min, D_List
@@ -758,70 +504,9 @@ def FindPathToNextAnchor(r_start, c_start, ncols, ANCHOR, B, E, dx, dy, dz, num_
         return R_List, C_List, A2, A1, E_End, E_Start, E_Min, D_List
 
 
-def Adjust_Start_End_Elevations_By_Perpendicular_Cells(E_Start, E_End, R_List, C_List, nrows, ncols, B, DEM, searchdist):
-    num_pnts = len(R_List)
-    
-    #Evaluate E_Start first
-    #r = R_List[0]
-    #c= C_List[0]
-    #E_Start = DEM[r,c]
-    E_S = E_Start
-    
-    #r = R_List[num_pnts-1]
-    #c= C_List[num_pnts-1]
-    #E_End = DEM[r,c]
-    E_E = E_End
-    
-    sd = searchdist
-    if sd>num_pnts:
-        sd = num_pnts
-    if sd>0:
-        for s in range(1,sd):
-            #STat
-            dr = R_List[s] - R_List[0]
-            dc = C_List[s] - C_List[0]
-            
-            #To get perpendicular, swithc the r and c values and make one negative of what it was
-            test_r = int(R_List[0] + dc)
-            test_c = int(C_List[0] + int(-1*dr))
-            #LOG.info(str(dr) + ' ' + str(dc) + '  ' + str(E_Start)  + '  Perpendicular Cells:  ' + str(test_r) + '  ' + str(test_c) + '  ' + str(DEM[test_r,test_c]))
-            if test_r>=0 and test_r<nrows and test_c>=0 and test_c<ncols and DEM[test_r,test_c]>-99 and DEM[test_r,test_c]<E_Start:
-                E_Start = DEM[test_r,test_c]
-            
-            test_r = int(R_List[0] + int(-1*dc))
-            test_c = int(R_List[0] + dr)
-            #LOG.info(str(dr) + ' ' + str(dc) + '  ' + str(E_Start)  + '  Perpendicular Cells:  ' + str(test_r) + '  ' + str(test_c) + '  ' + str(DEM[test_r,test_c]))
-            if test_r>=0 and test_r<(nrows-1) and test_c>=0 and test_c<(ncols-1) and DEM[test_r,test_c]>-99 and DEM[test_r,test_c]<E_Start:
-                E_Start = DEM[test_r,test_c]
-            
-            #Now look at E_End
-            dr = R_List[num_pnts-1-s] - R_List[num_pnts-1]
-            dc = C_List[num_pnts-1-s] - C_List[num_pnts-1]
-            
-            #To get perpendicular, swithc the r and c values and make one negative of what it was
-            test_r = int(R_List[num_pnts-1] + int(dc))
-            test_c = int(C_List[num_pnts-1] + int(-1*dr))
-            if test_r>=0 and test_r<(nrows-1) and test_c>=0 and test_c<(ncols-1) and DEM[test_r,test_c]>-99 and DEM[test_r,test_c]<E_End:
-                E_End = DEM[test_r,test_c]
-            
-            test_r = int(C_List[num_pnts-1] + int(-1*dc))
-            test_c = int(C_List[num_pnts-1] + int(dr))
-            if test_r>=0 and test_r<nrows and test_c>=0 and test_c<ncols and DEM[test_r,test_c]>-99 and DEM[test_r,test_c]<E_End:
-                E_End = DEM[test_r,test_c]
-    if abs(E_Start-E_S)>0.001:
-        LOG.info(str(B[R_List[0]+1,C_List[0]+1]) + '  Changed Starting Elevation from ' + str(E_S) + ' to ' + str(E_Start))
-    if abs(E_End-E_E)>0.001:
-        LOG.info(str(B[R_List[-1]+1,C_List[-1]+1]) + '  Changed Ending Elevation from ' + str(E_E) + ' to ' + str(E_End))
-    
-    #if int(B[R_List[0]+1,C_List[0]+1])==1841439:
-    #    LOG.info('\n\n')
-    #    LOG.info(str(B[R_List[0]+1,C_List[0]+1]) + '  Changed Starting Elevation from ' + str(E_S) + ' to ' + str(E_Start))
-    #    LOG.info(str(B[R_List[-1]+1,C_List[-1]+1]) + '  Changed Ending Elevation from ' + str(E_E) + ' to ' + str(E_End))
-    
-    return E_Start, E_End
-
 @njit(cache=True, nogil=True)
 def Adjust_Elevations_By_Perpendicular_Cells(Elevation, i, R_List, C_List, nrows, ncols, B, DEM, searchdist, Flood):
+    """Lower an elevation to that of the lowest flooded cell beside the stream near cell i, within searchdist cells along it."""
     num_pnts = len(R_List)
         
     if i<=(num_pnts*0.5):
@@ -869,53 +554,8 @@ def Adjust_Elevations_By_Perpendicular_Cells(Elevation, i, R_List, C_List, nrows
 
     return Elevation
 
-def Plot_Elevation_Profiles(COMID_Name, Dist, DEM, ModDEM):
-    import matplotlib.pyplot as plt
-    plt.figure()
-    plt.plot(Dist,DEM,'k')
-    plt.plot(Dist,ModDEM,'r')
-    plt.title(COMID_Name)
-    plt.savefig((str(COMID_Name)+'.png'))
-    plt.close()
-    return
-
-def FloodAllLocalAreas(WSE, E_Box, r_min, r_max, c_min, c_max, r_use, c_use):
-    FourMatrix = np.zeros((3,3)) + 4
-    
-    nrows_local = r_max-r_min+2
-    ncols_local = c_max-c_min+2
-    FloodLocal = np.zeros((nrows_local,ncols_local))
-    
-    FloodLocal[1:nrows_local-1,1:ncols_local-1] = np.where(E_Box<=WSE,1,0)
-    
-    #This is the Stream Cell.  Mark it with a 4
-    FloodLocal[(r_use-r_min+1),(c_use-c_min+1)] = 4 
-    
-    #Go through and mark all the cells that 
-    for r in range((r_use-r_min+1),nrows_local-1):
-        for c in range((c_use-c_min+1),ncols_local-1):
-            #LOG.info(FloodLocal[r-1:r+2,c-1:c+2].shape)
-            #LOG.info(FourMatrix.shape)
-            #LOG.info(FloodLocal[r-1:r+2,c-1:c+2])
-            if FloodLocal[r,c]>=3:
-                FloodLocal[r-1:r+2,c-1:c+2] = FloodLocal[r-1:r+2,c-1:c+2] * FourMatrix
-    for r in range((r_use-r_min+1), 0, -1):
-        for c in range((c_use-c_min+1), 0, -1):
-            if FloodLocal[r,c]>=3:
-                FloodLocal[r-1:r+2,c-1:c+2] = FloodLocal[r-1:r+2,c-1:c+2] * FourMatrix
-    
-    for r in range(1, nrows_local-1):
-        for c in range(1, ncols_local-1):
-            if FloodLocal[r,c]>=3:
-                FloodLocal[r-1:r+2,c-1:c+2] = FloodLocal[r-1:r+2,c-1:c+2] * FourMatrix
-    
-    #LOG.info(FloodLocal)
-    #FloodReturn = np.where(FloodLocal[1:nrows_local-1,1:ncols_local-1]>0.0,1.0,0.0)
-    #LOG.info(np.where(FloodLocal[1:nrows_local-1,1:ncols_local-1]>3.0,1.0,0.0))
-    return np.where(FloodLocal[1:nrows_local-1,1:ncols_local-1]>3.0,1.0,0.0)
-
-
 def CreateWeightAndElipseMask(TW, dx, dy):
+    """An inverse distance squared weight box, and an elliptical mask for every radius up to TW cells."""
     ElipseMask = np.zeros((TW+1,int(TW*2+1),int(TW*2+1)))  #3D Array
     WeightBox = np.zeros((int(TW*2+1),int(TW*2+1)))  #2D Array
     for i in range(1,TW+1):
@@ -945,95 +585,9 @@ def CreateWeightAndElipseMask(TW, dx, dy):
     
     return WeightBox, ElipseMask
 
-def CreateSimpleFloodMap(RR, CC, E, B, nrows, ncols, y_depth, sd, TW_m, dx, dy, LocalFloodOption, COMID_Unique, COMID_to_ID, MinCOMID, COMID_Unique_TW, COMID_Unique_Depth, WeightBox, ElipseMask, TW):
-    #Flood = np.zeros((nrows+2,ncols+2))
-    
-    WSE_Times_Weight = np.zeros((nrows+2,ncols+2)).astype(float)
-    Total_Weight = np.zeros((nrows+2,ncols+2)).astype(float)
-    
-    #Now go through each cell
-    num_nonzero = len(RR)
-    for i in range(num_nonzero):
-        r = RR[i]
-        c = CC[i]
-        r_use = r
-        c_use = c
-        E_Min = E[r,c]
-        
-        #Get COMID, TopWidth, and Depth Information for this cell
-        COMID_Value = int(B[r,c])
-        iii = COMID_to_ID[COMID_Value - MinCOMID]
-        COMID_TW_m = COMID_Unique_TW[iii]
-        COMID_D = COMID_Unique_Depth[iii]
-        if COMID_TW_m > TW_m:
-            COMID_TW_m = TW_m
-        COMID_TW = int(max(round(COMID_TW_m/dx,0),round(COMID_TW_m/dy,0)))  #This is how many cells we will be looking at surrounding our stream cell
-        if COMID_TW<=1:
-            COMID_TW=2
-        
-        #Find minimum elevation within the search box
-        if sd<1:
-            r_use = r
-            c_use = c
-        else:
-            for rr in range(r-sd,r+sd+1):
-                for cc in range(c-sd,c+sd+1):
-                    if rr>0 and rr<(nrows-1) and cc>0 and cc<=(ncols-1) and E[rr,cc]>0.1 and E[rr,cc] < E_Min:
-                        E_Min = E[rr,cc]
-                        r_use = rr
-                        c_use = cc
-        
-        #Now start with rows and start flooding everything in site
-        #WSE = float(E[r_use,c_use] + y_depth)
-        WSE = float(E[r_use,c_use] + COMID_D)
-        r_min = r_use-COMID_TW
-        r_max = r_use+COMID_TW+1
-        if r_min<1:
-            r_min = 1 
-        if r_max>(nrows+1):
-            r_max=nrows+1
-        c_min = c_use-COMID_TW
-        c_max = c_use+COMID_TW+1
-        if c_min<1:
-            c_min = 1 
-        if c_max>(ncols+1):
-            c_max=ncols+1
-        
-        #Find what would flood local
-        if LocalFloodOption==True:
-            E_Box = E[r_min:r_max,c_min:c_max]
-            FloodLocalMask = FloodAllLocalAreas(WSE, E_Box, r_min, r_max, c_min, c_max, r_use, c_use)
-        
-        #This uses the weighting method from FloodSpreader to create a flood map
-        #   Here we use TW instead of COMID_TW.  This is because we are trying to find the center of the weight raster, which was set based on TW (not COMID_TW).  COMID_TW mainly applies to the r_min, r_max, c_min, c_max
-        w_r_min = TW-(r_use-r_min)
-        w_r_max = TW+r_max-r_use
-        w_c_min = TW-(c_use-c_min)
-        w_c_max = TW+c_max-c_use
-        
-        #These all should have the same shape
-        #LOG.info(WSE_Times_Weight[r_min:r_max,c_min:c_max].shape)
-        #LOG.info(WeightBox[w_r_min:w_r_max,w_c_min:w_c_max].shape)
-        #LOG.info(FloodLocalMask.shape)
-        
-        #Create the Weight Matrix.  Account for the Weight Box as well as what would actually flood Locally
-        if LocalFloodOption==True:
-            WSE_Times_Weight[r_min:r_max,c_min:c_max] = WSE_Times_Weight[r_min:r_max,c_min:c_max] + WSE * WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max] * FloodLocalMask
-            Total_Weight[r_min:r_max,c_min:c_max] = Total_Weight[r_min:r_max,c_min:c_max] + WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max] * FloodLocalMask
-        else:
-            WSE_Times_Weight[r_min:r_max,c_min:c_max] = WSE_Times_Weight[r_min:r_max,c_min:c_max] + WSE * WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-            Total_Weight[r_min:r_max,c_min:c_max] = Total_Weight[r_min:r_max,c_min:c_max] + WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-        
-    WSE_divided_by_weight = WSE_Times_Weight / Total_Weight
-    #Also make sure all the Cells that have Stream are counted as flooded.
-    Flooded = np.where(WSE_divided_by_weight>E,1,0)
-    
-    for i in range(num_nonzero):
-        Flooded[RR[i],CC[i]] = 1
-    return Flooded
-
 @njit(cache=True, nogil=True)
 def CreateFloodImpactMap(Flood, B, nrows, ncols, TW_m, dx, dy, COMID_to_ID, MinCOMID, COMID_Unique_TW, ElipseMask, TW):
+    """For each flooded cell, the reach most likely to flood it: the one with the most stream cells within its top width."""
     FloodImpact = np.zeros((nrows+2,ncols+2))
     
     #Find all the flooded cells
@@ -1116,6 +670,7 @@ def CreateFloodImpactMap(Flood, B, nrows, ncols, TW_m, dx, dy, COMID_to_ID, MinC
 @njit(cache=True, nogil=True)
 def MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, ncols, nrows, TW_m, dx, dy, COMID_to_ID, MinCOMID, COMID_Unique_TW, WeightBox, ElipseMask, TW):
     
+    """Spread each reach's new stream elevations across the cells it floods, weighted by distance, keeping the DEM elsewhere."""
     Elev_Times_Weight = np.zeros((nrows+2,ncols+2), dtype=np.float32)
     Total_Weight = np.zeros((nrows+2,ncols+2), dtype=np.float32)
     
@@ -1182,6 +737,7 @@ def MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, nc
 
 @njit(cache=True, nogil=True)
 def Last_Ditch_Effort_To_Smooth_Stream_Bumps(Elev_Streams, nrows, ncols, CON_r, CON_c):
+    """Lower each connection cell to its lowest neighbouring stream cell."""
     num_to_evaluate = len(CON_r)
     
     for x in range(num_to_evaluate):
@@ -1211,6 +767,7 @@ def compute_stream_elevations(
     dz,
     ANCHOR,
     E):
+    """The new stream cell elevations: from each anchor to the next, falling steadily, through lower DEM cells along the way."""
     Elev_Streams = np.zeros((nrows,ncols))
     #Starting at each Anchor Point, Find the Path to the next Anchor point
     for i in range(num_anchors):
@@ -1292,38 +849,22 @@ def DEM_Cleaner_Program(OutputID,
                         FloodMapName: os.PathLike, 
                         Q_Fraction, 
                         TopWidthPlausibleLimit, 
-                        compression: str, 
+                        compression: str,
                         search_dist_perp_cells):
+    """
+    Clean each DEM in ``DEM_List`` (file names in ``DEM_Folder``), writing ``<DEM>_Clean.tif`` and its
+    intermediate rasters to ``Working_Folder``.
+
+    ``STRM_File_List`` gives each DEM's stream raster, ``FlowFileName`` the flow of each reach, and
+    ``CurveParamFileName`` ARC's curve file, from which each reach's top width and depth are estimated at
+    ``Q_Fraction`` of that flow, capped at ``TopWidthPlausibleLimit`` metres. ``FloodMapName`` is the initial flood
+    map that outlines the channels. ``OutputID`` and ``StreamShapefile`` are not used.
+    """
     for ddd in range(len(DEM_List)):
         LOG.info('Working on Site ' + DEM_List[ddd])
-        
+
         DEM_File = os.path.join(DEM_Folder, DEM_List[ddd])
         STRM_File_Clean = STRM_File_List[ddd]
-        if STRM_File_Clean=='':
-            STRM_File_Clean = STRM_File.with_name(STRM_File.stem + '_Clean.tif')
-
-            #Clean the Stream File
-            if os.path.isfile(STRM_File_Clean):
-                LOG.info('Clean Stream File Already Exists: ' + STRM_File_Clean)
-            else:
-                STRM_File = Path(Working_Folder) / f'STRM_{DEM_List[ddd]}'
-                if STRM_File.exists():
-                    LOG.info('Stream File Already Exists')
-                else:
-                    LOG.info('Get the Raster Dimensions for ' + DEM_File)
-                    (minx, miny, maxx, maxy, dx, dy, ncols, nrows, _, dem_projection) = Get_Raster_Details(DEM_File)
-            
-                    LOG.info('Creating ' + STRM_File)
-                    StrmBase = Path(StreamShapefile).stem
-                    
-                    #This should clip the larger DEM Raster to the correct size
-                    function_str = 'gdal_rasterize -a_nodata -9999 -ot UInt32 -a ' + OutputID + ' -ts ' + str(ncols) + ' ' + str(nrows) + ' -te ' + ' '.join([str(x) for x in [minx, miny, maxx, maxy]]) + ' -l ' + StrmBase + ' ' + StreamShapefile + ' ' + STRM_File
-                    LOG.info(function_str)
-                    subprocess.call(function_str, shell=True)
-
-                LOG.info('Creating Clean Stream File: ' + STRM_File_Clean)
-                Clean_STRM_Raster(STRM_File, STRM_File_Clean)
-        S = 0
         (S, ncols, nrows, cellsize, yll, yur, xll, xur, lat, s_geotransform, s_projection) = Read_Raster_GDAL(STRM_File_Clean)
         
         #Open DEM File
@@ -1390,9 +931,7 @@ def DEM_Cleaner_Program(OutputID,
         else:
             LOG.info('YOU NEED TO CREATE AN INITIAL FLOOD MAP!!!')
             return
-            #Flood = CreateSimpleFloodMap(RR, CC, E, B, nrows, ncols, y_depth, search_dist_for_min_elev, TopWidthMax, dx, dy, LocalFloodOption, COMID_Unique, COMID_to_ID, MinCOMID, COMID_Unique_TW, COMID_Unique_Depth, WeightBox, ElipseMask, TW)
-            #Write_Output_Raster(FloodMapName, Flood[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Int32)
-        
+
         #If warranted, write a Flood Impact File
         FloodImpact_File = os.path.join(Working_Folder, f'FLOOD_IMPACT_{DEM_List[ddd]}')
         if os.path.isfile(FloodImpact_File):
@@ -1422,9 +961,6 @@ def DEM_Cleaner_Program(OutputID,
         else:
             Write_Output_Raster(SEED_CONNECT_FILE, SEEDCONNECT, ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Byte, compression)
 
-        # todo: here is where an intervention needs to happen
-
-        
         #Set the Anchor Points for the Elevation Dataset
         ANCHOR = np.zeros((nrows+2,ncols+2)) 
         A_R = []
@@ -1465,77 +1001,3 @@ def DEM_Cleaner_Program(OutputID,
         ModifiedDEM_Name = ModifiedDEM_Name.replace('.img','_Clean.tif')
         ModifiedDEM = MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, ncols, nrows, TopWidthMax, dx, dy, COMID_to_ID, MinCOMID, COMID_Unique_TW, WeightBox, ElipseMask, TW)
         Write_Output_Raster(ModifiedDEM_Name, ModifiedDEM[1:nrows+1,1:ncols+1], ncols, nrows, dem_geotransform, dem_projection, "GTiff", gdal.GDT_Float32, compression)
-
-def Create_Folder(F):
-    if not os.path.exists(F): 
-        os.makedirs(F)
-    return
-
-def Create_FlowFile(MainFlowFile, FlowFileName, OutputID, Qparam):
-    infile = open(MainFlowFile,'r')
-    lines = infile.readlines()
-    ls = lines[0].strip().split(',')
-    q_val = 0
-    c_val = 0
-    for i in range(len(ls)):
-        if ls[i]==Qparam:
-            q_val=i
-        if ls[i]==OutputID:
-            c_val=i
-    
-    outfile = open(FlowFileName, 'w')
-    outfile.write(OutputID + ',' + Qparam)
-    
-    for r in range(1,len(lines)):
-        ls = lines[r].strip().split(',')
-        out_str = '\n' + ls[c_val] + ',' + ls[q_val]
-        outfile.write(out_str)
-    outfile.close()
-    return
-
-if __name__ == "__main__":
-    
-    Watershed_List = ['NED_n39w090']
-    
-    
-    
-    for i in range(len(Watershed_List)):
-        
-        WatershedName = Watershed_List[i]
-        
-        OutputID = 'COMID'
-        
-        Q_Fraction = 0.10
-        TopWidthPlausibleLimit = 600
-        search_dist_for_min_elev = 10
-        
-        search_dist_perp_cells = 40
-        
-        StreamShapefile = 'StrmShp/streams_714_4269_NashvilleIL.shp'
-        DEM_Folder = 'DEM/'
-        DEM_List = ['NED_n39w090.img']
-        STRM_File_List = ['STRM/NED_n39w090_STRM_Raster_Clean.tif']
-        
-        #Working_Folder = 'C:/Projects/2023_BathyTest/AdH_Tests/Mound_City_Example/DEM_Updated/'
-        Working_Folder = 'DEM_Updated/'
-        Create_Folder(Working_Folder)
-        
-        FlowParam = 'qout_mean'
-        MainFlowFile = 'GeoGLoWS_Flow_Data_714JLG.csv'
-        FlowFileName = 'FLOW/NED_n39w090_Flow_COMID_Q.txt'
-        LOG.info('Creating initial flow input data using flow rates associated with ' + FlowParam)
-        LOG.info('  Input flow file: ' + MainFlowFile)
-        LOG.info('  Output flow file: ' + FlowFileName)
-        Create_FlowFile(MainFlowFile, FlowFileName, OutputID, FlowParam)
-        
-        
-        CurveParamFileName = 'VDT/NED_n39w090_CurveFile_Initial.csv'
-        
-        FloodMapName = 'FloodMap/NED_n39w090_ARC_Flood_Initial.tif'
-        
-        LOG.info(DEM_List)
-        
-        DEM_Cleaner_Program(OutputID, StreamShapefile, DEM_Folder, DEM_List, STRM_File_List, Working_Folder, FlowFileName, CurveParamFileName, FloodMapName, Q_Fraction, TopWidthPlausibleLimit, search_dist_for_min_elev, search_dist_perp_cells)
-    
-    
-    

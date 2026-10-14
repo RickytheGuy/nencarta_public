@@ -10,6 +10,7 @@ def _path_or_none(path_str):
 
 @dataclass
 class FloodMapperOutput:
+    """The maps one flood mapper config writes."""
     config_path: Path = None
     floodmap: Path = None
     floodmap_vector: Path = None
@@ -54,6 +55,7 @@ class FloodMapperOutput:
         return existing_rasters
 
 class FloodMapperBulkOutput:
+    """The maps of several flood mapper configs."""
     def __init__(self, config_paths: list[Path]):
         self.config_paths = config_paths
         self.outputs = [FloodMapperOutput.from_config(p) for p in config_paths]
