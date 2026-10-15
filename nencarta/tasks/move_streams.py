@@ -18,7 +18,7 @@ from shapely.geometry import Point, LineString
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.make_bathy_water_mask import near_the_rivers_level
+from nencarta.tasks.make_bathy_water_mask import leveled_water, water_mask
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.tasks.stream_conflation import (
     D8_OFFSETS,
@@ -29,7 +29,6 @@ from nencarta.tasks.stream_conflation import (
 )
 from nencarta.tasks.stream_relocation import breach_dammed_rivers, relocate_misplaced_reaches
 from nencarta.workspace import Workspace
-from curve2flood import remove_cells_not_connected
 
 def _in_memory_ogr_layer(gdf: gpd.GeoDataFrame, projection: str,
                          values: pd.Series | None = None) -> tuple[ogr.DataSource, ogr.Layer]:
@@ -235,7 +234,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             source_gdf = relocate_misplaced_streams(workspace, source_gdf, assigned_dem)
         else:
             workspace.relocated_StrmShp.unlink(missing_ok=True)
-        channel_mask, dem_for_conflation = smooth_and_burn_dem(
+        _, dem_for_conflation = smooth_and_burn_dem(
             workspace, 
             source_gdf, 
             lakes,
@@ -263,7 +262,6 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             source_gdf = relocate_misplaced_streams(workspace, source_gdf, assigned_dem, derived=True)
         else:
             source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
-        channel_mask = Raster(workspace.bathy_water_mask).read_array()
 
     if should_move_streams:
         if not flow_directions_ready:
@@ -291,15 +289,10 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             workspace.relocated_StrmShp.unlink(missing_ok=True)
         _write_stream_raster(workspace.new_stream_raster, final_streams, assigned_dem)
 
-        # The water mask is the land cover's water near the river's level (see near_the_rivers_level) and the
-        # moved streams. ARC carves bathymetry into all of it, so a line burned or drawn where no reach was moved
-        # onto (a relocated line the water doesn't take, a reach left out) would be carved, and flood.
-        water = np.zeros(final_streams.shape, bool)
-        if workspace.LAND_File.exists():
-            water = Raster(workspace.LAND_File).read_array() == configs.land_watervalue
-        channel_mask = (channel_mask.astype(bool) & water) | (final_streams > 0)
-        channel_mask &= near_the_rivers_level(assigned_dem.read_array(), final_streams > 0) | (final_streams > 0)
-        channel_mask = remove_cells_not_connected(channel_mask, final_streams)
+        # The water mask is the moved streams and the water at the river's level beside them (see water_mask). ARC
+        # carves bathymetry into all of it, so a line burned or drawn where no reach was moved onto (a relocated
+        # line the water doesn't take, a reach left out) would be carved, and flood: it is no part of the mask.
+        channel_mask = water_mask(workspace, assigned_dem, final_streams).astype(np.uint8)
 
         workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
         make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask), configs.compression)
@@ -544,7 +537,7 @@ def smooth_and_burn_dem(
     original = dem.copy()
     leveled = None
     if workspace.configs.use_dem_derived_channel_mask:
-        leveled = _leveled_water(original, original != nodata_value)
+        leveled = leveled_water(original, original != nodata_value)
     paths = []
     kept = np.zeros(dem.shape, bool)
     channel_mask = burn_streams_into_dem(channel_mask, dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col,
@@ -562,16 +555,6 @@ def smooth_and_burn_dem(
     output_ds = None
 
     return channel_mask, dem
-
-def _leveled_water(dem: np.ndarray, valid: np.ndarray, min_feature_size: int = 5) -> np.ndarray:
-    """The DEM's cells at whole multiples of 0.5 m, as FABDEM levels water, in patches of more than
-    ``min_feature_size`` cells (fewer is chance)."""
-    leveled = valid & (dem % 0.5 == 0)
-    labels, _ = label(leveled, structure=np.ones((3, 3), int))
-    counts = np.bincount(labels.ravel())
-    counts[0] = 0
-    return counts[labels] > min_feature_size
-
 
 @njit(cache=True)
 def _label_terraces(values: np.ndarray, use: np.ndarray, n_use: int) -> tuple[np.ndarray, np.ndarray, int]:
@@ -607,11 +590,13 @@ def _label_terraces(values: np.ndarray, use: np.ndarray, n_use: int) -> tuple[np
 
 @njit(cache=True)
 def _distance_to_step(values: np.ndarray, labels: np.ndarray, cells: np.ndarray, index: np.ndarray, max_step: float,
-                      up: bool) -> tuple[np.ndarray, np.ndarray]:
+                      up: bool, along: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     For each of ``cells`` (``index`` gives each cell's place among them, -1 elsewhere): how many cells it is, within
     its terrace, from the nearest of its terrace's cells next to a terrace higher (``up``) or lower than it by at most
-    ``max_step``, and that terrace's elevation. -1 where there is none.
+    ``max_step``, and that terrace's elevation. -1 where there is none. A cell's ``along`` (one per cell, NaN for
+    none), the elevation of the cell above it (``up``) or below it along a path, is such a terrace whatever the step,
+    and is taken over the cells around it.
     """
     nrows, ncols = values.shape
     n = cells.size
@@ -623,14 +608,19 @@ def _distance_to_step(values: np.ndarray, labels: np.ndarray, cells: np.ndarray,
         r, c = cells[i] // ncols, cells[i] % ncols
         label, z = labels[r, c], values[r, c]
         best = np.inf
-        for nr in range(max(r - 1, 0), min(r + 2, nrows)):
-            for nc in range(max(c - 1, 0), min(c + 2, ncols)):
-                if labels[nr, nc] == 0 or labels[nr, nc] == label:
-                    continue
-                step = values[nr, nc] - z if up else z - values[nr, nc]
-                if 0 < step <= max_step and step < best:
-                    best = step
-                    other[i] = values[nr, nc]
+        step = along[i] - z if up else z - along[i]
+        if step > 0:  # False for NaN
+            best = step
+            other[i] = along[i]
+        else:
+            for nr in range(max(r - 1, 0), min(r + 2, nrows)):
+                for nc in range(max(c - 1, 0), min(c + 2, ncols)):
+                    if labels[nr, nc] == 0 or labels[nr, nc] == label:
+                        continue
+                    step = values[nr, nc] - z if up else z - values[nr, nc]
+                    if 0 < step <= max_step and step < best:
+                        best = step
+                        other[i] = values[nr, nc]
         if best < np.inf:
             dist[i] = 0
             queue[tail] = i
@@ -680,13 +670,18 @@ def _distance_to_bank(cells: np.ndarray, index: np.ndarray) -> np.ndarray:
                     tail += 1
     return dist
 
-def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float,
-                   min_cells: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float, min_cells: int = 1,
+                   above: tuple[np.ndarray, np.ndarray] | None = None,
+                   below: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Turn the terraces among ``use`` cells, groups of cells sharing one elevation, into ramps. Where a terrace meets
     one up to ``max_step`` higher or lower, it takes the mean of the two; in its middle, farthest from both, it keeps
     its own elevation; in between, it is interpolated by distance within the terrace. A terrace meeting only higher
     or only lower ones keeps its elevation where it is farthest from them.
+
+    ``above`` and ``below``, if given, are cells (flat indices) and the elevation of the cell above or below each
+    along a path (see _path_steps). A terrace meets the next one there whatever the step, rather than among the
+    cells around it; with a ``max_step`` of 0, only there.
 
     Returns the cells of the terraces of at least ``min_cells`` cells (flat indices), their new elevations, and how
     near each is to the middle of its terrace, away from the cells off the terraces: 0 next to one, 1 farthest.
@@ -701,8 +696,15 @@ def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float,
         return cells, np.empty(0), np.empty(0)
     index = np.full(values.shape, -1, np.int32)
     index.ravel()[cells] = np.arange(cells.size, dtype=np.int32)
-    up, higher = _distance_to_step(values, labels, cells, index, max_step, True)
-    down, lower = _distance_to_step(values, labels, cells, index, max_step, False)
+    along = []
+    for steps, nearest in ((above, np.fmin), (below, np.fmax)):
+        z = np.full(cells.size, np.nan)
+        if steps is not None:
+            k = index.ravel()[steps[0]]
+            nearest.at(z, k[k >= 0], steps[1][k >= 0])  # the smallest step, where a cell has several
+        along.append(z)
+    up, higher = _distance_to_step(values, labels, cells, index, max_step, True, along[0])
+    down, lower = _distance_to_step(values, labels, cells, index, max_step, False, along[1])
     bank = _distance_to_bank(cells, index).astype(np.float64)
     del labels, index
 
@@ -732,6 +734,34 @@ def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float,
     centre = np.divide(bank - 1, span, out=np.zeros_like(bank), where=span > 0)
     return cells, new, centre
 
+def _path_steps(values: np.ndarray, paths: list) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """
+    Where ``values`` (the burned DEM) falls from one cell to the next down ``paths`` (as smooth_burned_dem takes
+    them, a path's start cells above its first), for _ramp_terraces: the cells below each drop with the elevation
+    above them (``above``), and the cells above each drop with the elevation below them (``below``).
+
+    The cells below a drop are only those on their own path, the last one burned through them: a tributary's line
+    ends on the river's, and the river shouldn't ramp up toward it there.
+    """
+    flat = values.ravel()
+    own = np.full(flat.size, -1, np.int32)
+    for i, (_, cells) in enumerate(paths):
+        own[cells] = i
+    tops, under_tops, bottoms, over_bottoms = [], [], [], []
+    for i, (starts, cells) in enumerate(paths):
+        upper = np.concatenate([starts, cells[:-1]])
+        lower = np.concatenate([np.full(starts.size, cells[0]), cells[1:]])
+        falls = flat[upper] > flat[lower]
+        upper, lower = upper[falls], lower[falls]
+        tops.append(upper)
+        under_tops.append(flat[lower])
+        mine = own[lower] == i
+        bottoms.append(lower[mine])
+        over_bottoms.append(flat[upper[mine]])
+    above = (np.concatenate(bottoms), np.concatenate(over_bottoms).astype(np.float64))
+    below = (np.concatenate(tops), np.concatenate(under_tops).astype(np.float64))
+    return above, below
+
 def smooth_burned_dem(
         dem: np.ndarray,
         mask: np.ndarray | None = None,
@@ -756,6 +786,10 @@ def smooth_burned_dem(
     along themselves, and in the water kept as low as its middle, or lower where the burn cut deeper. A bank no
     higher than a smoothed cell beside it is raised 0.5 m above it.
 
+    Given ``paths``, a line's terraces meet where it drops down them, by however much. The burn keeps a line no
+    higher than the lowest cell beside it upstream, so a line can run level for a whole reach and then drop metres
+    where the ground does; ramped only toward steps up to ``step``, as the water is, such a terrace stays level.
+
     The water's ramps can rise along a line the burn kept level, leaving pools along it, so the lines are then made
     never to rise along ``paths``, the lines burn_streams_into_dem burned, in the order it burned them, and to keep
     falling as their own ramps fall. Kept level instead, a line across a pool FABDEM flattened can drain either way
@@ -778,7 +812,13 @@ def smooth_burned_dem(
         lines = (streams > 0) & valid & (dem % step == 0)
         if fixed is not None:
             lines &= ~np.asarray(fixed, bool)
-        line_cells, line, _ = _ramp_terraces(dem, lines, step)
+        if paths:
+            # Only the steps down the lines' own paths: lines that touch elsewhere (a tributary beside the river, a
+            # bend come back on itself) aren't the next step down either one
+            above, below = _path_steps(dem, paths)
+            line_cells, line, _ = _ramp_terraces(dem, lines, 0, above=above, below=below)
+        else:
+            line_cells, line, _ = _ramp_terraces(dem, lines, step)
 
     out = dem.copy()
     out.ravel()[water_cells] = water - centre_drop * centre

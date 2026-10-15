@@ -40,7 +40,6 @@ def _arc_inputs(dem: Path,
         "Degree_Manip",
         "Degree_Interval",
         "Low_Spot_Range",
-        "Str_Limit_Val",
         "Gen_Dir_Dist",
         "Gen_Slope_Dist",
         "Stream_Slope_Method",
@@ -71,13 +70,7 @@ def _fldpln_inputs(workspace: Workspace):
         "FLDPLN_Library": workspace.fldpln_library,
         "reach_id": workspace.configs.stream_id_field,
         "downstream_reach_id": workspace.configs.downstream_id_field,
-        "max_wse_rise": workspace.configs.fldpln_max_wse_rise,
     }
-    if workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size"):
-        output.update({
-            "FLDPLN_Median_Filter_Size": workspace.configs.floodmap_args.get("FLDPLN_Median_Filter_Size")
-        })
-
     output[""] = ""
     return output
 
@@ -128,7 +121,7 @@ def _has_required_arc_outputs(workspace: Workspace) -> bool:
 def forecast_postfix(configs: NencartaConfig, date: str, hour: str | None) -> str:
     """The end of the flood map names of the forecast issued on ``date`` (and at ``hour``, for NWM)."""
     if configs.streamflow_source.is_nwm():
-        return f"_{configs.streamflow_source}_ARC_Flood{configs.floodmap_id}Forecast_{date}_{hour}"
+        return f"_{configs.streamflow_source.file_prefix}_ARC_Flood{configs.floodmap_id}Forecast_{date}_{hour}"
     return f"Forecast_{date}"
 
 def flood_map_paths(workspace: Workspace, postfix: str) -> dict[str, Path]:
@@ -138,7 +131,7 @@ def flood_map_paths(workspace: Workspace, postfix: str) -> dict[str, Path]:
 
     def path(blurb: str, ext: str) -> Path:
         return workspace.file_path(workspace.flood_folder, blurb, ext, 'source', suffix=suffix,
-                                   legacy=f"{configs.streamflow_source}_{workspace.FileName}_{blurb}{suffix}.{ext}")
+                                   legacy=f"{configs.streamflow_source.file_prefix}_{workspace.FileName}_{blurb}{suffix}.{ext}")
 
     return {"OutFLD": path('ARC_Flood', 'tif'), "OutSHP": path('ARC_Flood', 'gpkg'), "OutVEL": path('ARC_FloodVEL', 'tif'),
             "OutWSE": path('ARC_FloodWSE', 'tif'), "OutDEP": path('ARC_FloodDepth', 'tif')}
@@ -203,7 +196,6 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     params["StrmShp_File"] = streamlines
     params["Comid_Flow_File"] = workspace.COMID_Q_File
     params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
-    params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.bathy_args.get("FS_ADJUST_FLOW_BY_FRACTION", DEFAULT_BATHY_ARGS["FS_ADJUST_FLOW_BY_FRACTION"])
     params["Bathy_Use_Banks"] = configs.bathy_use_banks
     if configs.flood_waterlc_and_strm_cells:
         params["Flood_WaterLC_and_STRM_Cells"] = True
@@ -292,7 +284,6 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["Comid_Flow_File"] = workspace.COMID_Q_File
         # Use kernel method for bathymetry creation
         params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
-        params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.bathy_args.get("FS_ADJUST_FLOW_BY_FRACTION", DEFAULT_BATHY_ARGS["FS_ADJUST_FLOW_BY_FRACTION"])
         params["TW_MultFact"] = configs.bathy_args.get("TW_MultFact", DEFAULT_FLOODMAP_ARGS["TW_MultFact"])
         params["TopWidthPlausibleLimit"] = configs.bathy_args.get("TopWidthPlausibleLimit", DEFAULT_FLOODMAP_ARGS["TopWidthPlausibleLimit"])
         if not configs.bathy_args.get("Make_Output_GPKG", DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
@@ -353,7 +344,6 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params["mapper"] = configs.mapper
     if configs.mapper.is_curve2flood_fldpln_mapper():
         params.update(_fldpln_inputs(workspace))
-    params["FS_ADJUST_FLOW_BY_FRACTION"] = configs.floodmap_args.get("FS_ADJUST_FLOW_BY_FRACTION", DEFAULT_FLOODMAP_ARGS["FS_ADJUST_FLOW_BY_FRACTION"])
     params["TW_MultFact"] = configs.floodmap_args.get("TW_MultFact", DEFAULT_FLOODMAP_ARGS["TW_MultFact"])
     params["TopWidthPlausibleLimit"] = configs.floodmap_args.get("TopWidthPlausibleLimit", DEFAULT_FLOODMAP_ARGS["TopWidthPlausibleLimit"])
 
@@ -371,19 +361,19 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         else:
             postfix = forecast_postfix(configs, configs.forecastdate, configs.forecasthour)
         config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input_FloodForecast', config_ext, 'source',
-                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
+                                          legacy=f"{configs.streamflow_source.file_prefix}_ARC_Input_{workspace.FileName}_FloodForecast.{config_ext}")
     elif configs.floodmap_mode == FloodMapMode.USER:
         postfix = f"_{flow_file.stem}"
         if not flow_file.exists():
             LOG.error(f"User provided flow file does not exist: {flow_file}")
             raise FileNotFoundError(f"User provided flow file does not exist: {flow_file}")
         config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input', config_ext, 'source', suffix=f"{configs.floodmap_id}{postfix}",
-                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{configs.floodmap_id}{postfix}.{config_ext}")
+                                          legacy=f"{configs.streamflow_source.file_prefix}_ARC_Input_{workspace.FileName}{configs.floodmap_id}{postfix}.{config_ext}")
     elif configs.floodmap_mode == FloodMapMode.RETURN_PERIOD:
         return_period = next((rp for rp in configs.return_periods if workspace.return_period_flow_file(rp) == Path(flow_file)), None)
         postfix = f"_rp{return_period}" if return_period is not None else f"_{flow_file.stem.rsplit('_')[-1]}"
         config_path = workspace.file_path(workspace.ARC_Folder, 'ARC_Input', config_ext, 'source', suffix=postfix,
-                                          legacy=f"{configs.streamflow_source}_ARC_Input_{workspace.FileName}{postfix}.{config_ext}")
+                                          legacy=f"{configs.streamflow_source.file_prefix}_ARC_Input_{workspace.FileName}{postfix}.{config_ext}")
     else:
         LOG.error(f"Invalid floodmap_mode: {configs.floodmap_mode}")
         raise ValueError(f"Invalid floodmap_mode: {configs.floodmap_mode}")

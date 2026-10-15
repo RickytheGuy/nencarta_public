@@ -39,10 +39,22 @@ class FloodMapMode(NencartaEnum):
     RETURN_PERIOD = 'return_period'
 
 class StreamflowSource(NencartaEnum):
-    GEOGLOWS = 'geoglows'
+    """
+    Where the flows come from. 'geoglows' (from before GEOGLOWS V3) means GEOGLOWS V2. CUSTOM downloads nothing: the
+    flows come from your files, and the stream network's ID fields have to be given.
+    """
+    GEOGLOWS_V2 = 'geoglows_v2'
+    GEOGLOWS = 'geoglows_v2'  # the same source, by its old name
     NWM_SHORT_RANGE = 'nwm_short_range'
     NWM_MEDIUM_RANGE = 'nwm_medium_range'
     NWM_LONG_RANGE = 'nwm_long_range'
+    CUSTOM = 'custom'
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str) and value.lower() == 'geoglows':
+            return cls.GEOGLOWS_V2
+        return None
 
     def is_nwm(self) -> bool:
         return self in {
@@ -51,10 +63,17 @@ class StreamflowSource(NencartaEnum):
             self.NWM_LONG_RANGE,
         }
 
+    @property
+    def file_prefix(self) -> str:
+        """What output file names start with: GEOGLOWS V2's are 'GEOGLOWS_', as they were before V3."""
+        if self == self.GEOGLOWS_V2:
+            return 'GEOGLOWS'
+        return str(self)
+
     def __str__(self):
-        if self == self.GEOGLOWS:
-            return self.value.upper()
-        return self.value[:3].upper() + self.value[3:]
+        if self.is_nwm():
+            return self.value[:3].upper() + self.value[3:]
+        return self.value.upper()
 
 class Mapper(NencartaEnum):
     """The flood mappers. Unlike the other enums, their names are case sensitive; None or '' is Kernel Weighted."""

@@ -21,7 +21,6 @@ FLOW_FIELD_OPTIONS = (
 DEFAULT_BATHY_ARGS = {
     "VDT_Database_NumIterations": 30,
     "Make_Output_GPKG": True,
-    "FS_ADJUST_FLOW_BY_FRACTION": 1.0,
     "TW_MultFact": 1.5,
     "TopWidthPlausibleLimit": 2000,
     "Bathy_Trap_H": 0.2,
@@ -29,7 +28,6 @@ DEFAULT_BATHY_ARGS = {
     "Degree_Manip": 6.1,
     "Degree_Interval": 1.5,
     "Low_Spot_Range": 2,
-    "Str_Limit_Val": 1,
     "Gen_Dir_Dist": 10,
     "Gen_Slope_Dist": 10,
     "Stream_Slope_Method": "local_average_corrected",
@@ -37,7 +35,6 @@ DEFAULT_BATHY_ARGS = {
 
 DEFAULT_FLOODMAP_ARGS = {
     "Make_Output_GPKG": True,
-    "FS_ADJUST_FLOW_BY_FRACTION": 1.0,
     "TW_MultFact": 1.5,
     "TopWidthPlausibleLimit": 6000,
 }
@@ -84,9 +81,10 @@ CONFIG_SECTIONS = {
         "source_flowlines": ConfigOption([], "path_list", "Stream network files to take the domain's streams from. "
                                                           "Only those overlapping the DEM are read."),
         "stream_id_field": ConfigOption(None, "text", "Stream attribute with each reach's ID. Default: LINKNO for "
-                                                      "GEOGLOWS, COMID for NWM."),
+                                                      "GEOGLOWS, COMID for NWM; required for CUSTOM."),
         "downstream_id_field": ConfigOption(None, "text", "Stream attribute with the ID of the reach downstream. "
-                                                          "Default: DSLINKNO for GEOGLOWS, TOCOMID for NWM."),
+                                                          "Default: DSLINKNO for GEOGLOWS, TOCOMID for NWM; required "
+                                                          "for CUSTOM."),
         "StrmOrder_Field": ConfigOption(None, "text", "Stream attribute with each reach's stream order."),
         "StrmOrder_Lower": ConfigOption(None, "int", "Map only reaches of at least this stream order. Not used by "
                                                      "Curve2Flood-FLDPLNpy."),
@@ -108,14 +106,19 @@ CONFIG_SECTIONS = {
                                                                 "paths their lines drain along."),
         "use_dem_derived_channel_mask": ConfigOption(False, "bool", "When burning streams, smooth all the DEM's cells "
                                                                     "at whole multiples of 0.5 m as water, not just "
-                                                                    "those in the water mask, and leave the lines "
-                                                                    "unlowered on it."),
+                                                                    "those in the water mask, leave the lines "
+                                                                    "unlowered on it, and add it to the water mask "
+                                                                    "near the river's level."),
         "streams_as_parquet": ConfigOption(False, "bool", "Write stream networks as GeoParquet instead of GeoPackage."),
         "minimize_output_files": ConfigOption(False, "bool", "Delete the domain's source and relocated streams "
                                                              "once the moved stream network is written."),
     },
     "Flows": {
-        "streamflow_source": ConfigOption(str(StreamflowSource.GEOGLOWS), "text", "Where the flows come from.",
+        "streamflow_source": ConfigOption(str(StreamflowSource.GEOGLOWS_V2), "text", "Where the flows come from: "
+                                                                                     "GEOGLOWS V2 (GEOGLOWS also "
+                                                                                     "means V2), an NWM forecast, or "
+                                                                                     "CUSTOM: only your files, with "
+                                                                                     "the ID fields given.",
                                           tuple(str(source) for source in StreamflowSource)),
         "nwm_api_key": ConfigOption(None, "text", "NWM API key. Required for the NWM sources."),
         "floodmap_mode": ConfigOption(FloodMapMode.FORECAST.value, "text", "Which flows to map: a forecast, "
@@ -124,15 +127,16 @@ CONFIG_SECTIONS = {
         "user_flow_files": ConfigOption([], "path_list", "CSV flow files to map in user mode: reach ID in the first "
                                                          "column, flows (m3/s) in the others."),
         "return_periods": ConfigOption([], "int_list", "Return periods to map in return_period mode: any of 2, 5, 10, "
-                                                       "25, 50 and 100. GEOGLOWS only."),
+                                                       "25, 50 and 100. GEOGLOWS or CUSTOM."),
         "reanalysis_file": ConfigOption(None, "path", "Flow statistics file (a COMID column, then flow columns) to use "
                                                       "instead of building one."),
-        "return_period_file": ConfigOption(None, "text", "Return period flows to use instead of GEOGLOWS': a local "
-                                                         "path or URL to a CSV, Parquet, Zarr or NetCDF file."),
+        "return_period_file": ConfigOption(None, "text", "Return period flows to use instead of GEOGLOWS' (a CUSTOM "
+                                                         "source's, unless reanalysis_file is given): a local path or "
+                                                         "URL to a CSV, Parquet, Zarr or NetCDF file."),
         "return_period_variables": ConfigOption(None, "str_list", "Variables of the return period dataset to read; "
                                                                   "the highest is used. Default: all of them."),
         "include_fdc": ConfigOption(True, "bool", "Add flow duration curve flows (p_exceed_*) to the flow statistics. "
-                                                  "GEOGLOWS only."),
+                                                  "GEOGLOWS, or CUSTOM with fdc_file."),
         "fdc_file": ConfigOption(None, "text", "Flow duration curves to use instead of GEOGLOWS', read like "
                                                "return_period_file."),
         "fdc_variable": ConfigOption(None, "text", "Variable of the flow duration curve dataset to read. Default: "
@@ -249,13 +253,16 @@ CONFIG_SECTIONS = {
         "fldpln_dh": ConfigOption(0.5, "float", "FLDPLN depth step (m). Used by the iterative solver."),
         "fldpln_min_depth": ConfigOption(0.1, "float", "FLDPLN: shallowest depth (m) counted as flooded."),
         "fldpln_max_depth": ConfigOption(25.0, "float", "FLDPLN: deepest flood (m) the library covers."),
-        "fldpln_max_drop_below_source": ConfigOption(None, "float", "FLDPLN: leave out floodplain cells more than a "
-                                                                    "stream segment's maximum depth plus this many "
-                                                                    "metres below it. Saves memory."),
+        "fldpln_max_drop_below_source": ConfigOption(None, "float", "FLDPLN: leave out floodplain cells more than "
+                                                                    "this many metres below the stream cell that "
+                                                                    "floods them. Without it water spills down broad "
+                                                                    "floodplains as deep as at the stream. Saves "
+                                                                    "memory."),
+        "fldpln_spill_decay": ConfigOption(0.0, "float", "FLDPLN: depth to flood (m) added per cell along a spill, "
+                                                         "to shorten spills. Charged only on each cell's D8 "
+                                                         "successor, so it trims little."),
         "fldpln_max_cells_per_segment": ConfigOption(None, "int", "FLDPLN: most floodplain cells one stream segment "
                                                                   "may flood. Saves memory on flat ground."),
-        "fldpln_max_wse_rise": ConfigOption(0.01, "float", "FLDPLN: largest rise (m) of the water surface from one "
-                                                           "stream cell to the next downstream."),
         "fldpln_keep_spilling": ConfigOption(False, "bool", "FLDPLN: keep routing water that spills over low divides. "
                                                             "Suits DEMs of 10 m or finer."),
         "fldpln_solver": ConfigOption("exact", "text", "FLDPLN solver: exact (ignores fldpln_dh) or iterative.",

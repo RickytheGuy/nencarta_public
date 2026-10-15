@@ -19,7 +19,7 @@ def _forecast_flow_file(workspace: Workspace, forecastdate, forecasthour) -> Pat
     configs = workspace.configs
     when = f"_{forecastdate}_{forecasthour}" if configs.streamflow_source.is_nwm() else f"_{forecastdate}"
     return workspace.file_path(workspace.FLOW_Folder, 'forecast', 'csv', suffix=when,
-                               legacy=f"{workspace.FileName}{when}_{configs.streamflow_source}_forecast.csv")
+                               legacy=f"{workspace.FileName}{when}_{configs.streamflow_source.file_prefix}_forecast.csv")
 
 def make_flow_file_from_forecast(workspace: Workspace) -> list[Path]:
     """

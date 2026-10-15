@@ -7,8 +7,8 @@ from nencarta.logger import LOG
 from nencarta.core.defaults import DEFAULT_CONFIG, VALID_RETURN_PERIODS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
-# The reach ID and downstream reach ID attributes of each source's stream networks
-STREAM_ID_FIELDS = {"GEOGLOWS": ("LINKNO", "DSLINKNO"), "NWM": ("COMID", "TOCOMID")}
+# The reach ID and downstream reach ID attributes of each source's stream networks; a custom network's must be given
+STREAM_ID_FIELDS = {"GEOGLOWS": ("LINKNO", "DSLINKNO"), "NWM": ("COMID", "TOCOMID"), "CUSTOM": (None, None)}
 
 # The hours each NWM forecast is issued at
 NWM_FORECAST_HOURS = {
@@ -17,7 +17,17 @@ NWM_FORECAST_HOURS = {
     StreamflowSource.NWM_LONG_RANGE: ("00",),
 }
 
+def strip_quotes(text):
+    """``text`` without the quotes around it, as a path copied from a file browser has; other values as they are."""
+    if not isinstance(text, str):
+        return text
+    text = text.strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    return text
+
 def norm_or_none(path: str):
+    path = strip_quotes(path)
     return os.path.normpath(path) if path else None
 
 
@@ -58,6 +68,31 @@ class NencartaConfig:
         if self.streamflow_source.is_nwm() and not self.nwm_api_key:
             raise ValueError(f"Watershed '{self.watershed_name}' requires 'nwm_api_key' (or the NWM_API_KEY "
                              "environment variable) when 'streamflow_source' is NWM.")
+
+    def validate_custom_source(self):
+        """
+        A custom source downloads nothing: it needs the stream network's ID fields, and the flow statistics from
+        reanalysis_file, or return_period_file (with fdc_file for p_exceed flows). Its maps are made from user flow
+        files or return periods; there are no forecasts.
+        """
+        if self.streamflow_source != StreamflowSource.CUSTOM:
+            return
+        name = f"Watershed '{self.watershed_name}'"
+        if not self.stream_id_field or not self.downstream_id_field:
+            raise ValueError(f"{name}: a custom 'streamflow_source' needs 'stream_id_field' and 'downstream_id_field'.")
+        if self.floodmap_mode == FloodMapMode.FORECAST:
+            raise ValueError(f"{name}: forecasts come from GEOGLOWS or NWM; with a custom 'streamflow_source', map "
+                             "'user_flow_files' or 'return_periods' instead.")
+        if self.reanalysis_file:
+            return
+        if not self.return_period_file:
+            raise ValueError(f"{name}: a custom 'streamflow_source' takes its flow statistics from 'reanalysis_file', "
+                             "or from 'return_period_file' (and 'fdc_file' for p_exceed flows).")
+        fdc_fields = [field for field in (self.specified_bathyflow_field, self.specified_highflow_field)
+                      if str(field).startswith("p_exceed")]
+        if fdc_fields and not (self.fdc_file and self.include_fdc):
+            raise ValueError(f"{name}: {', '.join(fdc_fields)} come from a flow duration curve, so a custom "
+                             "'streamflow_source' needs 'fdc_file' (and 'include_fdc') for them.")
 
     def validate_specified_depths(self):
         """Check there are as many bathymetry mask depths as the run uses: two with clean_dem, otherwise one."""
@@ -189,7 +224,8 @@ class NencartaConfig:
         self.warn_if_multiple_primary_dems()
 
         self.streamflow_source: StreamflowSource = StreamflowSource.from_string(self.get("streamflow_source"))
-        source_id_fields = STREAM_ID_FIELDS["NWM" if self.streamflow_source.is_nwm() else "GEOGLOWS"]
+        source_id_fields = STREAM_ID_FIELDS["NWM" if self.streamflow_source.is_nwm() else
+                                            "CUSTOM" if self.streamflow_source == StreamflowSource.CUSTOM else "GEOGLOWS"]
         self.stream_id_field: str = self.get("stream_id_field") or source_id_fields[0]
         self.downstream_id_field: str = self.get("downstream_id_field") or source_id_fields[1]
         self.forensic_forecast_date: str | None = self.validate_forecast_date()
@@ -297,13 +333,13 @@ class NencartaConfig:
         self.parallel: bool = self.get("parallel")
         self.compression: str = self.get("compression")
         self.exclude: list[int] = self.get("exclude")
-        self.reanalysis_file: str = self.get("reanalysis_file")
-        self.return_period_file: str | None = self.get("return_period_file")
+        self.reanalysis_file: str = self.get_path("reanalysis_file")
+        self.return_period_file: str | None = strip_quotes(self.get("return_period_file"))
         self.return_period_variables: list[str] | None = self.get("return_period_variables")
         if isinstance(self.return_period_variables, str):
             self.return_period_variables = [self.return_period_variables]
         self.include_fdc: bool = self.get("include_fdc")
-        self.fdc_file: str | None = self.get("fdc_file")
+        self.fdc_file: str | None = strip_quotes(self.get("fdc_file"))
         self.fdc_variable: str | None = self.get("fdc_variable")
         self.reanalysis_storage_options: dict | None = self.get("reanalysis_storage_options")
         self.raise_errors_if_river_ids_missing: bool = self.get("raise_errors_if_river_ids_missing")
@@ -311,10 +347,10 @@ class NencartaConfig:
         self.fldpln_min_depth: float = self.get("fldpln_min_depth")
         self.fldpln_max_depth: float = self.get("fldpln_max_depth")
         self.fldpln_max_drop_below_source: float | None = self.get("fldpln_max_drop_below_source")
+        self.fldpln_spill_decay: float = self.get("fldpln_spill_decay")
         self.fldpln_max_cells_per_segment: int | None = self.get("fldpln_max_cells_per_segment")
         self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")
         self.fldpln_parallel: bool = self.get("fldpln_parallel")
-        self.fldpln_max_wse_rise: float = self.get("fldpln_max_wse_rise")
         self.fldpln_solver: str = self.get("fldpln_solver")
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
@@ -332,6 +368,8 @@ class NencartaConfig:
         self.use_dem_derived_channel_mask: bool = self.get("use_dem_derived_channel_mask")
         self.drop_multilinestrings: bool = self.get("drop_multilinestrings")
         self.minimize_output_files: bool = self.get("minimize_output_files")
+
+        self.validate_custom_source()
 
         if self.parallel and self.fldpln_parallel:
             LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")

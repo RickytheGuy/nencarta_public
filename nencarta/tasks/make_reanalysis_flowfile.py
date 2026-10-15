@@ -200,15 +200,28 @@ def _fdc_flows_from_daily(daily_ds: xr.Dataset, river_ids: np.ndarray) -> pd.Dat
 def _get_geoglows_rp(river_ids: np.ndarray, configs: NencartaConfig) -> pd.DataFrame:
     """
     The return period flows (rp<N>) and, with include_fdc, flow duration curve flows (p_exceed_<P>) of each river,
-    plus rp100_premium and p_exceed_0_premium.
+    plus rp100_premium and p_exceed_0_premium: GEOGLOWS V2's, or return_period_file's and fdc_file's.
     """
-    rp_source = configs.return_period_file or GEOGLOWS_RETURN_PERIODS_URL
+    fdc_source = (configs.fdc_file or GEOGLOWS_FDC_URL) if configs.include_fdc else None
+    return _return_period_and_fdc_flows(river_ids, configs, configs.return_period_file or GEOGLOWS_RETURN_PERIODS_URL,
+                                        fdc_source)
+
+def _get_custom_rp(river_ids: np.ndarray, configs: NencartaConfig) -> pd.DataFrame:
+    """As _get_geoglows_rp, from return_period_file and, with include_fdc, fdc_file only."""
+    fdc_source = configs.fdc_file if configs.include_fdc else None
+    return _return_period_and_fdc_flows(river_ids, configs, configs.return_period_file, fdc_source)
+
+def _return_period_and_fdc_flows(river_ids: np.ndarray, configs: NencartaConfig, rp_source: str,
+                                 fdc_source: str | None) -> pd.DataFrame:
+    """
+    The return period flows of rp_source and, if given, the flow duration curve flows of fdc_source, plus the
+    premium high flows. GEOGLOWS' own FDC falls back to its daily flows when it can't be read.
+    """
     rp_ds = _open_flows(rp_source, "return_period", configs)
     river_ids = _river_ids_in(rp_ds, river_ids, rp_source, configs)
 
     fdc_df = None
-    if configs.include_fdc:
-        fdc_source = configs.fdc_file or GEOGLOWS_FDC_URL
+    if fdc_source:
         try:
             fdc_ds = _open_flows(fdc_source, "p_exceed", configs)
             river_ids = _river_ids_in(fdc_ds, river_ids, fdc_source, configs)
@@ -216,7 +229,7 @@ def _get_geoglows_rp(river_ids: np.ndarray, configs: NencartaConfig) -> pd.DataF
         except MissingRiverIdsError:
             raise
         except Exception:
-            if configs.fdc_file:
+            if fdc_source != GEOGLOWS_FDC_URL:
                 raise
             LOG.warning("FDC data not available; falling back to daily data for FDC calculation.")
             daily_ds = get_daily_ds()
@@ -304,8 +317,10 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
         LOG.error("No stream segments remain after filtering; cannot generate base/max flow file.")
         raise NoStreamsFoundException("After applying stream filters, no stream segments remain. Please adjust your stream filters or check your input stream geometry.")
 
-    if configs.streamflow_source == StreamflowSource.GEOGLOWS:
+    if configs.streamflow_source == StreamflowSource.GEOGLOWS_V2:
         final_df = _get_geoglows_rp(river_ids, configs)
+    elif configs.streamflow_source == StreamflowSource.CUSTOM:
+        final_df = _get_custom_rp(river_ids, configs)
     elif configs.streamflow_source.is_nwm():
         if configs.return_period_file or configs.fdc_file:
             LOG.warning("'return_period_file' and 'fdc_file' are only used with GEOGLOWS; NWM return periods come from the NWM API.")
@@ -314,7 +329,7 @@ def make_reanalysis_file(workspace: Workspace) -> Path:
             raise ValueError("NWM_API_KEY environment variable must be set for NWM flow retrieval.")
         final_df = _get_nwm_rp(river_ids, nwm_api_key)
     else:
-        raise ValueError("Invalid flow_source specified. Must be 'geoglows' or 'nwm'.")
+        raise ValueError(f"Unknown streamflow_source {configs.streamflow_source}.")
 
     # break the code if the dataframe is empty or if the streamflow is all 0
     if final_df.empty or final_df[configs.specified_highflow_field].values.mean() <= 0:

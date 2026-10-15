@@ -152,6 +152,7 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         bg_mask=bg_mask,
         solver=workspace.configs.fldpln_solver,
         max_drop_below_source=workspace.configs.fldpln_max_drop_below_source,
+        spill_decay=workspace.configs.fldpln_spill_decay,
         max_cells_per_segment=workspace.configs.fldpln_max_cells_per_segment
     )
 
