@@ -33,10 +33,11 @@ import pandas as pd
 import geopandas as gpd
 import shapely
 from numba import njit
-from scipy.ndimage import distance_transform_edt, label
+from scipy.ndimage import distance_transform_edt
 from scipy.spatial import cKDTree
 
 from nencarta.logger import LOG
+from nencarta.tasks.channel_detection import ChannelSettings, river_channel
 from nencarta.tasks.stream_conflation import (FlowNetwork, SourceNetwork, prepare_source_network, _sample_lines,
                                               _inflow_cells)
 
@@ -58,8 +59,8 @@ class RelocationSettings:
     # The path ends among the cells with at least this fraction of the most votes, at the one nearest the line's end
     plateau: float = 0.8
     # Only where the DEM shows a channel: a reach moves only where at least min_channel_share of its path's cells are
-    # channel cells, and min_channel_gain more of them than of its line's. A channel cell is on the DEM's leveled water
-    # (a whole multiple of 0.5 m, in a patch of at least 3 such cells, as FABDEM levels water), or, off ground the
+    # channel cells, and min_channel_gain more of them than of its line's. A channel cell is on the water the DEM
+    # flattens near the lines' level (see channel_detection), or, off ground the
     # fill raised, at least channel_depth_m below both the cells channel_reach_cells away along a row, column or
     # diagonal. Across flats the filled DEM's D8 paths are arbitrary.
     min_channel_share: float = 0.5
@@ -453,11 +454,14 @@ class _Relocation:
         """A flat mask of the cells the DEM shows a channel on (see RelocationSettings.min_channel_share)."""
         s, raw = self.settings, self.raw
         valid = self.valid & np.isfinite(raw)
-        water = valid & (raw % 0.5 == 0)
-        labels, _ = label(water, np.ones((3, 3), bool))
-        size = np.bincount(labels.ravel())
-        size[0] = 0
-        water &= size[labels] >= 3
+        # The water the DEM flattens near the lines' level, which needn't touch a line that is off its river. Not the
+        # low ground by the lines as well: measured from the lines being judged, it would count a line as on its channel
+        lines = np.zeros(raw.size, np.int64)
+        for x in range(self.source.ids.size):
+            lines[self._cells(self._line(x))] = x + 1
+        areas = {x + 1: float(self.source.area[x]) for x in range(self.source.ids.size)}
+        water = river_channel(raw, valid, lines.reshape(raw.shape), areas, self.dx, self.dy,
+                              ChannelSettings(corridor_m=s.max_search_radius_m), connected=False).flat_water
         filled_up = valid & (self.Z - raw > 0.05) & ~water
         k = s.channel_reach_cells
         padded = np.pad(np.where(valid, raw, np.inf), k, constant_values=np.inf)

@@ -18,7 +18,7 @@ from shapely.geometry import Point, LineString
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.make_bathy_water_mask import leveled_water, water_mask
+from nencarta.tasks.make_bathy_water_mask import dem_channel, reach_areas_km2, water_mask
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.tasks.stream_conflation import (
     D8_OFFSETS,
@@ -292,7 +292,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         # The water mask is the moved streams and the water at the river's level beside them (see water_mask). ARC
         # carves bathymetry into all of it, so a line burned or drawn where no reach was moved onto (a relocated
         # line the water doesn't take, a reach left out) would be carved, and flood: it is no part of the mask.
-        channel_mask = water_mask(workspace, assigned_dem, final_streams).astype(np.uint8)
+        channel_mask = water_mask(workspace, assigned_dem, final_streams,
+                                  reach_areas_km2(streams_gdf, configs)).astype(np.uint8)
 
         workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
         make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask), configs.compression)
@@ -511,8 +512,9 @@ def smooth_and_burn_dem(
         ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
     """
     Burn ``source_gdf``'s streams into the DEM, smooth the burned channels, and write workspace.fixed_dem.
-    Returns the channel mask and the burned DEM. With use_dem_derived_channel_mask, the burn leaves the lines on the
-    water the DEM levels (see burn_streams_into_dem).
+    Returns the channel mask and the burned DEM. With use_dem_derived_channel_mask, the water the DEM flattens along
+    the streams (see channel_detection) is smoothed as water, and the burn leaves the lines on it (see
+    burn_streams_into_dem).
     """
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
     dem = dem_ds.ReadAsArray()
@@ -530,14 +532,15 @@ def smooth_and_burn_dem(
     streams = _get_stream_raster(dem_ds, source_gdf, id_col, configs.StrmOrder_Field, area_col)
 
     channel_mask = Raster(workspace.bathy_water_mask).read_array()
-    if workspace.configs.use_dem_derived_channel_mask:
-        # We assume that where the DEM is a multiple of 0.5 m, it is a channel cell. This is true for FABDEM
-        channel_mask |= (dem % 0.5 == 0)
-
-    original = dem.copy()
     leveled = None
     if workspace.configs.use_dem_derived_channel_mask:
-        leveled = leveled_water(original, original != nodata_value)
+        # The water the DEM flattens along the streams (see channel_detection). Not the low ground by them as well:
+        # measured from the lines being burned, that would take in every line the burn has to lower
+        leveled = dem_channel(dem_ds, dem, (dem != nodata_value) & np.isfinite(dem), streams,
+                              reach_areas_km2(source_gdf, configs)).flat_water
+        channel_mask = channel_mask.astype(bool) | leveled
+
+    original = dem.copy()
     paths = []
     kept = np.zeros(dem.shape, bool)
     channel_mask = burn_streams_into_dem(channel_mask, dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col,
@@ -925,8 +928,8 @@ def burn_streams_into_dem(
     (all of them, without either). Returns the channel mask without its specks (``min_feature_size`` cells or
     fewer), lakes, ocean and nodata. Appends each burned line to ``paths``, if given (see burn_linestring).
 
-    A line isn't lowered on the DEM's ``leveled`` water, if given: the line goes on down from such a cell at its
-    level. Except at a line's end on the DEM's edge, which is lowered so the flow leaves there. The cells left so are
+    A line isn't lowered on ``leveled``, if given, the water the DEM flattens (see channel_detection): the line goes
+    on down from such a cell at its level. Except at a line's end on the DEM's edge, which is lowered so the flow leaves there. The cells left so are
     marked in ``kept``, if given.
     """
     G = nx.from_pandas_edgelist(

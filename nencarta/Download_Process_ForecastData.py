@@ -260,7 +260,7 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
     used instead.
     """
     try:
-        if streamflow_source == StreamflowSource.GEOGLOWS:
+        if streamflow_source == StreamflowSource.GEOGLOWS_V2:
             LOG.info('Pulling ' + str(len(rivids)) + ' river ids from GeoGLOWS Forecast Bucket')
             # Get the max value for each ensemble and rivid, then get the median, min, and max for each rivid
             df_max = (
@@ -368,7 +368,7 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
         )
 
         try:
-            if streamflow_source == StreamflowSource.GEOGLOWS:
+            if streamflow_source == StreamflowSource.GEOGLOWS_V2:
                 df_max = _read_geoglows_retrospective_flow(forecastdate, rivids)
             elif streamflow_source.is_nwm():
                 df_max = _read_nwm_retrospective_flow(forecastdate, forecasthour, rivids)
@@ -532,7 +532,7 @@ def Get_Date_For_Forecast(day_back, hour_back, streamflow_source: StreamflowSour
 
     # set forecast hour based upon the streamflow source
     # GEOGLOWS: daily — hour doesn't matter
-    if streamflow_source == StreamflowSource.GEOGLOWS:
+    if streamflow_source == StreamflowSource.GEOGLOWS_V2:
         forecasthour = None  # explicitly signal "daily"
 
     # NWM short range: hour can be 2 hours behind the current forecast hour

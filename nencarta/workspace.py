@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from nencarta.core.enumerations import  Mapper, StreamflowSource
+from nencarta.core.enumerations import Mapper
 from nencarta.core.configs import NencartaConfig
 
 # The folders a workspace writes to, which 'folder_paths' can move, and where they go by default
@@ -68,7 +68,7 @@ class Workspace:
         if bad_names:
             raise ValueError(f"Watershed '{self.watershed}': 'file_names' must give each file a name with no '/' or '\\': {bad_names}.")
 
-        self.strm_source = 'NWM' if configs.streamflow_source.is_nwm() else 'GEOGLOWS'
+        self.strm_source = 'NWM' if configs.streamflow_source.is_nwm() else configs.streamflow_source.file_prefix
         self.setup_dem_name(dem)
         self.DEM_folder = self.folder_path('DEM')
         self.ARC_Folder = self.folder_path('ARC_InputFiles')
@@ -111,12 +111,12 @@ class Workspace:
         self.LAND_File = self.file_path(self.land_folder, 'LAND_Raster', 'tif')
 
         #Datasets to be Created
-        streamflow_source: StreamflowSource = configs.streamflow_source
+        source = configs.streamflow_source.file_prefix
         self.DEM_StrmShp = self.file_path(self.strm_folder, 'StrmShp', stream_output_ext, 'source',
-                                          legacy=f"{streamflow_source}_{self.FileName}_StrmShp.{stream_output_ext}")
+                                          legacy=f"{source}_{self.FileName}_StrmShp.{stream_output_ext}")
         self.relocated_StrmShp = self.file_path(self.strm_folder, 'StrmShp_relocated', stream_output_ext, 'source')
         self.DEM_Reanalsyis_FlowFile = self.file_path(self.FLOW_Folder, 'Reanalysis', 'csv', 'source',
-                                                      legacy=f"{streamflow_source}_{self.FileName}_Reanalysis.csv")
+                                                      legacy=f"{source}_{self.FileName}_Reanalysis.csv")
         self.COMID_Q_File = self.file_path(self.FLOW_Folder, '2yr_flow_initial', 'csv')
 
         strm_source = self.strm_source

@@ -1,13 +1,18 @@
 import math
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
+import pandas as pd
 from numba import njit
 from osgeo import gdal
-from scipy.ndimage import distance_transform_edt, label
+from scipy.ndimage import distance_transform_edt
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
+from nencarta.core.vector import Vector
+from nencarta.tasks.channel_detection import river_channel
+from nencarta.tasks.stream_conflation import cell_sizes_m
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
 
@@ -15,14 +20,34 @@ from curve2flood import remove_cells_not_connected
 WATER_MAX_RISE_M = 1.0
 
 
-def leveled_water(dem: np.ndarray, valid: np.ndarray, min_feature_size: int = 5) -> np.ndarray:
-    """The DEM's cells at whole multiples of 0.5 m, as FABDEM levels water, in patches of more than
-    ``min_feature_size`` cells (fewer is chance)."""
-    leveled = valid & (dem % 0.5 == 0)
-    labels, _ = label(leveled, structure=np.ones((3, 3), int))
-    counts = np.bincount(labels.ravel())
-    counts[0] = 0
-    return counts[labels] > min_feature_size
+def reach_areas_km2(streams_gdf: gpd.GeoDataFrame | pd.DataFrame, configs) -> dict:
+    """Each reach's drainage area in km2, by id, from area_km2_field or else area_m2_field (empty without either)."""
+    id_col = configs.stream_id_field
+    if streams_gdf is None or id_col not in streams_gdf.columns:
+        return {}
+    if configs.area_km2_field and configs.area_km2_field in streams_gdf.columns:
+        area = pd.to_numeric(streams_gdf[configs.area_km2_field], errors="coerce")
+    elif configs.area_m2_field and configs.area_m2_field in streams_gdf.columns:
+        area = pd.to_numeric(streams_gdf[configs.area_m2_field], errors="coerce") / 1e6
+    else:
+        return {}
+    ids = pd.to_numeric(streams_gdf[id_col], errors="coerce")
+    keep = ids.notna() & area.notna()
+    return dict(zip(ids[keep].astype(np.int64).tolist(), area[keep].astype(float).tolist()))
+
+
+def dem_channel(dem_raster, dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_km2: dict,
+                connected: bool = True):
+    """
+    The channel the DEM shows along ``streams`` (see channel_detection.river_channel), on the grid of ``dem_raster``
+    (a Raster, or a gdal.Dataset).
+    """
+    if isinstance(dem_raster, gdal.Dataset):
+        geotransform, projection = dem_raster.GetGeoTransform(), dem_raster.GetProjection()
+    else:
+        geotransform, projection = dem_raster.geotransform, dem_raster.projection
+    dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
+    return river_channel(dem, valid, streams, area_km2, float(np.median(dx)), dy, connected=connected)
 
 
 def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float = WATER_MAX_RISE_M,
@@ -113,12 +138,14 @@ def _near_level(dem: np.ndarray, candidates: np.ndarray, dist: np.ndarray, rows:
     return out
 
 
-def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray) -> np.ndarray:
+def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, area_km2: dict | None = None
+               ) -> np.ndarray:
     """
-    The bathymetry water mask for ``streams`` (reach ids, 0 off them) on ``dem_raster`` (before the burn): the
-    stream cells and the water beside them at about the river's level (see near_the_rivers_level), in patches
-    touching a stream cell. The water is the land cover's, and with use_dem_derived_channel_mask also the water the
-    DEM levels (see leveled_water): the channel this DEM has, where the imagery saw the river elsewhere.
+    The bathymetry water mask for ``streams`` (reach ids, 0 off them, draining ``area_km2`` by id) on ``dem_raster``
+    (before the burn): the stream cells and the water beside them at about the river's level (see
+    near_the_rivers_level), in patches touching a stream cell. The water is the land cover's, and with
+    use_dem_derived_channel_mask also the channel the DEM shows (see channel_detection), where the imagery saw the
+    river elsewhere.
     """
     configs = workspace.configs
     dem = dem_raster.read_array()
@@ -129,7 +156,7 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray) ->
         valid = np.isfinite(dem) & (dem != 0)
         if dem_raster.nodata_value is not None:
             valid &= dem != dem_raster.nodata_value
-        water |= leveled_water(dem, valid)
+        water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}).channel
     water &= near_the_rivers_level(dem, streams, cells=water)
     return remove_cells_not_connected(water | (streams > 0), streams) > 0
 
@@ -155,12 +182,16 @@ def make_water_mask(workspace: Workspace) -> Path:
     # moved to the thalweg, and curve2flood discards whatever bathymetry falls outside this mask. On an overwrite
     # they are moved again, so the last run's are stale; the mask is remade from the new ones once they are.
     if configs.move_stream_network_to_thalweg and workspace.new_stream_raster.exists() and not configs.overwrite:
-        stream_ras = Raster(workspace.new_stream_raster)
+        stream_ras, stream_lines = Raster(workspace.new_stream_raster), workspace.new_StrmShp_matched
     else:
-        stream_ras = Raster(workspace.STRM_File_Clean)
+        stream_ras, stream_lines = Raster(workspace.STRM_File_Clean), workspace.DEM_StrmShp
     streams = stream_ras.read_array()
+    area_km2 = {}
+    if configs.use_dem_derived_channel_mask and stream_lines.exists():
+        table = Vector(stream_lines, use_threads=not configs.parallel).to_geopandas()
+        area_km2 = reach_areas_km2(table, configs)
 
-    F = water_mask(workspace, Raster(workspace.assigned_dem), streams).astype(np.uint8, copy=False)
+    F = water_mask(workspace, Raster(workspace.assigned_dem), streams, area_km2).astype(np.uint8, copy=False)
 
     Raster.write_array_using_reference(
         F,

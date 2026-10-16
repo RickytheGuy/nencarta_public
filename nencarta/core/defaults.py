@@ -104,11 +104,10 @@ CONFIG_SECTIONS = {
         "relocate_misplaced_streams": ConfigOption(True, "bool", "When moving the streams, first move reaches "
                                                                 "the DEM shows are off their river onto the flow "
                                                                 "paths their lines drain along."),
-        "use_dem_derived_channel_mask": ConfigOption(False, "bool", "When burning streams, smooth all the DEM's cells "
-                                                                    "at whole multiples of 0.5 m as water, not just "
-                                                                    "those in the water mask, leave the lines "
-                                                                    "unlowered on it, and add it to the water mask "
-                                                                    "near the river's level."),
+        "use_dem_derived_channel_mask": ConfigOption(False, "bool", "Find the channel the DEM shows along the "
+                                                                    "streams: when burning, smooth the water it "
+                                                                    "flattens and leave the lines unlowered on it, "
+                                                                    "and add the channel to the water mask."),
         "streams_as_parquet": ConfigOption(False, "bool", "Write stream networks as GeoParquet instead of GeoPackage."),
         "minimize_output_files": ConfigOption(False, "bool", "Delete the domain's source and relocated streams "
                                                              "once the moved stream network is written."),
