@@ -954,10 +954,6 @@ def burn_streams_into_dem(
     if lakes is not None:
         channel_mask = channel_mask.astype(bool) & ~lakes
 
-    # Mask out ocean (where elevation == 0)
-    ocean_mask = (dem == 0)
-    channel_mask &= ~ocean_mask
-
     # Mask out dem's no data value
     if nodata_value is not None:
         channel_mask &= (dem != nodata_value)

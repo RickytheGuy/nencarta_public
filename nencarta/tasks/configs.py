@@ -35,28 +35,7 @@ def _arc_inputs(dem: Path,
     params["Flow_File_QMax"] = highflow_field
     params["Spatial_Units"] = "deg"
 
-    optional_bathy_keys = [
-        "X_Section_Dist",
-        "Degree_Manip",
-        "Degree_Interval",
-        "Low_Spot_Range",
-        "Gen_Dir_Dist",
-        "Gen_Slope_Dist",
-        "Stream_Slope_Method",
-        "shallow_factor",
-        "deep_factor",
-        "k_decay",
-        "slope_adjustment_factor",
-        "Depth_Varying_n",
-        "bathy_bed_cap",
-        "compression"
-    ]
-
-    params.update({
-        key: bathy_args[key]
-        for key in optional_bathy_keys
-        if key in bathy_args
-    })
+    params.update(bathy_args)
 
     return params
 
