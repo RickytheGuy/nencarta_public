@@ -261,13 +261,16 @@ def define_arc_configs(workspace: Workspace,) -> Path:
 
         params["# Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File
-        # Use kernel method for bathymetry creation
+        # The flood mapper's bathymetry run maps no flood: it burns ARC_Bathy into the DEM as it is (FS_Bathy). So its
+        # mapper, TW_MultFact, TopWidthPlausibleLimit and FloodSpreader_SpecifyDepth change nothing.
         params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
         params["TW_MultFact"] = configs.bathy_args.get("TW_MultFact", DEFAULT_FLOODMAP_ARGS["TW_MultFact"])
         params["TopWidthPlausibleLimit"] = configs.bathy_args.get("TopWidthPlausibleLimit", DEFAULT_FLOODMAP_ARGS["TopWidthPlausibleLimit"])
         if not configs.bathy_args.get("Make_Output_GPKG", DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
             params["Make_Output_GPKG"] = False
 
+        # With the set depth, ARC finds the banks without the water mask; with the water mask, its water's end is
+        # each cross section's banks
         if configs.use_specified_depth_for_bathy_mask:
             params["FloodSpreader_SpecifyDepth"] = configs.specify_depths_for_bathy_mask[-1]
         else:

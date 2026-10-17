@@ -323,19 +323,22 @@ def move_streams_onto_flow_directions(
     their stream raster.
 
     Only flow paths draining at least new_strm_threshold_km2 are matched onto. For FLDPLN, which doesn't map
-    lakes, lakes cut the network: no stream runs inside one. With the other mappers, reaches touching a lake are
-    dropped unless they carry a river through it.
+    lakes, lakes cut the network: no stream runs inside one, and a reach flowing out of one starts below its outlet,
+    on workspace.filled_dem (see stream_conflation._below_outlets). With the other mappers, reaches touching a lake
+    are dropped unless they carry a river through it.
     """
     configs = workspace.configs
     flowdir_ds: gdal.Dataset = gdal.Open(str(workspace.flowdir))
     flowdir = flowdir_ds.ReadAsArray()
     flowdir_ds = None
 
-    valid = np.isfinite(dem) & (dem != 0)
+    valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
     lakes = load_lake_array(workspace, dem_raster)
     cut_lakes = lakes is not None and configs.mapper.is_curve2flood_fldpln_mapper()
+    # The DEM the flow directions were derived from, filled, which they run down (see derive_flow_directions)
+    filled = Raster(workspace.filled_dem).read_array() if cut_lakes and workspace.filled_dem.exists() else None
 
     id_col, ds_col = configs.stream_id_field, configs.downstream_id_field
     source_gdf, area_col = _with_area_km2(source_gdf, configs)
@@ -344,7 +347,7 @@ def move_streams_onto_flow_directions(
     result = conflate_to_flow_directions(
         source_gdf, flowdir, dem_raster.geotransform, dem_raster.projection, id_col, ds_col,
         order_col=order_col, area_col=area_col, lake_mask=lakes if cut_lakes else None, valid_mask=valid,
-        settings=ConflationSettings(min_channel_area_km2=configs.new_strm_threshold_km2),
+        settings=ConflationSettings(min_channel_area_km2=configs.new_strm_threshold_km2), dem=filled,
     )
     streams, raster = result.streams, result.raster
     if area_col == "__area_km2":
@@ -407,7 +410,7 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
         return source_gdf
 
     dem = dem_raster.read_array()
-    valid = np.isfinite(dem) & (dem != 0)
+    valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
     breached, _ = breach_dammed_rivers(gdf, dem, dem_raster.geotransform, dem_raster.projection,
@@ -523,9 +526,6 @@ def smooth_and_burn_dem(
         nodata_value = -9999
     nan_mask = np.isnan(dem)
     dem[nan_mask] = nodata_value
-
-    ocean_mask = (dem == 0)
-    dem[ocean_mask] = nodata_value
 
     configs = workspace.configs
     area_col = next((c for c in (configs.area_km2_field, configs.area_m2_field) if c and c in source_gdf.columns), None)
@@ -926,7 +926,7 @@ def burn_streams_into_dem(
     Burn every reach into ``dem`` (in place), upstream reaches first, in 0.5 m steps that never rise downstream,
     each starting no higher than the largest of the reaches flowing into it, by ``order_col`` and then ``area_col``
     (all of them, without either). Returns the channel mask without its specks (``min_feature_size`` cells or
-    fewer), lakes, ocean and nodata. Appends each burned line to ``paths``, if given (see burn_linestring).
+    fewer), lakes and nodata. Appends each burned line to ``paths``, if given (see burn_linestring).
 
     A line isn't lowered on ``leveled``, if given, the water the DEM flattens (see channel_detection): the line goes
     on down from such a cell at its level. Except at a line's end on the DEM's edge, which is lowered so the flow leaves there. The cells left so are
@@ -1329,7 +1329,7 @@ def _burn_cells(
             for r, c in outstream_neighbors:
                 dem[r, c] = upstream_elev + 0.5
 
-    # A reach that leaves the DEM, over its edge or into nodata (the ocean), ends 0.5 m lower, so the filled DEM routes
+    # A reach that leaves the DEM, over its edge or into nodata, ends 0.5 m lower, so the filled DEM routes
     # out there. Only there: each reach starts no higher than the reaches flowing into it, so lowering every reach's
     # end lowered the whole network below it 0.5 m at each junction, metres below a flat river's water downstream
     if has_written and dem[row2, col2] != nodata_value and (

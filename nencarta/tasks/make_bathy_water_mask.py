@@ -60,8 +60,8 @@ def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float 
     cells more, each carried up its reach's slope by how far it lies along the river from the nearest one. Not just
     the nearest one's level: a tributary's line can run across a dry bar beside the river. And not the lowest one's
     as it is: down a sloping river the water beside a cell is higher than the river farther down. Land cover's water
-    higher than that is ground the DEM shows dry, a bar or a floodplain the imagery caught flooded, and ARC's
-    bathymetry, spread across the water mask, would carve it down to the river's bed.
+    higher than that is ground the DEM shows dry, a bar or a floodplain the imagery caught flooded, and ARC, whose
+    banks are where the water mask's water ends, would carve it down to the river's bed.
 
     Only ``cells`` (default: all) are tested; the rest are False.
     """
@@ -153,7 +153,7 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
     if workspace.LAND_File.exists():
         water = (Raster(workspace.LAND_File).read_array() == configs.land_watervalue).reshape(dem.shape)
     if configs.use_dem_derived_channel_mask:
-        valid = np.isfinite(dem) & (dem != 0)
+        valid = np.isfinite(dem)
         if dem_raster.nodata_value is not None:
             valid &= dem != dem_raster.nodata_value
         water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}).channel

@@ -8,9 +8,11 @@ onto the D8 path it follows, keeping its ID so the flows keyed by that ID still 
 1. Each reach is sampled about once a cell, from upstream down, and matched onto the channel cells of the D8
    network as a hidden Markov model (map matching, Newson & Krumm 2009). The best-fitting stretch is kept. A
    reach too little of which follows the DEM is matched again, with a wider search and a looser fit.
-2. The matched reaches are painted onto the D8 network in flow order, each from its matched start to where the
-   next reach starts. Where two meet without a confluence in the source network, the source network decides
-   which carries on, and otherwise the larger river does.
+2. Each reach meets the flow of its main upstream reach (see _reconnect). The matched reaches are then painted
+   onto the D8 network in flow order, each from its matched start to where the next reach starts. Where two meet
+   without a confluence in the source network, the source network decides which carries on, and otherwise the
+   larger river does. A reach running beside a larger one before the two meet is drawn only to where it comes
+   beside it (see _drawn_cells).
 3. A reach left with a single cell takes a neighbouring one, and a reach left with none gets a short flow path of
    free cells near its line.
 
@@ -102,12 +104,15 @@ class ConflationSettings:
     fallback_radius_factor: float = 3.0
     # A reach whose match ends short of the reach the source network sends it to may carry on down its D8 path to
     # reach it, for at most this far. Covers the gap left by a short reach that could not be matched, and a
-    # tributary the DEM routes alongside the main stem before the two meet.
+    # tributary the DEM routes alongside the main stem before the two meet (but see min_beside_cells).
     max_extension_m: float = 3000.0
+    # A reach whose last cells run beside another reach, a cell away, for at least this many cells before the two
+    # meet ends at the first of them (see _drawn_cells): a small gap rather than two lines along one river.
+    min_beside_cells: int = 3
     # How far down the D8 path from a reach's main upstream reach (the one bringing it at least half its flow)
-    # _reconnect looks for where that flow goes: into the reach, which then starts where the upstream reach ends,
-    # or past it into a reach further down, which moves the reach onto that path. Across the flat water of braided
-    # and wide rivers D8 often takes another branch than the source network.
+    # _reconnect looks for where that flow goes: into the reach, which then starts where the upstream reach ends or
+    # where that flow joins it, or past it into a reach further down, which moves the reach onto that path. Across
+    # the flat water of braided and wide rivers D8 often takes another branch than the source network.
     max_reconnect_m: float = 10000.0
     # A reach whose match ends this close to some other matched reach (but at least min_snap_cells) is joined to
     # it, whatever the source network says about the two. And a reach draining into another this close to that
@@ -116,6 +121,15 @@ class ConflationSettings:
     min_snap_cells: float = 2.0
     # Reaches covering fewer cells than this are folded into the reach upstream of them.
     min_reach_cells: int = 2
+    # A reach leaving a lake -- its first cell within outlet_lake_cells of one -- starts in the river below the
+    # lake's outlet, not on the dam, weir or shore between the two (see _below_outlets): below its last step down of
+    # at least outlet_drop_m from one cell to the next within max_outlet_m of its start (but at least
+    # min_outlet_cells), as long as the river then falls less than that for outlet_tailwater_cells cells.
+    outlet_lake_cells: int = 2
+    outlet_drop_m: float = 1.0
+    max_outlet_m: float = 450.0
+    min_outlet_cells: int = 3
+    outlet_tailwater_cells: int = 3
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -859,14 +873,18 @@ def _matched_cells(start: np.ndarray, end: np.ndarray, down: np.ndarray) -> tupl
 
 @njit(cache=True)
 def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.ndarray, channel_id: np.ndarray,
-               to_outlet: np.ndarray, stop_mask: np.ndarray, ds: np.ndarray, stin: np.ndarray, stout: np.ndarray,
-               max_extension_m: float, max_reconnect_m: float, max_steps: int) -> int:
+               ctin: np.ndarray, ctout: np.ndarray, to_outlet: np.ndarray, stop_mask: np.ndarray, ds: np.ndarray,
+               stin: np.ndarray, stout: np.ndarray, max_extension_m: float, max_reconnect_m: float,
+               max_steps: int) -> int:
     """
     Follow each reach's main upstream reach (``feeder``, -1 for none) down its D8 path from its matched end, for
     at most ``max_reconnect_m``, to where its flow goes, and change the reach's match (in place) to meet it:
 
     - Into the reach's own match, but farther than _extend_ends carries the upstream reach (``max_extension_m``),
       or past another reach's match: the reach starts where the upstream reach ends.
+    - Into the reach's own match, which starts on another path, a smaller tributary's or a hillside's, that the
+      river's water doesn't take: the reach starts where the upstream reach's path joins it. A river started up a
+      tributary floods the tributary's valley as deep as the river.
     - Into a reach the source network puts downstream of the reach, before the reach: the flow bypasses it, so the
       reach is moved onto the path between the two.
 
@@ -910,6 +928,15 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
         if found == 1 and k > 0 and (crossed or base - to_outlet[channel_id[path[k - 1]]] > max_extension_m):
             start[r] = path[0]
             changed += 1
+        elif found == 1:
+            # The first cell of the reach's match on the upstream reach's path: where the path enters it, or joins
+            # it above the upstream reach's matched end
+            first = start[r]
+            while first != cell and not _is_downstream(ctin, ctout, channel_id[first], channel_id[start[u]]):
+                first = down[first]
+            if first != start[r]:
+                start[r] = first
+                changed += 1
         elif found == 2 and k >= 2:
             start[r] = path[0]
             end[r] = path[k - 1]
@@ -1194,6 +1221,7 @@ def conflate_to_flow_directions(
         valid_mask: np.ndarray | None = None,
         settings: ConflationSettings | None = None,
         flow: FlowNetwork | None = None,
+        dem: np.ndarray | None = None,
 ) -> ConflationResult:
     """
     Move ``source_gdf``'s reaches onto the D8 network of ``flowdir`` (D8 pointer codes, see D8_OFFSETS).
@@ -1205,7 +1233,9 @@ def conflate_to_flow_directions(
     Every reach with part of its line on the DEM, outside lakes, is placed; only reaches with none are left out.
 
     ``lake_mask`` (True inside a lake) cuts the network at lakes: no reach is matched inside one, and a reach
-    flowing into one ends at its shore. ``valid_mask`` (False on nodata or ocean) stops flow there.
+    flowing into one ends at its shore. With ``dem``, the filled DEM ``flowdir`` was derived from, a reach flowing
+    out of one starts in the river below its outlet (see _below_outlets). ``valid_mask`` (False on nodata) stops
+    flow there.
     """
     settings = settings or ConflationSettings()
     if flow is None:
@@ -1300,8 +1330,9 @@ def conflate_to_flow_directions(
     feeder = _main_feeders(placed, source, reach_area)
     reconnected = 0
     for _ in range(5):
-        changed = _reconnect(start, end, feeder, flow.down, flow.channel_id, flow.to_outlet_m, stop, source.ds,
-                             source.tin, source.tout, settings.max_extension_m, settings.max_reconnect_m,
+        changed = _reconnect(start, end, feeder, flow.down, flow.channel_id, flow.tin, flow.tout, flow.to_outlet_m,
+                             stop, source.ds, source.tin, source.tout, settings.max_extension_m,
+                             settings.max_reconnect_m,
                              int(settings.max_reconnect_m / min(flow.dy_m, float(flow.dx_m.min()))) + 2)
         reconnected += changed
         if not changed:
@@ -1346,17 +1377,23 @@ def conflate_to_flow_directions(
             LOG.warning(f"Conflation: {lost.size} reaches with part of their line on the DEM could not be placed: "
                         f"{lost.tolist()}.")
 
+    drawn = _drawn_cells(cells, label, flow, source, reach_area, score, settings.min_reach_cells,
+                         settings.min_beside_cells)
+    outlets = 0
+    if lake_mask is not None and dem is not None:
+        drawn, outlets = _below_outlets(cells, label, drawn, flow, stop, np.asarray(dem, np.float64).ravel(),
+                                        settings)
     raster = np.zeros(nrows * ncols, np.int32)
-    labelled = label >= 0
-    raster[cells[labelled]] = source.ids[label[labelled]]
+    raster[cells[drawn]] = source.ids[label[drawn]]
     raster = raster.reshape(nrows, ncols)
 
-    streams = _reach_lines(cells, label, flow, source, source_gdf, id_col, ds_col, snap_m)
+    streams = _reach_lines(cells, label, flow, source, source_gdf, id_col, ds_col, snap_m, drawn)
     LOG.info(
         f"Conflation: {len(streams)} of {n} source reaches placed on the D8 network ({int(keep.sum())} matched, "
         f"median matched fraction {np.median(matched_fraction[keep]) if keep.any() else 0:.2f}; "
         f"{int((placed & ~keep).sum())} matched with the wider radius, {reconnected} moved to meet the flow of "
-        f"the reach above, {stubs} given a short flow path near their line)."
+        f"the reach above, {stubs} given a short flow path near their line, {outlets} started below the outlet "
+        f"of the lake above)."
     )
     fraction = {int(source.ids[i]): float(matched_fraction[i]) for i in range(n)}
     return ConflationResult(streams, raster, fraction)
@@ -1627,10 +1664,174 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
     return np.empty(0, np.int64)
 
 
-def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source: SourceNetwork,
-                 source_gdf: gpd.GeoDataFrame, id_col: str, ds_col: str, end_m: float) -> gpd.GeoDataFrame:
+def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source: SourceNetwork, area: np.ndarray,
+                 score: np.ndarray, min_cells: int, min_beside: int) -> np.ndarray:
     """
-    One row per painted reach: its cells as a line, upstream to downstream, and the reach it drains into.
+    Which of the painted ``cells`` to draw: all of each reach's but the end of one that runs beside another reach
+    before the two meet.
+
+    D8 often takes a tributary down a path of its own beside the river it joins, a cell away, for a few cells
+    before the two merge, and the tributary's cells there only repeat the river's. A reach whose last ``min_beside``
+    cells or more are beside another reach ends at the first of them instead, a small gap above where it joins, and
+    still drains into the same reach. Where two run beside each other, the smaller one (see _outranks) ends. A cell
+    is beside another reach when one of its eight neighbours is that reach's and isn't downstream of it, so a river
+    meandering back past itself isn't cut. Each reach keeps ``min_cells``.
+    """
+    labelled = label >= 0
+    drawn = labelled.copy()
+    if not labelled.any():
+        return drawn
+    nrows, ncols, down = flow.nrows, flow.ncols, flow.down
+    owner = np.full(nrows * ncols, -1, np.int64)
+    owner[cells[labelled]] = label[labelled]
+    position = {int(c): i for i, c in enumerate(cells.tolist())}
+    counts = np.bincount(label[labelled], minlength=source.ids.size)
+    reach_cells, reach_label = cells[labelled], label[labelled]
+    below = down[reach_cells]
+    ends = (below < 0) | (owner[np.maximum(below, 0)] != reach_label)
+    end_count = np.bincount(reach_label[ends], minlength=source.ids.size)
+    # The last cell of each reach that is one unbroken path
+    last = {int(r): int(c) for r, c in zip(reach_label[ends], reach_cells[ends]) if end_count[r] == 1}
+    neighbours = [(d_row, d_col) for d_row in (-1, 0, 1) for d_col in (-1, 0, 1) if d_row or d_col]
+    max_walk = nrows + ncols
+
+    def downstream_of(cell: int, other: int) -> bool:
+        """Whether ``other`` is on the D8 path down from ``cell``."""
+        c, o = flow.channel_id[cell], flow.channel_id[other]
+        if c >= 0:
+            return bool(o >= 0 and flow.tin[o] <= flow.tin[c] <= flow.tout[o])
+        for _ in range(max_walk):
+            cell = down[cell]
+            if cell < 0:
+                return False
+            if cell == other:
+                return True
+        return False
+
+    def beside(cell: int, r: int) -> bool:
+        """Whether ``cell`` of reach ``r`` is beside a reach that outranks r."""
+        row, col = divmod(cell, ncols)
+        for d_row, d_col in neighbours:
+            rr, cc = row + d_row, col + d_col
+            if 0 <= rr < nrows and 0 <= cc < ncols:
+                nb = rr * ncols + cc
+                x = owner[nb]
+                if x >= 0 and x != r and _outranks(x, r, source.order, area, score) and not downstream_of(cell, nb):
+                    return True
+        return False
+
+    def above(cell: int, r: int) -> int:
+        """The cell of reach ``r`` that drains into ``cell``, or -1."""
+        row, col = divmod(cell, ncols)
+        for d_row, d_col in neighbours:
+            rr, cc = row + d_row, col + d_col
+            if 0 <= rr < nrows and 0 <= cc < ncols:
+                nb = rr * ncols + cc
+                if down[nb] == cell and owner[nb] == r:
+                    return nb
+        return -1
+
+    # The larger reaches first, so that a reach beside one that ends sooner is only cut beside what is left of it
+    for r in sorted(last, key=lambda r: (source.order[r], area[r], score[r], -r), reverse=True):
+        run = []
+        cell = last[r]
+        while cell >= 0 and beside(cell, r):
+            run.append(cell)
+            cell = above(cell, r)
+        if len(run) < min_beside:
+            continue
+        cut = min(len(run) - 1, counts[r] - min_cells)
+        for cell in run[:max(cut, 0)]:
+            owner[cell] = -1
+            drawn[position[cell]] = False
+    return drawn
+
+
+def _below_outlets(cells: np.ndarray, label: np.ndarray, drawn: np.ndarray, flow: FlowNetwork, lake: np.ndarray,
+                   dem: np.ndarray, settings: ConflationSettings) -> tuple[np.ndarray, int]:
+    """
+    Start each reach that flows out of a lake in the river below the lake's outlet, not on the dam, weir or shore
+    cells between the two. Returns the ``drawn`` cells left, and how many reaches were moved.
+
+    Lakes cut the network, so a reach leaving one starts at the first channel cell past its shore its line matched
+    onto, which is often on the dam or the lake's rim, metres above the river at its foot. FLDPLN floods from every
+    stream cell, and one perched like that floods the valley below at nearly the lake's level. A reach whose first
+    cell is within ``outlet_lake_cells`` of a ``lake`` cell leaves the lake, and its outlet drops it from the lake
+    in steps of at least ``outlet_drop_m`` from one cell to the next of ``dem`` (flat, the filled DEM). It starts
+    below the last such step within ``max_outlet_m`` of its first cell, unless:
+
+    - the river falls a step like that again within ``outlet_tailwater_cells`` below it: a steep stream rather than
+      an outlet, which keeps its cells;
+    - another reach flows into it: it starts at most where the first one joins it;
+    - it would be left with fewer than ``min_reach_cells``.
+    """
+    labelled = drawn & (label >= 0)
+    if not labelled.any():
+        return drawn, 0
+    nrows, ncols, down = flow.nrows, flow.ncols, flow.down
+    lake_2d = lake.reshape(nrows, ncols)
+    near = max(int(settings.outlet_lake_cells), 0)
+    window = max(int(round(settings.max_outlet_m / flow.cell_size_m)), settings.min_outlet_cells, 1)
+    tail = max(int(settings.outlet_tailwater_cells), 0)
+    min_cells = max(settings.min_reach_cells, 2)
+
+    owner = np.full(nrows * ncols, -1, np.int64)
+    owner[cells[labelled]] = label[labelled]
+    position = {int(c): i for i, c in enumerate(cells.tolist())}
+    reach_cells, reach_label = cells[labelled], label[labelled]
+    counts = np.bincount(reach_label, minlength=int(label.max()) + 1)
+    # Which cells a cell of the same reach drains into, and which a cell of another reach does
+    below = down[reach_cells]
+    flows_on = below >= 0
+    same = np.zeros(nrows * ncols, bool)
+    joined = np.zeros(nrows * ncols, bool)
+    into_owner = owner[np.maximum(below, 0)]
+    same[below[flows_on & (into_owner == reach_label)]] = True
+    joined[below[flows_on & (into_owner >= 0) & (into_owner != reach_label)]] = True
+    # Each reach's first cell: the one no cell of its own drains into (a reach that isn't one path is left alone)
+    heads = ~same[reach_cells]
+    head_count = np.bincount(reach_label[heads], minlength=counts.size)
+
+    moved = 0
+    for cell, r in zip(reach_cells[heads].tolist(), reach_label[heads].tolist()):
+        if head_count[r] != 1 or joined[cell]:
+            continue
+        row, col = divmod(cell, ncols)
+        if not lake_2d[max(row - near, 0):row + near + 1, max(col - near, 0):col + near + 1].any():
+            continue
+        path = [cell]
+        while len(path) <= window + tail:
+            nxt = int(down[path[-1]])
+            if nxt < 0 or owner[nxt] != r:
+                break
+            path.append(nxt)
+        z = dem[path]
+        steps = z[:-1] - z[1:]
+        # The outlet ends at the first reach joining this one, if that comes sooner
+        limit = min(window, len(steps))
+        for k in range(1, limit + 1):
+            if joined[path[k]]:
+                limit = k
+                break
+        drops = np.flatnonzero(steps[:limit] >= settings.outlet_drop_m)
+        if not drops.size:
+            continue
+        foot = int(drops[-1]) + 1
+        if (steps[foot:foot + tail] >= settings.outlet_drop_m).any() or counts[r] - foot < min_cells:
+            continue
+        for c in path[:foot]:
+            owner[c] = -1
+            drawn[position[c]] = False
+        moved += 1
+    return drawn, moved
+
+
+def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source: SourceNetwork,
+                 source_gdf: gpd.GeoDataFrame, id_col: str, ds_col: str, end_m: float,
+                 drawn: np.ndarray | None = None) -> gpd.GeoDataFrame:
+    """
+    One row per painted reach: its ``drawn`` cells (default all) as a line, upstream to downstream, and the reach
+    its painted cells drain into.
 
     A reach draining into another within ``end_m`` of that reach's last cell, where the source network doesn't
     send it there, drains where that reach does instead. Two reaches the source network sends into one that
@@ -1648,6 +1849,7 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
     order = np.lexsort((-to_end, reach_label))
     reach_cells = reach_cells[order]
     reach_label = reach_label[order]
+    reach_drawn = (np.ones(labelled.sum(), bool) if drawn is None else drawn[labelled])[order]
     bounds = np.flatnonzero(np.diff(reach_label)) + 1
     starts = np.concatenate(([0], bounds))
     stops = np.concatenate((bounds, [reach_label.size]))
@@ -1676,7 +1878,7 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         while ds_row >= 0 and near_end[hop] and not _is_downstream(source.tin, source.tout, reaches[ds_row], r):
             hop, ds_row = ds_row, into[ds_row]
         ds_id = int(source.ids[reaches[ds_row]]) if ds_row >= 0 else -1
-        rows.append((int(source.ids[r]), ds_id, shapely.linestrings(xy[a:b])))
+        rows.append((int(source.ids[r]), ds_id, shapely.linestrings(xy[a:b][reach_drawn[a:b]])))
     out = pd.DataFrame(rows, columns=[id_col, "__ds", "geometry"])
     out["topological_order"] = _upstream_first(out[id_col].to_numpy(), out["__ds"].to_numpy())
 

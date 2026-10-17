@@ -94,8 +94,9 @@ CONFIG_SECTIONS = {
         "drop_multilinestrings": ConfigOption(False, "bool", "Leave out reaches whose line is in several pieces."),
         "lake_filter_json": ConfigOption(None, "path", "GEOGLOWS JSON of the reaches inside lakes. Those reaches are "
                                                        "left out."),
-        "lakes": ConfigOption(None, "path", "Lake polygons. Lakes are kept out of burned channels and cut the moved "
-                                            "stream network."),
+        "lakes": ConfigOption(None, "path", "Lake polygons, with the ocean and any other big water the streams flow "
+                                            "into: a DEM's cells at 0 m aren't taken for the sea. Lakes are kept out "
+                                            "of burned channels and cut the moved stream network."),
         "move_stream_network_to_thalweg": ConfigOption(False, "bool", "Move each reach onto the DEM's flow path. "
                                                                       "Required by Curve2Flood-FLDPLNpy."),
         "new_strm_threshold_km2": ConfigOption(1, "float", "Smallest drainage area (km2) of the DEM flow paths that "
@@ -174,13 +175,16 @@ CONFIG_SECTIONS = {
     "Bathymetry": {
         "disable_bathymetry": ConfigOption(False, "bool", "Skip bathymetry and map floods on the DEM as it is."),
         "clean_dem": ConfigOption(False, "bool", "Smooth the stream channels with the DEM cleaner first."),
-        "use_specified_depth_for_bathy_mask": ConfigOption(True, "bool", "Outline the channel, for the DEM cleaner and "
-                                                                         "the bathymetry, by flooding the streams to "
-                                                                         "set depths (specify_depths_for_bathy_mask) "
-                                                                         "instead of using the water mask."),
-        "specify_depths_for_bathy_mask": ConfigOption([0.1], "float_list", "Flood depths (m) that outline the "
-                                                                           "channel: one, or two with clean_dem (DEM "
-                                                                           "cleaner, then bathymetry)."),
+        "use_specified_depth_for_bathy_mask": ConfigOption(True, "bool", "Outline the DEM cleaner's channels by "
+                                                                         "flooding the streams to set depths "
+                                                                         "(specify_depths_for_bathy_mask) instead of "
+                                                                         "using the water mask, and have ARC find the "
+                                                                         "banks without the water mask."),
+        "specify_depths_for_bathy_mask": ConfigOption([0.1], "float_list", "Flood depths (m): one, or two with "
+                                                                           "clean_dem (the DEM cleaner's outline, then "
+                                                                           "the bathymetry's). Only the DEM cleaner's "
+                                                                           "has an effect: ARC's channel is burned in "
+                                                                           "clipped to no outline."),
         "bathy_use_banks": ConfigOption(False, "bool", "Estimate bathymetry from the banks' elevation instead of the "
                                                        "water surface."),
         "find_banks_based_on_landcover": ConfigOption(True, "bool", "Put the banks where water land cover ends, for "
