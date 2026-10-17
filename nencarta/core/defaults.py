@@ -256,11 +256,6 @@ CONFIG_SECTIONS = {
         "fldpln_dh": ConfigOption(0.5, "float", "FLDPLN depth step (m). Used by the iterative solver."),
         "fldpln_min_depth": ConfigOption(0.1, "float", "FLDPLN: shallowest depth (m) counted as flooded."),
         "fldpln_max_depth": ConfigOption(25.0, "float", "FLDPLN: deepest flood (m) the library covers."),
-        "fldpln_max_drop_below_source": ConfigOption(None, "float", "FLDPLN: leave out floodplain cells more than "
-                                                                    "this many metres below the stream cell that "
-                                                                    "floods them. Without it water spills down broad "
-                                                                    "floodplains as deep as at the stream. Saves "
-                                                                    "memory."),
         "fldpln_spill_decay": ConfigOption(0.0, "float", "FLDPLN: depth to flood (m) added per cell along a spill, "
                                                          "to shorten spills. Charged only on each cell's D8 "
                                                          "successor, so it trims little."),

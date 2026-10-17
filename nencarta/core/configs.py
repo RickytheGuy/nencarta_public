@@ -346,7 +346,6 @@ class NencartaConfig:
         self.fldpln_dh: float = self.get("fldpln_dh")
         self.fldpln_min_depth: float = self.get("fldpln_min_depth")
         self.fldpln_max_depth: float = self.get("fldpln_max_depth")
-        self.fldpln_max_drop_below_source: float | None = self.get("fldpln_max_drop_below_source")
         self.fldpln_spill_decay: float = self.get("fldpln_spill_decay")
         self.fldpln_max_cells_per_segment: int | None = self.get("fldpln_max_cells_per_segment")
         self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")

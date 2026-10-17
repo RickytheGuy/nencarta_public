@@ -133,6 +133,12 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     if workspace.configs.lakes:
         bg_mask = load_lake_array(workspace, Raster(dem))
 
+    # The river's water widens each segment's TD(R) from its stream line to the channel below it, so the segment's
+    # water can't run down the channel past its end (see curve2flood.build_fldpln_library)
+    water_mask = None
+    if workspace.bathy_water_mask.exists():
+        water_mask = Raster(workspace.bathy_water_mask).read_array()
+
     LOG.info("Building FLDPLN library...")
     from curve2flood import build_fldpln_library
 
@@ -151,9 +157,9 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
         pbar = not workspace.configs.quiet,
         bg_mask=bg_mask,
         solver=workspace.configs.fldpln_solver,
-        max_drop_below_source=workspace.configs.fldpln_max_drop_below_source,
         spill_decay=workspace.configs.fldpln_spill_decay,
-        max_cells_per_segment=workspace.configs.fldpln_max_cells_per_segment
+        max_cells_per_segment=workspace.configs.fldpln_max_cells_per_segment,
+        water_mask=water_mask
     )
 
     return model_config
