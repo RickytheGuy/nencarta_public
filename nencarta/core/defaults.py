@@ -260,11 +260,15 @@ CONFIG_SECTIONS = {
                                                          "to shorten spills. Charged only on each cell's D8 "
                                                          "successor, so it trims little."),
         "fldpln_max_cells_per_segment": ConfigOption(None, "int", "FLDPLN: most floodplain cells one stream segment "
-                                                                  "may flood. Saves memory on flat ground."),
+                                                                  "may flood. Saves memory on flat ground. Exact "
+                                                                  "solver only."),
         "fldpln_keep_spilling": ConfigOption(False, "bool", "FLDPLN: keep routing water that spills over low divides. "
                                                             "Suits DEMs of 10 m or finer."),
-        "fldpln_solver": ConfigOption("exact", "text", "FLDPLN solver: exact (ignores fldpln_dh) or iterative.",
-                                      ("exact", "iterative")),
+        "fldpln_solver": ConfigOption("iterative", "text", "FLDPLN solver: iterative (steps up by fldpln_dh and "
+                                                           "spills once per step, as FLDPLN advises for 30 m DEMs) "
+                                                           "or exact (one sweep; spills as far as the water can run "
+                                                           "downhill, and ignores fldpln_dh).",
+                                      ("iterative", "exact")),
         "fldpln_parallel": ConfigOption(False, "bool", "FLDPLN: build the library with several processes. Cannot be "
                                                        "used with parallel."),
     },

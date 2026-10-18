@@ -351,6 +351,10 @@ class NencartaConfig:
         self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")
         self.fldpln_parallel: bool = self.get("fldpln_parallel")
         self.fldpln_solver: str = self.get("fldpln_solver")
+        if self.fldpln_max_cells_per_segment is not None and self.fldpln_solver != "exact":
+            LOG.warning(f"Watershed '{self.watershed_name}': 'fldpln_max_cells_per_segment' needs the exact FLDPLN "
+                        f"solver; ignoring it with the {self.fldpln_solver} solver.")
+            self.fldpln_max_cells_per_segment = None
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
         self.relocate_misplaced_streams: bool = self.get("relocate_misplaced_streams")
