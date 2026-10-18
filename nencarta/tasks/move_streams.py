@@ -336,7 +336,8 @@ def move_streams_onto_flow_directions(
 
     Only flow paths draining at least new_strm_threshold_km2 are matched onto. For FLDPLN, which doesn't map
     lakes, lakes cut the network: no stream runs inside one, and a reach flowing out of one starts below its outlet,
-    on workspace.filled_dem (see stream_conflation._below_outlets).
+    on workspace.filled_dem (see stream_conflation._below_outlets). A river flowing in across the DEM's edge comes in
+    at the river on workspace.filled_dem, not on its bank (see stream_conflation._river_at_edge).
     """
     configs = workspace.configs
     flowdir_ds: gdal.Dataset = gdal.Open(str(workspace.flowdir))
@@ -348,8 +349,9 @@ def move_streams_onto_flow_directions(
         valid &= dem != dem_raster.nodata_value
     lakes = load_lake_array(workspace, dem_raster)
     cut_lakes = lakes is not None and configs.mapper.is_curve2flood_fldpln_mapper()
-    # The DEM the flow directions were derived from, filled, which they run down (see derive_flow_directions)
-    filled = Raster(workspace.filled_dem).read_array() if cut_lakes and workspace.filled_dem.exists() else None
+    # The DEM the flow directions were derived from, filled, which they run down (see derive_flow_directions): where
+    # rivers come in across the edge, and leave lakes
+    filled = Raster(workspace.filled_dem).read_array() if workspace.filled_dem.exists() else None
 
     id_col, ds_col = configs.stream_id_field, configs.downstream_id_field
     source_gdf, area_col = _with_area_km2(source_gdf, configs)

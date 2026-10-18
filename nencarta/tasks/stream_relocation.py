@@ -210,7 +210,7 @@ class _Relocation:
         np.add.at(inflow, source.ds[source.ds >= 0], source.area[source.ds >= 0])
         _, _, _, offsets, cell_of_sample, inside = _sample_lines(source.geometry, flow, flow.cell_size_m)
         in_domain = inside & flow.valid.ravel()[cell_of_sample]
-        entering, entry_cells = _inflow_cells(offsets, in_domain, cell_of_sample, flow)
+        entering, entry_cells = _inflow_cells(offsets, in_domain, cell_of_sample, flow, self.Z.ravel())
         inflow[entering] = np.maximum(inflow[entering], source.area[entering])
         radius = np.array([self._radius(r) for r in range(n)])
         cells, km2 = _inflow_entries(entering, entry_cells, inflow, source, offsets, in_domain, cell_of_sample, flow,
@@ -861,6 +861,14 @@ def _inflow_entries(entering: np.ndarray, entry_cells: np.ndarray, inflow: np.nd
     for r, first in zip(entering.tolist(), entry_cells.tolist()):
         course = _course(r, offsets, in_domain, cell_of_sample, source.ds, own_inflow, max_cells)
         at = np.flatnonzero(course == first)
+        if course.size and at.size == 0:
+            # It comes in at its river, a cell or two beside where its line crosses the edge (see _river_at_edge)
+            row, col = divmod(first, flow.ncols)
+            rows, cols = np.divmod(course, flow.ncols)
+            near = np.flatnonzero(np.maximum(np.abs(rows - row), np.abs(cols - col)) <= 2)
+            if near.size:
+                course = np.insert(course, near[0], first)
+                at = near[:1]
         if course.size == 0 or at.size == 0:
             cells.append(first)
             km2.append(inflow[r])

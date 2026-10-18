@@ -78,7 +78,8 @@ FLOODMAP_MODE_LABELS = {
 # Choices the form makes that aren't config keys themselves: they pick which of the keys it sends
 DEM_MODES = {"file": "A DEM file", "folder": "A folder of DEMs", "bbox": "Cut from source DEMs to a bounding box"}
 FLOWLINE_MODES = {"file": "One stream network file", "many": "Search several stream network files"}
-WATER_MASK_MODES = {"depth": "The streams flooded to set depths", "water": "The water mask: the streams and the water along them"}
+WATER_MASK_MODES = {"depth": "The streams flooded to set depths (ARC finds the banks without the water mask)",
+                    "water": "The water mask: the streams and the water along them (also ARC's banks)"}
 MANNINGS_MODES = {"default": "NenCarta's table, for ESA WorldCover", "file": "My own table"}
 
 SLOPE_METHODS = ("local_average_corrected", "local_average", "reach_average", "end_points", "local_fit")
@@ -159,7 +160,6 @@ UNDERLYING_NAMES = {
     "fldpln_parallel": "fldpln_parallel",
     "fldpln_min_depth": "fldpln_min_depth",
     "fldpln_max_depth": "fldpln_max_depth",
-    "fldpln_max_drop_below_source": "fldpln_max_drop_below_source",
     "fldpln_spill_decay": "fldpln_spill_decay",
     "fldpln_max_cells_per_segment": "fldpln_max_cells_per_segment",
     "flood_waterlc_and_strm_cells": "Flood_WaterLC_and_STRM_Cells",
@@ -603,8 +603,9 @@ class ChoiceRow(QWidget):
 
 class DepthsWidget(QWidget):
     """
-    The flood depths that outline the channel (specify_depths_for_bathy_mask): the bathymetry's, and with the DEM
-    cleaner on, the cleaner's, which the list puts first.
+    The flood depths of specify_depths_for_bathy_mask: the bathymetry's, and with the DEM cleaner on, the cleaner's,
+    which the list puts first. Only the cleaner's outlines anything: ARC's channel is burned into the DEM clipped to
+    no outline, so the bathymetry's depth changes nothing, but the config still takes one.
     """
     changed = pyqtSignal()
 
@@ -617,7 +618,7 @@ class DepthsWidget(QWidget):
         self.cleaner_label = QLabel("For the DEM cleaner (m)")
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("For the bathymetry (m)"), 0, 0)
+        layout.addWidget(QLabel("For the bathymetry (m), not used"), 0, 0)
         layout.addWidget(self.bathymetry_edit, 0, 1)
         layout.addWidget(self.cleaner_label, 1, 0)
         layout.addWidget(self.cleaner_edit, 1, 1)
@@ -1321,7 +1322,8 @@ class FloodSimulationGUI(QMainWindow):
 
         group = self._make_group(tab, "Lakes")
         self._add_note(group, "lakes_note", "Use one of these. With the Curve2Flood-FLDPLNpy mapper, prefer the lake "
-                                            "polygons.")
+                                            "polygons. Put the ocean in the lake polygons too: a DEM's cells at 0 m "
+                                            "aren't taken for the sea.")
         self._add_path(group, "lake_filter_json", "Lake filter JSON", "", file_filter="JSON Files (*.json);;All Files (*)")
         self._add_path(group, "lakes", "Lake polygons", "", file_filter=vector_files)
 
@@ -1335,7 +1337,7 @@ class FloodSimulationGUI(QMainWindow):
         self._indent("land_cover_cache")
 
         group = self._make_group(tab, "Water Mask")
-        self._add_choice(group, "use_specified_depth_for_bathy_mask", "The channel ARC and the DEM cleaner outline",
+        self._add_choice(group, "use_specified_depth_for_bathy_mask", "The DEM cleaner's channel outline",
                          WATER_MASK_MODES, _saved_water_mask_mode(), config_key=True)
         depths = DepthsWidget(_setting_list("specify_depths_for_bathy_mask", _default("specify_depths_for_bathy_mask")))
         self._add_row(group, "Flood depths", depths, "specify_depths_for_bathy_mask", "depths")
@@ -1460,8 +1462,6 @@ class FloodSimulationGUI(QMainWindow):
                        parser="float")
         self._add_line(group, "fldpln_max_depth", "Deepest flood the library covers (m)", _default("fldpln_max_depth"),
                        parser="float")
-        self._add_line(group, "fldpln_max_drop_below_source", "Most a cell may lie below the stream cell flooding it (m)",
-                       "", parser="float", placeholder="Optional")
         self._add_line(group, "fldpln_spill_decay", "Depth added per cell along a spill (m)",
                        _default("fldpln_spill_decay"), parser="float")
         self._add_line(group, "fldpln_max_cells_per_segment", "Most cells one segment may flood", "", parser="int",
@@ -1478,12 +1478,12 @@ class FloodSimulationGUI(QMainWindow):
         fldpln = self._is_fldpln
         solver = lambda: self.input_fields["fldpln_solver"].currentText()
         self.show_when(fldpln, "use_parquet", "fldpln_solver", "fldpln_parallel", "fldpln_min_depth", "fldpln_max_depth",
-                       "fldpln_max_drop_below_source", "fldpln_spill_decay")
+                       "fldpln_spill_decay")
         self.show_when(lambda: fldpln() and solver() == "iterative", "fldpln_dh", "fldpln_keep_spilling")
         self.show_when(lambda: fldpln() and solver() == "exact", "fldpln_max_cells_per_segment")
         self.show_when(lambda: not fldpln(), "floodmap_args.TW_MultFact", "floodmap_args.TopWidthPlausibleLimit")
         self._indent("use_parquet", "fldpln_solver", "fldpln_dh", "fldpln_keep_spilling", "fldpln_parallel",
-                     "fldpln_min_depth", "fldpln_max_depth", "fldpln_max_drop_below_source", "fldpln_spill_decay",
+                     "fldpln_min_depth", "fldpln_max_depth", "fldpln_spill_decay",
                      "fldpln_max_cells_per_segment")
 
         group = self._make_group(tab, "Outputs")

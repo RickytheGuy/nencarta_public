@@ -103,9 +103,14 @@ class ConflationSettings:
     # _stub_cells), so every reach with part of its line on the DEM, outside lakes, is placed.
     fallback_radius_factor: float = 3.0
     # A reach whose match ends short of the reach the source network sends it to may carry on down its D8 path to
-    # reach it, for at most this far. Covers the gap left by a short reach that could not be matched, and a
-    # tributary the DEM routes alongside the main stem before the two meet (but see min_beside_cells).
+    # reach it, for at most this far, or as far as its own line runs on below the match, unmatched, if that is
+    # longer. Covers the gap left by a short reach that could not be matched, a tributary the DEM routes alongside
+    # the main stem before the two meet (but see min_beside_cells), and the lower part of a reach whose line leaves
+    # its river across braided or flat water, where the river's D8 path still leads to the reach below.
     max_extension_m: float = 3000.0
+    # How much longer than that unmatched part of the line the D8 path may be: D8's staircase makes a path up to
+    # ~8% longer than the line it follows, and across braided water the two wander differently.
+    unmatched_extension_factor: float = 1.25
     # A reach whose last cells run beside another reach, a cell away, for at least this many cells before the two
     # meet ends at the first of them (see _drawn_cells): a small gap rather than two lines along one river.
     min_beside_cells: int = 3
@@ -947,15 +952,16 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
 @njit(cache=True)
 def _extend_ends(start: np.ndarray, end: np.ndarray, down: np.ndarray, channel_id: np.ndarray,
                  to_outlet: np.ndarray, stop_mask: np.ndarray, ds: np.ndarray, stin: np.ndarray,
-                 stout: np.ndarray, max_extension_m: float, snap_m: float) -> np.ndarray:
+                 stout: np.ndarray, max_extension_m: float, snap_m: float, unmatched_m: np.ndarray) -> np.ndarray:
     """
     Where each matched reach's claim ends.
 
     A reach claims the D8 path from its matched start to its matched end, cut short at the first cell of
     ``stop_mask`` (a lake). Past its matched end it carries on down the D8 path, while that stays clear of
     ``stop_mask``, until it reaches a cell another reach matched onto: when the source network sends the reach on
-    to that reach (see _related) it may go as far as ``max_extension_m`` to get there, and otherwise only
-    ``snap_m``. A reach that reaches nobody ends where its match ended.
+    to that reach (see _related) it may go as far as ``max_extension_m``, or as far as its own line ran on
+    unmatched below its match (``unmatched_m``) if that is longer, to get there, and otherwise only ``snap_m``. A
+    reach that reaches nobody ends where its match ended.
     """
     n = start.size
     owner_cell, owner = _matched_cells(start, end, down)
@@ -981,11 +987,12 @@ def _extend_ends(start: np.ndarray, end: np.ndarray, down: np.ndarray, channel_i
             continue
         # Past the matched end
         base = to_outlet[channel_id[last]]
+        reach_m = max(max_extension_m, unmatched_m[r])
         prev = last
         cell = down[last]
         while cell >= 0 and not stop_mask[cell]:
             travelled = base - to_outlet[channel_id[cell]]
-            if travelled > max_extension_m:
+            if travelled > reach_m:
                 break
             lo = np.searchsorted(owner_cell, cell)
             hit = False
@@ -1234,8 +1241,9 @@ def conflate_to_flow_directions(
 
     ``lake_mask`` (True inside a lake) cuts the network at lakes: no reach is matched inside one, and a reach
     flowing into one ends at its shore. With ``dem``, the filled DEM ``flowdir`` was derived from, a reach flowing
-    out of one starts in the river below its outlet (see _below_outlets). ``valid_mask`` (False on nodata) stops
-    flow there.
+    out of one starts in the river below its outlet (see _below_outlets), and a river flowing in across the edge
+    of the domain comes in at the river rather than on its bank (see _river_at_edge). ``valid_mask`` (False on
+    nodata) stops flow there.
     """
     settings = settings or ConflationSettings()
     if flow is None:
@@ -1265,9 +1273,11 @@ def conflate_to_flow_directions(
     s_rows, s_cols, along, sample_offsets, cell_of_sample, inside = _sample_lines(source.geometry, flow, spacing_m)
     reach_of_sample = np.repeat(np.arange(n), np.diff(sample_offsets))
     usable = inside & flow.valid.ravel()[cell_of_sample] & ~stop[cell_of_sample]
+    if dem is not None:
+        dem = np.asarray(dem, np.float64).ravel()
 
     flow.build_channels(settings.min_channel_area_km2,
-                        _inflow_cells(sample_offsets, usable, cell_of_sample, flow)[1])
+                        _inflow_cells(sample_offsets, usable, cell_of_sample, flow, dem, stop)[1])
     if flow.channel_cells.size == 0:
         return empty_result()
 
@@ -1299,6 +1309,7 @@ def conflate_to_flow_directions(
     # way along -- the source network sends it upstream, or its ends were told apart wrongly -- can only match a
     # few cells as drawn, so each is also tried the other way round, and the better fit kept.
     loose = (usable_length > 0) & ~keep
+    flipped = np.zeros(n, bool)   # matched against its line's direction
     if loose.any():
         sample_wide = (radius * settings.fallback_radius_factor)[reach_of_sample]
 
@@ -1321,10 +1332,15 @@ def conflate_to_flow_directions(
         for whole, ahead, behind in zip((score, first_sample, last_sample, first_cid, last_cid, matched), forward,
                                         backward):
             whole[loose] = np.where(backward_better, behind, ahead)[loose]
+        flipped[loose] = backward_better[loose]
     placed = matched > 0
     matched_fraction = np.where(placed, _matched_fraction(first_sample, last_sample, matched, usable_length), 0.0)
     start = np.where(placed, flow.channel_cells[np.maximum(first_cid, 0)], -1)
     end = np.where(placed, flow.channel_cells[np.maximum(last_cid, 0)], -1)
+    # How far each reach's own line runs on below its match, unmatched: how far _extend_ends may carry it to the reach
+    # below (as well as max_extension_m)
+    unmatched_m = _unmatched_below(sample_offsets, usable, last_sample, flipped) * spacing_m \
+        * settings.unmatched_extension_factor
 
     # Each reach meets the flow of its main upstream reach (see _reconnect), repeated so a change can carry on down
     feeder = _main_feeders(placed, source, reach_area)
@@ -1342,7 +1358,7 @@ def conflate_to_flow_directions(
 
     snap_m = max(settings.snap_m, settings.min_snap_cells * flow.cell_size_m)
     claim_end = _extend_ends(start, end, flow.down, flow.channel_id, flow.to_outlet_m, stop, source.ds,
-                             source.tin, source.tout, settings.max_extension_m, snap_m)
+                             source.tin, source.tout, settings.max_extension_m, snap_m, unmatched_m)
     cells, label, first, last = _paint(start, claim_end, flow.down, flow.channel_id, flow.tin, flow.tout,
                                        flow.to_outlet_m, source.ds, source.tin, source.tout, source.order,
                                        reach_area, score, settings.max_extension_m)
@@ -1381,8 +1397,7 @@ def conflate_to_flow_directions(
                          settings.min_beside_cells)
     outlets = 0
     if lake_mask is not None and dem is not None:
-        drawn, outlets = _below_outlets(cells, label, drawn, flow, stop, np.asarray(dem, np.float64).ravel(),
-                                        settings)
+        drawn, outlets = _below_outlets(cells, label, drawn, flow, stop, dem, settings)
     raster = np.zeros(nrows * ncols, np.int32)
     raster[cells[drawn]] = source.ids[label[drawn]]
     raster = raster.reshape(nrows, ncols)
@@ -1415,6 +1430,26 @@ def _main_feeders(placed: np.ndarray, source: SourceNetwork, area: np.ndarray) -
     return feeder
 
 
+def _unmatched_below(sample_offsets: np.ndarray, usable: np.ndarray, last_sample: np.ndarray,
+                     flipped: np.ndarray) -> np.ndarray:
+    """
+    How many usable samples of each reach's line lie past its match's last sample, in the direction it was matched
+    (``flipped``: against its line, where ``last_sample`` indexes the reversed samples). 0 without a match.
+    """
+    n = sample_offsets.size - 1
+    out = np.zeros(n)
+    for r in range(n):
+        if last_sample[r] < 0:
+            continue
+        a, b = int(sample_offsets[r]), int(sample_offsets[r + 1])
+        if flipped[r]:
+            # Position p of the reversed samples is sample a + b - 1 - p: those past it are the ones before that
+            out[r] = usable[a:a + b - 1 - int(last_sample[r])].sum()
+        else:
+            out[r] = usable[int(last_sample[r]) + 1:b].sum()
+    return out
+
+
 def _matched_fraction(first_sample: np.ndarray, last_sample: np.ndarray, matched: np.ndarray,
                       usable_length: np.ndarray) -> np.ndarray:
     """The share of each reach's usable samples its match spans."""
@@ -1445,12 +1480,15 @@ def _sample_lines(lines: np.ndarray, flow: FlowNetwork, spacing_m: float):
 
 
 def _inflow_cells(sample_offsets: np.ndarray, usable: np.ndarray, cell_of_sample: np.ndarray, flow: FlowNetwork,
+                  dem: np.ndarray | None = None, stop: np.ndarray | None = None,
                   max_candidates: int = 200) -> tuple[np.ndarray, np.ndarray]:
     """
     Where water the domain's DEM doesn't drain flows in along a source reach: on each reach that starts outside the
     domain, on nodata or in a lake, the first usable sample whose D8 path carries it into the domain (see
     _runs_inward). Near the domain's edge a D8 path often runs straight back out of it, which would lose the
-    inflow. Returns the reaches and their cells.
+    inflow. Where that sample is on the domain's edge, the water comes in at the river beside it (see
+    _river_at_edge; ``dem`` is the filled DEM, flat, and no water comes in on ``stop``). Returns the reaches and
+    their cells.
     """
     reaches, cells = [], []
     for r in range(sample_offsets.size - 1):
@@ -1461,8 +1499,54 @@ def _inflow_cells(sample_offsets: np.ndarray, usable: np.ndarray, cell_of_sample
         candidates = cell_of_sample[a + ok]
         cell = next((c for c in candidates[:max_candidates] if _runs_inward(flow, int(c))), candidates[0])
         reaches.append(r)
-        cells.append(cell)
+        cells.append(_river_at_edge(flow, int(cell), dem, stop))
     return np.asarray(reaches, np.int64), np.asarray(cells, np.int64)
+
+
+def _river_at_edge(flow: FlowNetwork, cell: int, dem: np.ndarray | None = None, stop: np.ndarray | None = None,
+                   max_cells: int = 2) -> int:
+    """
+    Where a river whose source line crosses the domain's edge in ``cell`` comes in.
+
+    A source line is often a cell or two off its river where it crosses the edge, on the bank. Its water coming in
+    there would make the bank cell channel (it would drain it all), and the reach would start on it, metres above
+    the river. So with ``dem`` (the filled DEM, flat) the river comes in at the lowest of ``cell`` and the cells on
+    the edge within ``max_cells`` of it whose D8 paths run into the domain (see _runs_inward), the nearest if
+    several are; without, at the last cell on the edge of ``cell``'s D8 path, at most ``max_cells`` down it: a bank
+    drains to its river. Never on ``stop``, and ``cell`` as it is when it isn't on the edge.
+    """
+    if not _on_edge(flow, cell):
+        return cell
+    ncols, valid = flow.ncols, flow.valid.ravel()
+
+    def open_edge(c: int) -> bool:
+        return valid[c] and (stop is None or not stop[c]) and _on_edge(flow, c)
+
+    if dem is None:
+        for _ in range(max_cells):
+            below = int(flow.down[cell])
+            if below < 0 or not open_edge(below):
+                break
+            cell = below
+        return cell
+    row, col = divmod(cell, ncols)
+    best, best_key = cell, (dem[cell], 0)
+    for r in range(max(row - max_cells, 0), min(row + max_cells + 1, flow.nrows)):
+        for c in range(max(col - max_cells, 0), min(col + max_cells + 1, ncols)):
+            other = r * ncols + c
+            key = (dem[other], (r - row) ** 2 + (c - col) ** 2)
+            if other != cell and np.isfinite(key[0]) and key < best_key and open_edge(other) \
+                    and _runs_inward(flow, other):
+                best, best_key = other, key
+    return best
+
+
+def _on_edge(flow: FlowNetwork, cell: int) -> bool:
+    """Whether ``cell`` is on the domain's edge: on the grid's, or next to nodata."""
+    row, col = divmod(cell, flow.ncols)
+    if min(row, col, flow.nrows - 1 - row, flow.ncols - 1 - col) == 0:
+        return True
+    return not flow.valid[row - 1:row + 2, col - 1:col + 2].all()
 
 
 def _runs_inward(flow: FlowNetwork, cell: int, min_run: int = 10, depth: int = 20, max_steps: int = 500) -> bool:
