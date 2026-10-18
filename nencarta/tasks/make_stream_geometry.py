@@ -96,8 +96,8 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         gdf = gdf[~gdf[configs.stream_id_field].isin(configs.exclude)]
 
     gdf['geometry'] = gdf.geometry.line_merge()
-    # Streams that are moved keep them until the moved network is made: they are relocated, burned and matched with
-    # the rest, and dropped from it then (see move_streams.move_streams_onto_flow_directions)
+    # Streams that are moved keep them here, and are left out before they are relocated, burned or moved (see
+    # move_streams._reaches_left_out)
     if configs.drop_multilinestrings and not configs.move_stream_network_to_thalweg             and not configs.mapper.is_curve2flood_fldpln_mapper():
         gdf = gdf[gdf.geometry.geom_type != 'MultiLineString'].copy()
 
