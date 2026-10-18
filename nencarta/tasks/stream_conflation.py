@@ -22,7 +22,6 @@ cut the network, and every reach is one unbroken D8 path.
 """
 from __future__ import annotations
 
-import heapq
 import math
 from dataclasses import dataclass
 
@@ -165,11 +164,13 @@ def cell_sizes_m(geotransform: tuple, projection: str, nrows: int) -> tuple[np.n
 
 
 @njit(cache=True)
-def _downstream_cells(flowdir: np.ndarray, valid: np.ndarray, row_offsets: np.ndarray,
-                      col_offsets: np.ndarray) -> np.ndarray:
-    """The flat index of the cell each cell drains into, or -1 where its flow stops (a pit, nodata, the edge)."""
+def _downstream_cells(flowdir: np.ndarray, valid: np.ndarray, row_offsets: np.ndarray, col_offsets: np.ndarray,
+                      down: np.ndarray) -> None:
+    """
+    Set ``down`` (flat, all -1) to the flat index of the cell each cell drains into, leaving -1 where its flow stops
+    (a pit, nodata, the edge).
+    """
     nrows, ncols = flowdir.shape
-    down = np.full(nrows * ncols, -1, np.int64)
     for row in range(nrows):
         for col in range(ncols):
             if not valid[row, col]:
@@ -186,7 +187,6 @@ def _downstream_cells(flowdir: np.ndarray, valid: np.ndarray, row_offsets: np.nd
             if to_row < 0 or to_row >= nrows or to_col < 0 or to_col >= ncols or not valid[to_row, to_col]:
                 continue
             down[row * ncols + col] = to_row * ncols + to_col
-    return down
 
 
 @njit(cache=True)
@@ -205,7 +205,7 @@ def _accumulate(down: np.ndarray, cell_area_by_row: np.ndarray, ncols: int) -> t
     area = np.empty(n, np.float32)
     for i in range(n):
         area[i] = cell_area_by_row[i // ncols]
-    queue = np.empty(n, np.int64)
+    queue = np.empty(n, down.dtype)
     head = 0
     tail = 0
     for i in range(n):
@@ -338,11 +338,33 @@ class FlowNetwork:
         self.cell_size_m = float(math.sqrt(float(np.median(self.dx_m)) * self.dy_m))
 
         row_offsets, col_offsets = d8_offset_tables()
-        self.down = _downstream_cells(flowdir, self.valid, row_offsets, col_offsets)
+        # Flat cell indices, int32 where they fit: the largest arrays the network holds take half the memory
+        index_type = np.int32 if self.nrows * self.ncols < np.iinfo(np.int32).max else np.int64
+        self.down = np.full(self.nrows * self.ncols, -1, index_type)
+        _downstream_cells(flowdir, self.valid, row_offsets, col_offsets, self.down)
         self.area_km2, cut = _accumulate(self.down, self.dx_m * self.dy_m / 1e6, self.ncols)
         if cut:
             LOG.warning(f"The flow direction raster has {cut} cells on flow cycles; they were cut from the network.")
         self.channel_cells = np.empty(0, np.int64)
+
+    @classmethod
+    def without_flow(cls, shape: tuple[int, int], geotransform: tuple, projection: str,
+                     valid: np.ndarray | None = None) -> FlowNetwork:
+        """
+        The network of a flow direction raster with no flow anywhere, each cell draining only itself, made without
+        tracing it: for the grid, its cells' sizes and their drainage areas alone. It has no ``down``.
+        """
+        self = cls.__new__(cls)
+        self.nrows, self.ncols = shape
+        self.geotransform = tuple(geotransform)
+        self.projection = projection
+        self.valid = np.ones(shape, np.bool_) if valid is None else np.ascontiguousarray(valid, dtype=np.bool_)
+        self.dx_m, self.dy_m = cell_sizes_m(self.geotransform, projection, self.nrows)
+        self.cell_size_m = float(math.sqrt(float(np.median(self.dx_m)) * self.dy_m))
+        self.down = None
+        self.area_km2 = np.repeat((self.dx_m * self.dy_m / 1e6).astype(np.float32), self.ncols)
+        self.channel_cells = np.empty(0, np.int64)
+        return self
 
     def build_channels(self, min_channel_area_km2: float, inflow_cells: np.ndarray | None = None,
                        inflow_km2: np.ndarray | None = None) -> None:
@@ -361,10 +383,12 @@ class FlowNetwork:
             _add_inflow(self.down, area, cells, amounts)
         self.channel_area_km2 = area
         self.channel_cells = np.flatnonzero((area >= min_channel_area_km2) & self.valid.ravel())
-        self.channel_id = np.full(self.down.size, -1, np.int64)
-        self.channel_id[self.channel_cells] = np.arange(self.channel_cells.size)
+        # A raster's worth of ids: int32 when they fit, halving its memory
+        id_type = np.int32 if self.channel_cells.size < np.iinfo(np.int32).max else np.int64
+        self.channel_id = np.full(self.down.size, -1, id_type)
+        self.channel_id[self.channel_cells] = np.arange(self.channel_cells.size, dtype=id_type)
         downstream = self.down[self.channel_cells]
-        parent = np.where(downstream >= 0, self.channel_id[np.maximum(downstream, 0)], -1)
+        parent = np.where(downstream >= 0, self.channel_id[np.maximum(downstream, 0)], -1).astype(np.int64)
         step = _step_lengths(self.channel_cells, self.down, self.ncols, self.dx_m, self.dy_m)
         self.tin, self.tout, self.to_outlet_m = _euler_tour(parent, step)
 
@@ -1249,12 +1273,11 @@ def conflate_to_flow_directions(
     if flow is None:
         flow = FlowNetwork(flowdir, geotransform, projection, valid_mask)
     nrows, ncols = flow.nrows, flow.ncols
-    empty_raster = np.zeros((nrows, ncols), np.int32)
     out_columns = [c for c in source_gdf.columns if c != source_gdf.geometry.name]
 
     def empty_result() -> ConflationResult:
         return ConflationResult(gpd.GeoDataFrame(columns=out_columns + ["geometry"], geometry="geometry",
-                                                 crs=source_gdf.crs), empty_raster, {})
+                                                 crs=source_gdf.crs), np.zeros((nrows, ncols), np.int32), {})
 
     if source_gdf.empty:
         return empty_result()
@@ -1606,8 +1629,31 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
     def rank(x: int) -> tuple:
         return source.order[x], area[x], score[x]
 
+    # The reaches by their last cell, kept in step with ``last``: the reaches draining into a cell are then found among
+    # the cells around it, rather than by going through every reach each time
+    ends = {}
+    for x in np.flatnonzero(last >= 0).tolist():
+        ends.setdefault(int(last[x]), set()).add(x)
+
+    def set_last(x: int, cell: int) -> None:
+        if last[x] >= 0:
+            ends[int(last[x])].discard(x)
+        last[x] = cell
+        if cell >= 0:
+            ends.setdefault(int(cell), set()).add(x)
+
     def feeders(cell: int, r: int) -> list:
-        return [int(x) for x in np.flatnonzero(last >= 0) if x != r and down[last[x]] == cell]
+        """The reaches but r whose last cell drains into ``cell``, in order."""
+        row, col = divmod(cell, ncols)
+        found = []
+        for d_row in (-1, 0, 1):
+            for d_col in (-1, 0, 1):
+                r_, c_ = row + d_row, col + d_col
+                if (d_row or d_col) and 0 <= r_ < nrows and 0 <= c_ < ncols:
+                    nb = r_ * ncols + c_
+                    if down[nb] == cell:
+                        found.extend(x for x in ends.get(nb, ()) if x != r)
+        return sorted(found)
 
     def above(cell: int, x: int) -> int:
         """The cell of reach ``x`` that drains into ``cell``."""
@@ -1627,7 +1673,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
             below = int(down[last[r]])
             if below >= 0 and open_cell[below] and owner(below) < 0:
                 give(below, r)
-                last[r] = below
+                set_last(r, below)
                 counts[r] += 1
                 continue
             donors = [x for x in feeders(int(first[r]), r) if counts[x] > min_cells]
@@ -1635,14 +1681,14 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                 x = max(donors, key=rank)
                 give(int(last[x]), r)
                 first[r] = last[x]
-                last[x] = above(int(last[x]), x)
+                set_last(x, above(int(last[x]), x))
                 counts[x] -= 1
                 counts[r] += 1
                 continue
             d = owner(below) if below >= 0 else -1
             if d >= 0 and first[d] == below and counts[d] > min_cells and not feeders(below, r):
                 give(below, r)
-                last[r] = below
+                set_last(r, below)
                 first[d] = down[below]
                 counts[d] -= 1
                 counts[r] += 1
@@ -1659,9 +1705,10 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                 break
             cell = int(down[cell])
         if heir >= 0:
-            last[heir] = last[r]
+            set_last(heir, int(last[r]))
             counts[heir] += counts[r]
-        first[r] = last[r] = -1
+        first[r] = -1
+        set_last(r, -1)
         counts[r] = 0
     return np.asarray(cells, np.int64), np.asarray(label, np.int64)
 
@@ -1964,10 +2011,8 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         ds_id = int(source.ids[reaches[ds_row]]) if ds_row >= 0 else -1
         rows.append((int(source.ids[r]), ds_id, shapely.linestrings(xy[a:b][reach_drawn[a:b]])))
     out = pd.DataFrame(rows, columns=[id_col, "__ds", "geometry"])
-    out["topological_order"] = _upstream_first(out[id_col].to_numpy(), out["__ds"].to_numpy())
 
     attributes = source_gdf.drop(columns=[source_gdf.geometry.name]).copy()
-    attributes = attributes.drop(columns=[c for c in ("topological_order",) if c in attributes.columns])
     attributes[id_col] = pd.to_numeric(attributes[id_col], errors="coerce")
     attributes = attributes.drop_duplicates(subset=id_col).set_index(id_col)
     out = out.join(attributes, on=id_col)
@@ -2010,32 +2055,3 @@ def _to_reach_end(cells: np.ndarray, label: np.ndarray, down: np.ndarray, ncols:
         for t in range(k - 2, -1, -1):
             out[walk[t]] = out[walk[t + 1]] + step[walk[t]]
     return out
-
-
-def _upstream_first(ids: np.ndarray, ds: np.ndarray) -> np.ndarray:
-    """
-    A rank for each reach that puts every reach before the one it drains into; ties go to the smaller id.
-
-    Curve2Flood's FLDPLN mapper sorts the stream network by this ``topological_order`` before chaining reaches
-    into main stems.
-    """
-    index = {int(rid): i for i, rid in enumerate(ids)}
-    downstream = np.array([index.get(int(d), -1) for d in ds], np.int64)
-    pending = np.zeros(ids.size, np.int64)
-    for d in downstream:
-        if d >= 0:
-            pending[d] += 1
-    ready = [(int(ids[i]), i) for i in range(ids.size) if pending[i] == 0]
-    heapq.heapify(ready)
-    rank = np.zeros(ids.size, np.int64)
-    k = 0
-    while ready:
-        _, i = heapq.heappop(ready)
-        rank[i] = k
-        k += 1
-        d = downstream[i]
-        if d >= 0:
-            pending[d] -= 1
-            if pending[d] == 0:
-                heapq.heappush(ready, (int(ids[d]), d))
-    return rank

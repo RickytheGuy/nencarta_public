@@ -40,15 +40,13 @@ def _arc_inputs(dem: Path,
     return params
 
 def _fldpln_inputs(workspace: Workspace):
-    """The FLDPLN section of a Curve2Flood config."""
+    """The FLDPLN section of a Curve2Flood config. The mapper reads neither the filled DEM (the VDT's Elev and the
+    library's fill give it at the stream) nor the stream network."""
     output = {
         "# FLDPLN_Inputs": "",
         "Flow_Direction_File": workspace.flowdir,
-        "Filled_DEM_File": workspace.filled_dem,
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
-        "reach_id": workspace.configs.stream_id_field,
-        "downstream_reach_id": workspace.configs.downstream_id_field,
     }
     output[""] = ""
     return output
@@ -307,10 +305,16 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     
     configs = workspace.configs
     config_ext = 'yaml' if configs.use_yaml else 'txt'
+    # Curve2Flood reads the stream raster only with Set_Depth, Manning's n only for velocity, and the stream lines
+    # only to allow the GeoPackage; FloodSpreader gets them all
+    curve2flood = configs.mapper.is_curve2flood_mapper()
+    make_gpkg = configs.floodmap_args.get('Make_Output_GPKG', DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"])
     params = {'#ARC_Inputs': ''}
     params["DEM_File"] = workspace.model_dem if configs.disable_bathymetry else workspace.FS_BathyFile
-    params["Stream_File"] = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
-    params["LU_Manning_n"] = workspace.mannings_n_text_file
+    if not curve2flood:
+        params["Stream_File"] = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
+    if not curve2flood or configs.make_velocity_maps:
+        params["LU_Manning_n"] = workspace.mannings_n_text_file
 
     params["# VDT_Output_File_and_CurveFile"] = ""
 
@@ -321,7 +325,8 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         params["Print_Curve_File"] = workspace.Curve_File_Bathy
     
     params["# Mapper Input Data"] = ""
-    params["StrmShp_File"] = workspace.new_StrmShp_matched if configs.move_stream_network_to_thalweg else workspace.DEM_StrmShp
+    if not curve2flood or make_gpkg:
+        params["StrmShp_File"] = workspace.new_StrmShp_matched if configs.move_stream_network_to_thalweg else workspace.DEM_StrmShp
     params["Comid_Flow_File"] = flow_file
     params["mapper"] = configs.mapper
     if configs.mapper.is_curve2flood_fldpln_mapper():
@@ -363,10 +368,10 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     flood_maps = flood_map_paths(workspace, postfix)
     params["OutFLD"] = flood_maps["OutFLD"]
 
-    if configs.floodmap_args.get('Make_Output_GPKG', DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
-        params["OutSHP"] = flood_maps["OutSHP"]
-    else:
+    if not make_gpkg:
         params["Make_Output_GPKG"] = False
+    elif not curve2flood:
+        params["OutSHP"] = flood_maps["OutSHP"]  # Curve2Flood names its GeoPackage after OutFLD
 
     if configs.make_velocity_maps:
         params["OutVEL"] = flood_maps["OutVEL"]

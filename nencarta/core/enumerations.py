@@ -103,3 +103,6 @@ class Mapper(NencartaEnum):
     
     def is_curve2flood_fldpln_mapper(self) -> bool:
         return self == self.CURVE2FLOOD_FLDPLNPY
+
+    def is_curve2flood_mapper(self) -> bool:
+        return self != self.FLOODSPREADER

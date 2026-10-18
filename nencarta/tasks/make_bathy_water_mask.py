@@ -11,7 +11,7 @@ from scipy.ndimage import distance_transform_edt
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.channel_detection import river_channel
+from nencarta.tasks.channel_detection import _CHUNK_ROWS, _feature_distance, river_channel
 from nencarta.tasks.stream_conflation import cell_sizes_m
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
@@ -37,17 +37,18 @@ def reach_areas_km2(streams_gdf: gpd.GeoDataFrame | pd.DataFrame, configs) -> di
 
 
 def dem_channel(dem_raster, dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_km2: dict,
-                connected: bool = True):
+                connected: bool = True, flat_water: bool = True, channel: bool = True):
     """
-    The channel the DEM shows along ``streams`` (see channel_detection.river_channel), on the grid of ``dem_raster``
-    (a Raster, or a gdal.Dataset).
+    The channel the DEM shows along ``streams`` (see channel_detection.river_channel, which skips ``flat_water`` or
+    ``channel`` when told to), on the grid of ``dem_raster`` (a Raster, or a gdal.Dataset).
     """
     if isinstance(dem_raster, gdal.Dataset):
         geotransform, projection = dem_raster.GetGeoTransform(), dem_raster.GetProjection()
     else:
         geotransform, projection = dem_raster.geotransform, dem_raster.projection
     dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
-    return river_channel(dem, valid, streams, area_km2, float(np.median(dx)), dy, connected=connected)
+    return river_channel(dem, valid, streams, area_km2, float(np.median(dx)), dy, connected=connected,
+                         flat_water=flat_water, channel=channel)
 
 
 def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float = WATER_MAX_RISE_M,
@@ -65,21 +66,29 @@ def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float 
 
     Only ``cells`` (default: all) are tested; the rest are False.
     """
-    ids = np.asarray(streams).astype(np.int64)
-    on_stream = ids > 0
+    streams = np.asarray(streams)
+    on_stream = streams > 0
     if not on_stream.any():
         return np.zeros(dem.shape, bool)
-    dist, nearest = distance_transform_edt(~on_stream, return_indices=True)
-    nearest_z = dem[nearest[0], nearest[1]]
+    nearest = distance_transform_edt(~on_stream, return_distances=False, return_indices=True)
+    # The level is never above the nearest stream cell's, so only cells within max_rise of that can pass. Found a
+    # block of rows at a time, with their distance to the nearest stream cell, to keep the temporary arrays small.
+    ncols = dem.shape[1]
+    found, distances = [], []
+    for r0 in range(0, dem.shape[0], _CHUNK_ROWS):
+        r1 = min(r0 + _CHUNK_ROWS, dem.shape[0])
+        rows, cols = np.nonzero(np.ones((r1 - r0, ncols), bool) if cells is None else cells[r0:r1])
+        rows += r0
+        near_rows, near_cols = nearest[0][rows, cols], nearest[1][rows, cols]
+        keep = dem[rows, cols] <= dem[near_rows, near_cols] + max_rise
+        rows, cols = rows[keep], cols[keep]
+        found.append(rows * ncols + cols)
+        distances.append(_feature_distance(near_rows[keep] - rows, near_cols[keep] - cols, (1.0, 1.0)))
     del nearest
-    # The level is never above the nearest stream cell's, so only cells within max_rise of that can pass
-    candidates = dem <= nearest_z + max_rise
-    if cells is not None:
-        candidates &= cells
-    del nearest_z
+    candidates, distance = np.concatenate(found), np.concatenate(distances)
 
     rows, cols = np.nonzero(on_stream)
-    slope = _reach_slopes(dem[rows, cols].astype(np.float64), ids[rows, cols])
+    slope = _reach_slopes(dem[rows, cols].astype(np.float64), streams[rows, cols].astype(np.int64))
     block = 16
     n_block_cols = -(-dem.shape[1] // block)
     bucket = (rows // block) * n_block_cols + cols // block
@@ -87,8 +96,8 @@ def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float 
     rows, cols, bucket, slope = rows[order], cols[order], bucket[order], slope[order]
     count = np.bincount(bucket, minlength=-(-dem.shape[0] // block) * n_block_cols)
     first = np.concatenate(([0], np.cumsum(count)[:-1]))
-    return _near_level(dem.astype(np.float64), np.flatnonzero(candidates), dist, rows, cols,
-                       dem[rows, cols].astype(np.float64), slope, first, count, block, n_block_cols, max_rise)
+    return _near_level(dem.shape[0], ncols, candidates, distance, dem.ravel()[candidates].astype(np.float64), rows,
+                       cols, dem[rows, cols].astype(np.float64), slope, first, count, block, n_block_cols, max_rise)
 
 
 def _reach_slopes(z: np.ndarray, ids: np.ndarray) -> np.ndarray:
@@ -106,19 +115,21 @@ def _reach_slopes(z: np.ndarray, ids: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True)
-def _near_level(dem: np.ndarray, candidates: np.ndarray, dist: np.ndarray, rows: np.ndarray, cols: np.ndarray,
-                z: np.ndarray, slope: np.ndarray, first: np.ndarray, count: np.ndarray, block: int,
-                n_block_cols: int, max_rise: float) -> np.ndarray:
-    """near_the_rivers_level for ``candidates``, with the stream cells bucketed in ``block``-cell squares."""
-    nrows, ncols = dem.shape
+def _near_level(nrows: int, ncols: int, candidates: np.ndarray, distance: np.ndarray, height: np.ndarray,
+                rows: np.ndarray, cols: np.ndarray, z: np.ndarray, slope: np.ndarray, first: np.ndarray,
+                count: np.ndarray, block: int, n_block_cols: int, max_rise: float) -> np.ndarray:
+    """
+    near_the_rivers_level for ``candidates`` (flat indices on an ``nrows`` by ``ncols`` grid, each ``distance`` cells
+    from the nearest stream cell and ``height`` high), with the stream cells bucketed in ``block``-cell squares.
+    """
     n_block_rows = (nrows + block - 1) // block
-    out = np.zeros(dem.shape, np.bool_)
+    out = np.zeros((nrows, ncols), np.bool_)
     for k in range(candidates.size):
         r = candidates[k] // ncols
         c = candidates[k] % ncols
-        d = dist[r, c]
+        d = distance[k]
         reach = 2.0 * d + 5.0
-        lowest_allowed = dem[r, c] - max_rise
+        lowest_allowed = height[k] - max_rise
         near = True
         for br in range(max(int((r - reach) // block), 0), min(int((r + reach) // block), n_block_rows - 1) + 1):
             for bc in range(max(int((c - reach) // block), 0), min(int((c + reach) // block), n_block_cols - 1) + 1):
@@ -156,7 +167,7 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
         valid = np.isfinite(dem)
         if dem_raster.nodata_value is not None:
             valid &= dem != dem_raster.nodata_value
-        water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}).channel
+        water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}, flat_water=False).channel
     water &= near_the_rivers_level(dem, streams, cells=water)
     return remove_cells_not_connected(water | (streams > 0), streams) > 0
 

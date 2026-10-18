@@ -138,8 +138,13 @@ class _Relocation:
         self.source = prepare_source_network(source_gdf, id_col, ds_col, None, area_col, flow)
         self.nrows, self.ncols = flow.nrows, flow.ncols
         self.dx, self.dy, self.R = float(np.median(flow.dx_m)), float(flow.dy_m), flow.cell_size_m
-        self.Z = np.where(self.valid, np.asarray(filled, np.float64), np.nan)
-        self.raw = np.asarray(dem, np.float64)
+        # Not copied where it is NaN off the DEM already, as fill_and_flow_directions leaves it: it is only read
+        Z = np.asarray(filled, np.float64)
+        self.Z = Z if np.isnan(Z[~self.valid]).all() else np.where(self.valid, Z, np.nan)
+        # A single-precision DEM is kept as it is rather than copied into double precision; what is worked out from it is
+        # worked out in double precision all the same (see _channel_cells, _line_above)
+        raw = np.asarray(dem)
+        self.raw = raw if raw.dtype == np.float32 else np.asarray(raw, np.float64)
         self._turn_lone_reaches_downhill()
         self.inflow = self._with_inflow()
         self.F = flow.channel_area_km2.reshape(self.nrows, self.ncols)
@@ -456,21 +461,15 @@ class _Relocation:
         valid = self.valid & np.isfinite(raw)
         # The water the DEM flattens near the lines' level, which needn't touch a line that is off its river. Not the
         # low ground by the lines as well: measured from the lines being judged, it would count a line as on its channel
-        lines = np.zeros(raw.size, np.int64)
+        lines = np.zeros(raw.size, np.int32)
         for x in range(self.source.ids.size):
             lines[self._cells(self._line(x))] = x + 1
         areas = {x + 1: float(self.source.area[x]) for x in range(self.source.ids.size)}
         water = river_channel(raw, valid, lines.reshape(raw.shape), areas, self.dx, self.dy,
-                              ChannelSettings(corridor_m=s.max_search_radius_m), connected=False).flat_water
-        filled_up = valid & (self.Z - raw > 0.05) & ~water
-        k = s.channel_reach_cells
-        padded = np.pad(np.where(valid, raw, np.inf), k, constant_values=np.inf)
-        incised = np.zeros(raw.shape, bool)
-        for d_row, d_col in ((0, 1), (1, 0), (1, 1), (1, -1)):
-            ahead = padded[k + d_row * k:k + d_row * k + self.nrows, k + d_col * k:k + d_col * k + self.ncols]
-            behind = padded[k - d_row * k:k - d_row * k + self.nrows, k - d_col * k:k - d_col * k + self.ncols]
-            incised |= raw <= np.minimum(ahead, behind) - s.channel_depth_m
-        return (water | (incised & valid & ~filled_up)).ravel()
+                              ChannelSettings(corridor_m=s.max_search_radius_m), connected=False,
+                              channel=False, double=True).flat_water
+        del lines
+        return (water | _incised(raw, self.Z, valid, s.channel_reach_cells, s.channel_depth_m)).ravel()
 
     def _follows_a_bend(self, x: int, line_cells: np.ndarray, channel: np.ndarray) -> bool:
         """Whether reach x's path follows a bend its line cuts across (see RelocationSettings.bend_channel_gain): longer
@@ -507,7 +506,7 @@ class _Relocation:
             return 0.0
         raw = self.raw.ravel()
         nearest = cKDTree(self._centres(self.paths[x])).query(h)[1]
-        above = raw[self._cells(h)] - raw[self.paths[x][nearest]]
+        above = raw[self._cells(h)].astype(np.float64) - raw[self.paths[x][nearest]]
         return float(np.nanmedian(above)) if np.isfinite(above).any() else 0.0
 
     def _cells_of(self, x: int) -> np.ndarray:
@@ -538,6 +537,32 @@ class _Relocation:
             geometry[row] = shapely.LineString(xy)
         out[out.geometry.name] = geometry
         return out
+
+
+@njit(cache=True)
+def _incised(raw: np.ndarray, filled: np.ndarray, valid: np.ndarray, k: int, depth: float) -> np.ndarray:
+    """
+    The ``valid`` cells of ``raw`` at least ``depth`` below both the cells ``k`` away along a row, a column or a
+    diagonal (a cell off the grid or off ``valid`` counting as infinitely high), but for those the fill raised:
+    ``filled`` more than 5 cm above ``raw``.
+    """
+    nrows, ncols = raw.shape
+    out = np.zeros((nrows, ncols), np.bool_)
+    for r in range(nrows):
+        for c in range(ncols):
+            if not valid[r, c] or filled[r, c] - raw[r, c] > 0.05:
+                continue
+            for d_row, d_col in ((0, 1), (1, 0), (1, 1), (1, -1)):
+                ahead, behind = np.inf, np.inf
+                r1, c1, r2, c2 = r + d_row * k, c + d_col * k, r - d_row * k, c - d_col * k
+                if 0 <= r1 < nrows and 0 <= c1 < ncols and valid[r1, c1]:
+                    ahead = raw[r1, c1]
+                if 0 <= r2 < nrows and 0 <= c2 < ncols and valid[r2, c2]:
+                    behind = raw[r2, c2]
+                if raw[r, c] <= min(ahead, behind) - depth:
+                    out[r, c] = True
+                    break
+    return out
 
 
 @njit(cache=True)
@@ -632,7 +657,7 @@ def breach_dammed_rivers(
     z = np.asarray(dem, np.float64)
     valid = np.isfinite(z) if valid_mask is None else np.asarray(valid_mask, np.bool_) & np.isfinite(z)
     # No flow paths yet: the lines are turned to run downstream by the network alone, or by their heights
-    flow = FlowNetwork(np.zeros(z.shape, np.uint8), geotransform, projection, valid)
+    flow = FlowNetwork.without_flow(z.shape, geotransform, projection, valid)
     source = prepare_source_network(source_gdf, id_col, ds_col, None, None, flow)
     if source.ids.size == 0:
         return None, []

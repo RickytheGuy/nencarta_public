@@ -129,12 +129,16 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
     """
     valid = np.asarray(valid, bool)
     low = float(np.min(dem[valid])) - 10.0 if valid.any() else 0.0
-    padded = np.pad(np.where(valid, dem, low).astype(np.float64), 1, constant_values=low)
+    # The DEM in double precision inside a ring of ``low``. Its own cells off ``valid`` are ``low`` in the DEM's type,
+    # as np.where(valid, dem, low) has them.
+    padded = np.full((dem.shape[0] + 2, dem.shape[1] + 2), low, np.float64)
+    padded[1:-1, 1:-1] = dem
+    padded[1:-1, 1:-1][~valid] = np.asarray(low, np.result_type(dem, low))
     gt = list(geotransform)
     gt[0] -= gt[1]
     gt[3] -= gt[5]
-    filled = rd.FillDepressions(rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt),
-                                in_place=False)
+    filled = rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt)
+    rd.FillDepressions(filled, in_place=True)
     routed = np.asarray(rd.ResolveFlats(filled, in_place=False))[1:-1, 1:-1]
     filled = np.asarray(filled)[1:-1, 1:-1]
     dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
@@ -148,7 +152,10 @@ def _d8_pointers(z: np.ndarray, valid: np.ndarray, dx_by_row: np.ndarray, dy: fl
     """The code of each valid cell's steepest descent to a valid neighbour (distances in metres), or 0."""
     nrows, ncols = z.shape
     out = np.full((nrows, ncols), FLOWDIR_NODATA, np.int16)
+    distance = np.empty(d_rows.size)
     for row in range(nrows):
+        for k in range(d_rows.size):
+            distance[k] = np.sqrt((dx_by_row[row] * d_cols[k]) ** 2 + (dy * d_rows[k]) ** 2)
         for col in range(ncols):
             if not valid[row, col]:
                 continue
@@ -158,7 +165,7 @@ def _d8_pointers(z: np.ndarray, valid: np.ndarray, dx_by_row: np.ndarray, dy: fl
                 r, c = row + d_rows[k], col + d_cols[k]
                 if r < 0 or r >= nrows or c < 0 or c >= ncols or not valid[r, c]:
                     continue
-                slope = (z[row, col] - z[r, c]) / np.sqrt((dx_by_row[row] * d_cols[k]) ** 2 + (dy * d_rows[k]) ** 2)
+                slope = (z[row, col] - z[r, c]) / distance[k]
                 if slope > steepest:
                     steepest = slope
                     code = codes[k]
@@ -167,23 +174,28 @@ def _d8_pointers(z: np.ndarray, valid: np.ndarray, dx_by_row: np.ndarray, dy: fl
 
 
 def derive_flow_directions(workspace: Workspace, dem_path: Path, filled_path: Path | None = None,
-                           flowdir_path: Path | None = None) -> None:
+                           flowdir_path: Path | None = None,
+                           dem: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Fill the depressions in ``dem_path`` and derive its D8 flow directions (see fill_and_flow_directions), writing
     ``filled_path`` and ``flowdir_path`` (default: workspace.filled_dem and workspace.flowdir) with the configs'
-    compression.
+    compression. ``dem``, if given, is what ``dem_path`` holds, already read. Returns the filled DEM and the flow
+    directions as written, so they needn't be read back.
     """
     raster = Raster(dem_path)
-    dem = raster.read_array().astype(np.float64)
+    dem = (raster.read_array() if dem is None else dem).astype(np.float64)
     valid = np.isfinite(dem)
     if raster.nodata_value is not None:
         valid &= dem != raster.nodata_value
     filled, flowdir = fill_and_flow_directions(dem, valid, raster.geotransform, raster.projection)
+    del dem
+    filled = np.where(valid, filled, FILLED_NODATA)
     compression = workspace.configs.compression
-    _write_raster(Path(filled_path or workspace.filled_dem), np.where(valid, filled, FILLED_NODATA), raster,
-                  gdal.GDT_Float64, FILLED_NODATA, compression)
+    _write_raster(Path(filled_path or workspace.filled_dem), filled, raster, gdal.GDT_Float64, FILLED_NODATA,
+                  compression)
     _write_raster(Path(flowdir_path or workspace.flowdir), flowdir, raster, gdal.GDT_Int16, FLOWDIR_NODATA,
                   compression)
+    return filled, flowdir
 
 
 def _write_raster(path: Path, values: np.ndarray, reference: Raster, data_type: int, nodata: float,
@@ -223,6 +235,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
 
     assigned_dem = Raster(workspace.assigned_dem)
     flow_directions_ready = False
+    # The filled DEM and flow directions as derived and written this run, which are then not read back
+    filled_array = flowdir_array = None
 
     if should_burn_streams:
         workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
@@ -266,7 +280,8 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             source_gdf = _kept_reaches(workspace, source_gdf, assigned_dem)
         elif not configs.burn_streams and configs.relocate_misplaced_streams:
             # Unburned, the DEM's flow directions are the ones the streams are moved onto too
-            derive_flow_directions(workspace, dem_for_conflation_path)
+            filled_array, flowdir_array = derive_flow_directions(workspace, dem_for_conflation_path,
+                                                                 dem=dem_for_conflation)
             flow_directions_ready = True
             source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
             source_gdf = relocate_misplaced_streams(workspace, _kept_reaches(workspace, source_gdf, assigned_dem),
@@ -277,9 +292,11 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
 
     if should_move_streams:
         if not flow_directions_ready:
-            derive_flow_directions(workspace, dem_for_conflation_path)
+            filled_array, flowdir_array = derive_flow_directions(workspace, dem_for_conflation_path,
+                                                                 dem=dem_for_conflation)
         streams_gdf, final_streams = move_streams_onto_flow_directions(workspace, source_gdf, dem_for_conflation,
-                                                                        assigned_dem)
+                                                                        assigned_dem, flowdir_array, filled_array)
+        filled_array = None
         if streams_gdf.empty:
             if configs.raise_errors_if_nothing_in_domain:
                 raise ValueError("No stream geometries remain after conflation.")
@@ -323,16 +340,20 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             workspace.stream_info_file,
             streams_array=final_streams,
             flow_direction_file=workspace.flowdir,
+            flowdir=flowdir_array,
         )
 
 def move_streams_onto_flow_directions(
         workspace: Workspace,
         source_gdf: gpd.GeoDataFrame,
         dem: np.ndarray,
-        dem_raster: Raster) -> tuple[gpd.GeoDataFrame, np.ndarray]:
+        dem_raster: Raster,
+        flowdir: np.ndarray | None = None,
+        filled: np.ndarray | None = None) -> tuple[gpd.GeoDataFrame, np.ndarray]:
     """
     Move the source streams onto workspace.flowdir's D8 paths (see stream_conflation), and return them with
-    their stream raster. ``source_gdf`` is the reaches to keep (see _kept_reaches).
+    their stream raster. ``source_gdf`` is the reaches to keep (see _kept_reaches). ``flowdir`` and ``filled``, if
+    given, are what workspace.flowdir and workspace.filled_dem hold, already read.
 
     Only flow paths draining at least new_strm_threshold_km2 are matched onto. For FLDPLN, which doesn't map
     lakes, lakes cut the network: no stream runs inside one, and a reach flowing out of one starts below its outlet,
@@ -340,9 +361,8 @@ def move_streams_onto_flow_directions(
     at the river on workspace.filled_dem, not on its bank (see stream_conflation._river_at_edge).
     """
     configs = workspace.configs
-    flowdir_ds: gdal.Dataset = gdal.Open(str(workspace.flowdir))
-    flowdir = flowdir_ds.ReadAsArray()
-    flowdir_ds = None
+    if flowdir is None:
+        flowdir = Raster(workspace.flowdir).read_array()
 
     valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
@@ -351,7 +371,8 @@ def move_streams_onto_flow_directions(
     cut_lakes = lakes is not None and configs.mapper.is_curve2flood_fldpln_mapper()
     # The DEM the flow directions were derived from, filled, which they run down (see derive_flow_directions): where
     # rivers come in across the edge, and leave lakes
-    filled = Raster(workspace.filled_dem).read_array() if workspace.filled_dem.exists() else None
+    if filled is None and workspace.filled_dem.exists():
+        filled = Raster(workspace.filled_dem).read_array()
 
     id_col, ds_col = configs.stream_id_field, configs.downstream_id_field
     source_gdf, area_col = _with_area_km2(source_gdf, configs)
@@ -514,7 +535,7 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
     else:
         filled_array, flowdir_array = fill_and_flow_directions(ground, valid, dem_raster.geotransform,
                                                                dem_raster.projection)
-    filled_array = np.where(valid, filled_array, np.nan)
+    filled_array[~valid] = np.nan
     streams = relocate_misplaced_reaches(gdf, flowdir_array, filled_array, ground, dem_raster.geotransform,
                                          dem_raster.projection, configs.stream_id_field, configs.downstream_id_field,
                                          area_col, valid_mask=valid)
@@ -628,7 +649,7 @@ def smooth_and_burn_dem(
         # The water the DEM flattens along the streams (see channel_detection). Not the low ground by them as well:
         # measured from the lines being burned, that would take in every line the burn has to lower
         leveled = dem_channel(dem_ds, dem, (dem != nodata_value) & np.isfinite(dem), streams,
-                              reach_areas_km2(source_gdf, configs)).flat_water
+                              reach_areas_km2(source_gdf, configs), channel=False).flat_water
         channel_mask = channel_mask.astype(bool) | leveled
 
     original = dem.copy()
@@ -1577,9 +1598,11 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
 def _create_stream_info_table(
         stream_info_file: Path,
         streams_array: np.ndarray,
-        flow_direction_file: str | Path) -> None:
+        flow_direction_file: str | Path,
+        flowdir: np.ndarray | None = None) -> None:
     """
-    Write the stream info table Curve2Flood's FLDPLN mapper reads.
+    Write the stream info table Curve2Flood's FLDPLN mapper reads (``flowdir``, if given, is what
+    ``flow_direction_file`` holds, already read).
 
     FLDPLN walks ``length`` cells down the D8 flow directions from each reach's ``start_pixel`` to find its
     stream cells, so each row must be a real D8 path that ends on ``end_pixel``. The table is therefore traced
@@ -1592,8 +1615,8 @@ def _create_stream_info_table(
             "traced from it, so the hydrography has to be derived first (move_stream_network_to_thalweg)."
         )
 
-    flowdir_ds: gdal.Dataset = gdal.Open(str(flow_direction_file))
-    flowdir: np.ndarray = flowdir_ds.ReadAsArray()
+    if flowdir is None:
+        flowdir = gdal.Open(str(flow_direction_file)).ReadAsArray()
     if flowdir.shape != streams_array.shape:
         raise ValueError(
             f"Flow direction raster {flow_direction_file} is {flowdir.shape} but the stream raster is "
@@ -1602,7 +1625,7 @@ def _create_stream_info_table(
 
     nrows, ncols = streams_array.shape
     linknos_flat = np.ascontiguousarray(streams_array).ravel()
-    flowdir_flat = np.ascontiguousarray(flowdir).ravel().astype(np.int64, copy=False)
+    flowdir_flat = np.ascontiguousarray(flowdir).ravel()
     row_offsets, col_offsets = _d8_offset_tables()
 
     # Group the stream pixels into one sorted block per link number.
