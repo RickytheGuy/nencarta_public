@@ -255,6 +255,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             workspace.relocated_StrmShp.unlink(missing_ok=True)
         # Moved, a reach in pieces is matched along one path through them (see stream_conflation._main_stem), and
         # only its trunk is burned (see _trunks): a branch burned and not matched stays carved in the DEM, and floods
+        # The flow directions, and the filled DEM, come from the burned DEM lowered where its lines rise
         _, dem_for_conflation = smooth_and_burn_dem(
             workspace,
             _trunks(source_gdf, configs.stream_id_field, configs.downstream_id_field, assigned_dem)
@@ -627,8 +628,9 @@ def smooth_and_burn_dem(
         ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
     """
     Burn ``source_gdf``'s streams into the DEM, smooth the burned channels, and write workspace.fixed_dem.
-    Returns the channel mask and the burned DEM. With use_dem_derived_channel_mask, the water the DEM flattens along
-    the streams (see channel_detection) is smoothed as water, and the burn leaves the lines on it (see
+    Returns the channel mask and the DEM to derive the flow directions from: the burned DEM, lowered where a line
+    rises along itself (see _lower_rises). With use_dem_derived_channel_mask, the water the DEM flattens along the
+    streams (see channel_detection) is smoothed as water, and the burn leaves the lines on it (see
     burn_streams_into_dem).
     """
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
@@ -653,11 +655,11 @@ def smooth_and_burn_dem(
         channel_mask = channel_mask.astype(bool) | leveled
 
     original = dem.copy()
-    paths = []
+    paths, path_reaches = [], []
     kept = np.zeros(dem.shape, bool)
     channel_mask = burn_streams_into_dem(channel_mask, dem, streams, dem_ds, source_gdf, lakes, id_col, ds_col,
                                          nodata_value, order_col=configs.StrmOrder_Field, area_col=area_col,
-                                         paths=paths, leveled=leveled, kept=kept)
+                                         paths=paths, leveled=leveled, kept=kept, path_reaches=path_reaches)
     del leveled
     dem = smooth_burned_dem(dem, channel_mask, streams, original, nodata_value, paths=paths, fixed=kept,
                             cell_size=cell_sizes_m(dem_ds.GetGeoTransform(), dem_ds.GetProjection(), dem.shape[0]))
@@ -670,7 +672,46 @@ def smooth_and_burn_dem(
     output_ds.GetRasterBand(1).SetNoDataValue(nodata_value)
     output_ds = None
 
+    if paths:
+        # Each line starts no higher than the ends of all the reaches flowing into it, not only the largest: a
+        # tributary's line left below the river at its mouth would take the river's flow down itself
+        ends = {}
+        for (_, cells), (reach, _) in zip(paths, path_reaches):
+            ends.setdefault(reach, []).append(cells[-1])
+        starts = [np.unique(np.concatenate([s, np.array([c for f in feeders for c in ends.get(f, [])], np.int64)]))
+                  for (s, _), (_, feeders) in zip(paths, path_reaches)]
+        _lower_rises(dem.ravel(), np.concatenate(starts), np.cumsum([s.size for s in starts]),
+                     np.concatenate([c for _, c in paths]), np.cumsum([c.size for _, c in paths]), nodata_value)
     return channel_mask, dem
+
+@njit(cache=True)
+def _lower_rises(values: np.ndarray, starts: np.ndarray, start_ends: np.ndarray, cells: np.ndarray,
+                 cell_ends: np.ndarray, nodata_value: float) -> None:
+    """
+    Lower ``values`` (flat) along each burned path in turn wherever it rises: path i runs down
+    cells[cell_ends[i - 1]:cell_ends[i]], starting no higher than its start cells, starts[start_ends[i - 1]:
+    start_ends[i]] (see smooth_burned_dem).
+
+    The burned DEM keeps a line on the water the DEM flattens at the water's level, and a line can come to that
+    water from below it, where it was cut deeper upstream (toward lower ground beside it, or below a reach flowing
+    into it). The water then dams the line: filling pools the line behind it, and the flow directions cross the pool
+    and leave the line wherever its rim is lowest, a reach away at times. Lowered, the line drains along itself. ARC
+    keeps the burned DEM as it is: carried on below the water, a line deepens the river beds it measures.
+    """
+    first_start, first_cell = 0, 0
+    for i in range(cell_ends.size):
+        level = np.inf
+        for k in range(first_start, start_ends[i]):
+            if values[starts[k]] != nodata_value:
+                level = min(level, values[starts[k]])
+        for k in range(first_cell, cell_ends[i]):
+            cell = cells[k]
+            if values[cell] == nodata_value:
+                continue
+            if values[cell] > level:
+                values[cell] = level
+            level = values[cell]
+        first_start, first_cell = start_ends[i], cell_ends[i]
 
 @njit(cache=True)
 def _label_terraces(values: np.ndarray, use: np.ndarray, n_use: int) -> tuple[np.ndarray, np.ndarray, int]:
@@ -1071,12 +1112,14 @@ def burn_streams_into_dem(
         paths: list | None = None,
         leveled: np.ndarray | None = None,
         kept: np.ndarray | None = None,
+        path_reaches: list | None = None,
 ):
     """
     Burn every reach into ``dem`` (in place), upstream reaches first, in 0.5 m steps that never rise downstream,
     each starting no higher than the largest of the reaches flowing into it, by ``order_col`` and then ``area_col``
     (all of them, without either). Returns the channel mask without its specks (``min_feature_size`` cells or
-    fewer), lakes and nodata. Appends each burned line to ``paths``, if given (see burn_linestring).
+    fewer), lakes and nodata. Appends each burned line to ``paths``, if given (see burn_linestring), and its reach's
+    id with the ids of all the reaches flowing into it to ``path_reaches``, if given.
 
     Each cell is lowered as far as the water in the line's cell above it needs to fall into it rather than onto the
     ground beside (see _drain_cap), and no further: not to the lowest ground beside itself, which ahead of it, down a
@@ -1142,6 +1185,8 @@ def burn_streams_into_dem(
                                    nodata_value, upstream.get(stream_id, []), leveled, kept)
             if path is not None and paths is not None:
                 paths.append(path)
+                if path_reaches is not None:
+                    path_reaches.append((stream_id, list(G.predecessors(stream_id))))
 
     return channel_mask
 
