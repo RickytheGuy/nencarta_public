@@ -13,7 +13,9 @@ import geopandas as gpd
 from osgeo import gdal, ogr, osr
 import richdem as rd
 from scipy.ndimage import label
+import shapely
 from shapely.geometry import Point, LineString
+from shapely.ops import substring
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
@@ -79,16 +81,7 @@ def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | No
 
     # Vector.to_geopandas() does the bbox reprojection itself, so the subset comes back
     # already clipped to the DEM's footprint.
-    lakes_gdf = load_lake_gdf(workspace, dem_raster)
-    if lakes_gdf is not None and not lakes_gdf.empty:
-        lakes_gdf = lakes_gdf.to_crs(dem_raster.projection)
-        ogr_ds, lakes_layer = _in_memory_ogr_layer(lakes_gdf, dem_raster.projection)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            gdal.RasterizeLayer(lakes_ds, [1], lakes_layer, burn_values=[1])
-
-        ogr_ds = None
+    _rasterize_polygons(lakes_ds, load_lake_gdf(workspace, dem_raster))
 
     lakes_ds.FlushCache()
     lakes = lakes_ds.ReadAsArray().astype(np.bool_, copy=False)
@@ -102,6 +95,39 @@ def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame 
     lakes_gdf = Vector(workspace.configs.lakes, not workspace.configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
 
     return lakes_gdf
+
+def load_ocean_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
+    """
+    The ocean on the DEM's grid, True in it, or None without ``ocean`` or burn_streams, or with none of it on the
+    DEM. The burned DEM has no data there (see smooth_and_burn_dem), so the streams end at the shore.
+
+    Only the polygons overlapping the DEM are read. A global ocean's polygons are huge, and are read whole: split
+    them into tiles and write them as a GeoParquet with a bbox column to read just the pieces near the DEM.
+    """
+    configs = workspace.configs
+    if not configs.ocean or not configs.burn_streams:
+        return None
+    ocean_gdf = Vector(configs.ocean, not configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
+    if ocean_gdf.empty:
+        return None
+    ocean_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1,
+                                                                gdal.GDT_Byte)
+    ocean_ds.SetGeoTransform(dem_raster.geotransform)
+    ocean_ds.SetProjection(dem_raster.projection)
+    _rasterize_polygons(ocean_ds, ocean_gdf)
+    ocean = ocean_ds.ReadAsArray().astype(np.bool_, copy=False)
+    return ocean if ocean.any() else None
+
+def _rasterize_polygons(ds: gdal.Dataset, gdf: gpd.GeoDataFrame | None) -> None:
+    """Burn 1 into ``ds``'s band in the cells whose centres are in ``gdf``'s polygons."""
+    if gdf is None or gdf.empty:
+        return
+    projection = ds.GetProjection()
+    ogr_ds, layer = _in_memory_ogr_layer(gdf.to_crs(projection), projection)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gdal.RasterizeLayer(ds, [1], layer, burn_values=[1])
+    ogr_ds = None
 
 # The burn fills the cells between a line's vertices up to this many cells apart (see _burn_linestring)
 MAX_BURN_GAP_CELLS = 3
@@ -126,21 +152,25 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
     them and toward their outlets, so flow paths run down a flat's middle rather than straight along one edge. Off
     the DEM, its edges and nodata, is lower than anything on it, so a flat running off it drains there. The gradient
     is imposed in double precision: in single precision its increments round away on a large flat, leaving pits.
+    Its increments are a value's last digit, which at 0 m is so small that over a cell's width it is no slope at all,
+    so the DEM is raised to 11 m or more first, whole: no difference between two cells changes.
     """
     valid = np.asarray(valid, bool)
     low = float(np.min(dem[valid])) - 10.0 if valid.any() else 0.0
+    raise_by = 1.0 - math.floor(low)
     # The DEM in double precision inside a ring of ``low``. Its own cells off ``valid`` are ``low`` in the DEM's type,
     # as np.where(valid, dem, low) has them.
     padded = np.full((dem.shape[0] + 2, dem.shape[1] + 2), low, np.float64)
     padded[1:-1, 1:-1] = dem
     padded[1:-1, 1:-1][~valid] = np.asarray(low, np.result_type(dem, low))
+    padded += raise_by
     gt = list(geotransform)
     gt[0] -= gt[1]
     gt[3] -= gt[5]
     filled = rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt)
     rd.FillDepressions(filled, in_place=True)
     routed = np.asarray(rd.ResolveFlats(filled, in_place=False))[1:-1, 1:-1]
-    filled = np.asarray(filled)[1:-1, 1:-1]
+    filled = np.asarray(filled)[1:-1, 1:-1] - raise_by
     dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
     flowdir = _d8_pointers(routed, valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS, _D8_CODES)
     return np.where(valid, filled, np.nan), flowdir
@@ -391,18 +421,26 @@ def move_streams_onto_flow_directions(
     return streams, raster
 
 def _kept_reaches(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster: Raster) -> gpd.GeoDataFrame:
-    """``source_gdf`` without the reaches the moved network leaves out (see _reaches_left_out)."""
+    """
+    ``source_gdf`` without the reaches the moved network leaves out (see _reaches_left_out), and with the ocean, each
+    line ending where its river reaches the sea (see _cut_at_the_sea).
+    """
+    configs = workspace.configs
     left_out = _reaches_left_out(workspace, source_gdf, dem_raster)
     if left_out:
         LOG.info(f"Leaving {len(left_out)} reaches out of the moved stream network.")
-    return _without_reaches(source_gdf, left_out, workspace.configs.stream_id_field,
-                            workspace.configs.downstream_id_field)
+    ocean = load_ocean_array(workspace, dem_raster)
+    if ocean is not None:
+        source_gdf = _cut_at_the_sea(source_gdf, ocean, dem_raster.geotransform, configs.stream_id_field,
+                                     configs.downstream_id_field)
+    return _without_reaches(source_gdf, left_out, configs.stream_id_field, configs.downstream_id_field)
 
 def _reaches_left_out(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster: Raster) -> set:
     """
     The ids of the reaches the moved network leaves out: with drop_multilinestrings those in pieces (see
-    _multipart_reaches), and with the mappers other than FLDPLN those stuck in lakes (see _reaches_stuck_in_lakes)
-    and those outside the stream order bounds.
+    _multipart_reaches), with the ocean those below where their river enters the sea (see _reaches_in_the_sea), and
+    with the mappers other than FLDPLN those stuck in lakes (see _reaches_stuck_in_lakes) and those outside the
+    stream order bounds.
 
     Decided from the streams as they were before relocation (workspace.DEM_StrmShp, or else ``source_gdf``), before
     anything is relocated, burned or moved, so a rerun decides the same. Left out only after the burn, a reach's
@@ -424,6 +462,13 @@ def _reaches_left_out(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_ra
         raster = _get_stream_raster(dem_ds, source_gdf, id_col, configs.StrmOrder_Field, area_col)
         dem_ds = None
         left_out |= _reaches_stuck_in_lakes(source_gdf, raster, lakes, id_col, ds_col)
+
+    ocean = load_ocean_array(workspace, dem_raster)
+    if ocean is not None:
+        area_col = next((c for c in (configs.area_km2_field, configs.area_m2_field) if c and c in source_gdf.columns),
+                        None)
+        left_out |= _reaches_in_the_sea(source_gdf, ocean, dem_raster.geotransform, id_col, ds_col,
+                                        configs.StrmOrder_Field, area_col)
 
     if configs.drop_multilinestrings:
         left_out |= _multipart_reaches(source_gdf, id_col)
@@ -528,6 +573,10 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
     valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
+    # The ocean is off the burned DEM the streams are moved onto (see smooth_and_burn_dem)
+    ocean = load_ocean_array(workspace, dem_raster)
+    if ocean is not None:
+        valid &= ~ocean
     breached, _ = breach_dammed_rivers(gdf, dem, dem_raster.geotransform, dem_raster.projection,
                                        configs.stream_id_field, configs.downstream_id_field, valid_mask=valid)
     ground = dem if breached is None else breached
@@ -596,6 +645,94 @@ def _reaches_stuck_in_lakes(streams: gpd.GeoDataFrame, raster: np.ndarray, lakes
             stuck.add(reach)
     return stuck
 
+def _network(streams: gpd.GeoDataFrame, id_col: str, ds_col: str) -> tuple[dict, nx.DiGraph]:
+    """Each reach's line (merged), and the graph of which reach flows into which, of the reaches with a line."""
+    lines = {reach: line for reach, line in zip(streams[id_col], streams.geometry.line_merge()) if _line_parts(line)}
+    graph = nx.DiGraph()
+    graph.add_nodes_from(lines)
+    graph.add_edges_from((r, d) for r, d in zip(streams[id_col], streams[ds_col]) if r in graph and d in graph and d != r)
+    return lines, graph
+
+def _line_start(reach, lines: dict, graph: nx.DiGraph) -> Point | None:
+    """
+    Where ``reach``'s line starts: its end nearest the reaches flowing into it, or without any, its end farthest from
+    the reach it flows into. None without either.
+    """
+    ends = [Point(part.coords[i][:2]) for part in _line_parts(lines[reach]) for i in (0, -1)]
+    above = [lines[r] for r in graph.predecessors(reach)]
+    below = [lines[r] for r in graph.successors(reach)]
+    if above:
+        return min(ends, key=lambda end: min(end.distance(line) for line in above))
+    if below:
+        return max(ends, key=lambda end: below[0].distance(end))
+    return None
+
+def _reaches_in_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: tuple, id_col: str, ds_col: str,
+                        order_col: str | None = None, area_col: str | None = None) -> set:
+    """
+    The reaches below where their river enters the sea: those whose line starts (see _line_start) in the ``ocean`` (a
+    mask on the grid of ``geotransform``), and those whose largest upstream reaches (see _largest_upstream_reaches)
+    are all in the sea.
+
+    A sea's polygon often reaches up an estuary, leaving its last reaches only the bank beside the channel. Moved onto
+    that, each would flood the bank as deep as the river.
+    """
+    lines, graph = _network(streams, id_col, ds_col)
+    inverse = gdal.InvGeoTransform(geotransform)
+
+    def starts_in_the_ocean(reach) -> bool:
+        start = _line_start(reach, lines, graph)
+        if start is None:
+            return False
+        col, row = gdal.ApplyGeoTransform(inverse, start.x, start.y)
+        row, col = math.floor(row), math.floor(col)
+        return 0 <= row < ocean.shape[0] and 0 <= col < ocean.shape[1] and bool(ocean[row, col])
+
+    in_sea = {reach for reach in graph if starts_in_the_ocean(reach)}
+    largest = _largest_upstream_reaches(graph, streams.set_index(id_col), order_col, area_col)
+    reaches = list(in_sea)
+    while reaches:
+        for reach in graph.successors(reaches.pop()):
+            if reach not in in_sea and all(r in in_sea for r in largest[reach]):
+                in_sea.add(reach)
+                reaches.append(reach)
+    return in_sea
+
+def _cut_at_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: tuple, id_col: str,
+                    ds_col: str) -> gpd.GeoDataFrame:
+    """
+    ``streams`` with each line ending where, from its start (see _line_start), it first reaches the ``ocean`` (a mask
+    on the grid of ``geotransform``): the river ends there, and the rest of its line, along the shore and back onto
+    the land at times, is the sea's. Matched onto that land, a reach would flood it as deep as the river. Lines that
+    start in the sea (see _reaches_in_the_sea) and lines in pieces are left as they are.
+    """
+    lines, graph = _network(streams, id_col, ds_col)
+    inverse = gdal.InvGeoTransform(geotransform)
+    step = abs(geotransform[1]) / 2
+    geometry = streams.geometry.to_numpy().copy()
+    for i, reach in enumerate(streams[id_col]):
+        line = lines.get(reach)
+        if line is None or line.geom_type != "LineString":
+            continue
+        start = _line_start(reach, lines, graph)
+        if start is None:
+            continue
+        forward = start.distance(Point(line.coords[0])) <= start.distance(Point(line.coords[-1]))
+        along = np.arange(0.0, line.length, step)
+        xy = shapely.get_coordinates(shapely.line_interpolate_point(line, along if forward else line.length - along))
+        cols = np.floor(inverse[0] + inverse[1] * xy[:, 0] + inverse[2] * xy[:, 1]).astype(np.int64)
+        rows = np.floor(inverse[3] + inverse[4] * xy[:, 0] + inverse[5] * xy[:, 1]).astype(np.int64)
+        on = (rows >= 0) & (rows < ocean.shape[0]) & (cols >= 0) & (cols < ocean.shape[1])
+        sea = np.zeros(along.size, bool)
+        sea[on] = ocean[rows[on], cols[on]]
+        if not sea.any() or sea[0]:
+            continue
+        end = along[np.argmax(sea)]
+        geometry[i] = substring(line, 0, end) if forward else substring(line, line.length - end, line.length)
+    streams = streams.copy()
+    streams[streams.geometry.name] = geometry
+    return streams
+
 def _without_reaches(streams: gpd.GeoDataFrame, reaches: set, id_col: str, ds_col: str) -> gpd.GeoDataFrame:
     """``streams`` without ``reaches``; reaches that drained into them become outlets."""
     if not reaches:
@@ -640,6 +777,11 @@ def smooth_and_burn_dem(
         nodata_value = -9999
     nan_mask = np.isnan(dem)
     dem[nan_mask] = nodata_value
+    # The ocean is off the DEM: the lines end at its shore, and the flow directions drain into it
+    ocean = load_ocean_array(workspace, Raster(workspace.assigned_dem))
+    if ocean is not None:
+        dem[ocean] = nodata_value
+    del ocean
 
     configs = workspace.configs
     area_col = next((c for c in (configs.area_km2_field, configs.area_m2_field) if c and c in source_gdf.columns), None)

@@ -301,6 +301,7 @@ class NencartaConfig:
         self.q_baseflow_threshold: float = self.get("q_baseflow_threshold")
         self.lake_filter_json: str = self.get_path("lake_filter_json")
         self.lakes: str = self.get_path("lakes")
+        self.ocean: str = self.get_path("ocean")
         self.estimate_consequences: bool = self.get("estimate_consequences")
         self.overwrite_floodmaps: bool = self.get("overwrite_floodmaps")
         self.remove_old_forecast_files: bool = self.get("remove_old_forecast_files")
@@ -357,6 +358,8 @@ class NencartaConfig:
             self.fldpln_max_cells_per_segment = None
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
+        if self.ocean and not self.burn_streams:
+            LOG.warning(f"Watershed '{self.watershed_name}': 'ocean' is used only with 'burn_streams'; ignoring it.")
         self.relocate_misplaced_streams: bool = self.get("relocate_misplaced_streams")
         self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry")
         self.area_m2_field: str = self.get("area_m2_field")

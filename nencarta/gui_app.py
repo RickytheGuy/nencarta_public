@@ -1320,12 +1320,16 @@ class FloodSimulationGUI(QMainWindow):
         self._indent("relocate_misplaced_streams", "minimize_output_files", "new_strm_threshold_km2",
                      "use_dem_derived_channel_mask", "StrmOrder_Lower", "StrmOrder_Upper")
 
-        group = self._make_group(tab, "Lakes")
-        self._add_note(group, "lakes_note", "Use one of these. With the Curve2Flood-FLDPLNpy mapper, prefer the lake "
-                                            "polygons. Put the ocean in the lake polygons too: a DEM's cells at 0 m "
-                                            "aren't taken for the sea.")
+        group = self._make_group(tab, "Lakes and Ocean")
+        self._add_note(group, "lakes_note", "Use one of these for lakes. With the Curve2Flood-FLDPLNpy mapper, prefer "
+                                            "the lake polygons.")
         self._add_path(group, "lake_filter_json", "Lake filter JSON", "", file_filter="JSON Files (*.json);;All Files (*)")
         self._add_path(group, "lakes", "Lake polygons", "", file_filter=vector_files)
+        self._add_path(group, "ocean", "Ocean polygons, which the burned DEM has no data in", "",
+                       file_filter=vector_files)
+        self._add_note(group, "ocean_note", "A DEM's cells at 0 m aren't taken for the sea. Polygons split into "
+                                            "tiles, in a GeoParquet with a bbox column, read fastest.")
+        self.show_when(lambda: self._on("burn_streams"), "ocean", "ocean_note")
 
         group = self._make_group(tab, "Land Cover")
         self._add_toggle(group, "use_land_cover_cache", "Use land cover tiles I have instead of downloading them",

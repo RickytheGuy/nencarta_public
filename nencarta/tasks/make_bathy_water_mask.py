@@ -156,10 +156,16 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
     (before the burn): the stream cells and the water beside them at about the river's level (see
     near_the_rivers_level), in patches touching a stream cell. The water is the land cover's, and with
     use_dem_derived_channel_mask also the channel the DEM shows (see channel_detection), where the imagery saw the
-    river elsewhere.
+    river elsewhere. The ocean is left out: the burned DEM has no data there (see load_ocean_array).
     """
+    # Imported here: move_streams imports this module
+    from nencarta.tasks.move_streams import load_ocean_array
+
     configs = workspace.configs
     dem = dem_raster.read_array()
+    ocean = load_ocean_array(workspace, dem_raster)
+    if ocean is not None:
+        streams = np.where(ocean, 0, streams)
     water = np.zeros(dem.shape, bool)
     if workspace.LAND_File.exists():
         water = (Raster(workspace.LAND_File).read_array() == configs.land_watervalue).reshape(dem.shape)
@@ -167,7 +173,11 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
         valid = np.isfinite(dem)
         if dem_raster.nodata_value is not None:
             valid &= dem != dem_raster.nodata_value
+        if ocean is not None:
+            valid &= ~ocean
         water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}, flat_water=False).channel
+    if ocean is not None:
+        water &= ~ocean
     water &= near_the_rivers_level(dem, streams, cells=water)
     return remove_cells_not_connected(water | (streams > 0), streams) > 0
 

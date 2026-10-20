@@ -94,9 +94,11 @@ CONFIG_SECTIONS = {
         "drop_multilinestrings": ConfigOption(False, "bool", "Leave out reaches whose line is in several pieces."),
         "lake_filter_json": ConfigOption(None, "path", "GEOGLOWS JSON of the reaches inside lakes. Those reaches are "
                                                        "left out."),
-        "lakes": ConfigOption(None, "path", "Lake polygons, with the ocean and any other big water the streams flow "
-                                            "into: a DEM's cells at 0 m aren't taken for the sea. Lakes are kept out "
-                                            "of burned channels and cut the moved stream network."),
+        "lakes": ConfigOption(None, "path", "Lake polygons. Lakes are kept out of burned channels and cut the moved "
+                                            "stream network. Put the sea in ocean."),
+        "ocean": ConfigOption(None, "path", "Ocean polygons, which the burned DEM has no data in (burn_streams): the "
+                                            "streams end where they first reach the sea, and the reaches below are "
+                                            "left out. A DEM's cells at 0 m aren't taken for the sea."),
         "move_stream_network_to_thalweg": ConfigOption(False, "bool", "Move each reach onto the DEM's flow path. "
                                                                       "Required by Curve2Flood-FLDPLNpy."),
         "new_strm_threshold_km2": ConfigOption(1, "float", "Smallest drainage area (km2) of the DEM flow paths that "
