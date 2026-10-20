@@ -258,9 +258,11 @@ CONFIG_SECTIONS = {
         "fldpln_dh": ConfigOption(0.5, "float", "FLDPLN depth step (m). Used by the iterative solver."),
         "fldpln_min_depth": ConfigOption(0.1, "float", "FLDPLN: shallowest depth (m) counted as flooded."),
         "fldpln_max_depth": ConfigOption(25.0, "float", "FLDPLN: deepest flood (m) the library covers."),
-        "fldpln_spill_decay": ConfigOption(0.0, "float", "FLDPLN: depth to flood (m) added per cell along a spill, "
-                                                         "to shorten spills. Charged only on each cell's D8 "
-                                                         "successor, so it trims little."),
+        "fldpln_spill_decay": ConfigOption(0.0, "float", "FLDPLN: head (m) water spilling over a divide loses per "
+                                                         "cell down its path, so a spill on flat ground ends where "
+                                                         "its water runs out. 0 for none; 0.005 is a good starting "
+                                                         "point. The exact solver charges it only on each cell's "
+                                                         "D8 successor, so there it trims little."),
         "fldpln_max_cells_per_segment": ConfigOption(None, "int", "FLDPLN: most floodplain cells one stream segment "
                                                                   "may flood. Saves memory on flat ground. Exact "
                                                                   "solver only."),

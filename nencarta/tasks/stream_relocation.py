@@ -459,14 +459,15 @@ class _Relocation:
         """A flat mask of the cells the DEM shows a channel on (see RelocationSettings.min_channel_share)."""
         s, raw = self.settings, self.raw
         valid = self.valid & np.isfinite(raw)
-        # The water the DEM flattens near the lines' level, which needn't touch a line that is off its river. Not the
-        # low ground by the lines as well: measured from the lines being judged, it would count a line as on its channel
+        # The water the DEM flattens near the lines' level, which needn't touch a line that is off its river, so as far
+        # from a line as a river is looked for, whatever its width. Not the low ground by the lines as well: measured
+        # from the lines being judged, it would count a line as on its channel
         lines = np.zeros(raw.size, np.int32)
         for x in range(self.source.ids.size):
             lines[self._cells(self._line(x))] = x + 1
         areas = {x + 1: float(self.source.area[x]) for x in range(self.source.ids.size)}
         water = river_channel(raw, valid, lines.reshape(raw.shape), areas, self.dx, self.dy,
-                              ChannelSettings(corridor_m=s.max_search_radius_m), connected=False,
+                              ChannelSettings(corridor_m=s.max_search_radius_m, flat_widths=None), connected=False,
                               channel=False, double=True).flat_water
         del lines
         return (water | _incised(raw, self.Z, valid, s.channel_reach_cells, s.channel_depth_m)).ravel()

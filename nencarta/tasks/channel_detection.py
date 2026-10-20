@@ -8,7 +8,12 @@ hold across them, given the streams:
 - Flat water: cells exactly as high as at least two of their neighbours, in patches of more than a few cells, no
   more than ``flat_rise_m`` above the river beside them, on a DEM whose heights are rounded to a centimetre or finer
   (FABDEM, Copernicus, USGS 3DEP). On a DEM rounded more coarsely (GEDTM's 0.1 m, SRTM's whole metres) most of the
-  land is flat too, and flatness says nothing.
+  land is flat too, and flatness says nothing. Only within ``flat_widths`` times the river's expected width (see
+  below) of the stream, and always within ``flat_min_m``, as far as ``snap_m`` allows a stream to be drawn off its
+  water: FABDEM levels marshes and fields as well as water. In the Everglades (n26w081) the flat land anywhere within
+  the 1.5 km corridor made kilometre-wide bands along every marsh stream, half the water mask; within two widths it
+  is 0.6% of the land, and the FIM benchmark scores best (MCC +0.0011 over the corridor alone, against +0.0008 for
+  one width and +0.0007 for three, and -0.0004 with flat water only on the streams).
 - Low ground by the stream: no more than ``rise_m`` above the river beside it, within ``widths`` of the river's
   expected width (``width_per_sqrt_km2`` metres per square root of the drainage area in km2) of the stream, along a
   river expected to be at least a cell wide. A narrower river's channel is its stream cells.
@@ -41,10 +46,13 @@ class ChannelSettings:
     smooth_m: float = 150.0
     # Flat water: a cell as high as at least two neighbours, in a patch of more than flat_min_cells such cells, no more
     # than flat_rise_m above the river, on a DEM whose heights are rounded to no more than max_flat_step_m (see
-    # height_step)
+    # height_step), within flat_widths times the river's expected width of the stream and always within flat_min_m
+    # (flat_widths None: anywhere in the corridor)
     flat_min_cells: int = 6
     flat_rise_m: float = 2.0
     max_flat_step_m: float = 0.01
+    flat_widths: float | None = 2.0
+    flat_min_m: float = 60.0
     # Low ground: no more than rise_m above the river, within widths times the river's expected width of the stream,
     # along rivers expected to be at least min_width_cells wide (a narrower one's channel is its stream cells)
     rise_m: float = 1.0
@@ -157,6 +165,13 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     del have
     index = np.full(dem.shape, -1, np.int32)
     index[rows, cols] = np.arange(rows.size, dtype=np.int32)
+    # The expected width of each stream cell's river, and how far from it flat water reaches
+    ids, of_reach = np.unique(streams[rows, cols], return_inverse=True)
+    width = (s.width_per_sqrt_km2 * np.sqrt([max(area_km2.get(int(i), 1.0), 0.01) for i in ids]))[of_reach]
+    if s.flat_widths is None:
+        flat_reach = np.full(rows.size, s.corridor_m)
+    else:
+        flat_reach = np.minimum(np.maximum(s.flat_widths * width, s.flat_min_m), s.corridor_m)
 
     if not channel:
         # Only the flat cells' rise above the river is needed
@@ -164,15 +179,14 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
         near_rows, near_cols = nearest[0][flat_rows, flat_cols], nearest[1][flat_rows, flat_cols]
         del nearest
         distance = _feature_distance(near_rows - flat_rows, near_cols - flat_cols, sampling)
-        rise = dem[flat_rows, flat_cols] - level[index[near_rows, near_cols]]
-        keep = (distance <= s.corridor_m) & (rise <= s.flat_rise_m)
+        k = index[near_rows, near_cols]
+        keep = (distance <= flat_reach[k]) & (dem[flat_rows, flat_cols] - level[k] <= s.flat_rise_m)
         water = np.zeros(dem.shape, bool)
         water[flat_rows[keep], flat_cols[keep]] = True
         return Channel(touching(water, on_stream) if connected else water, None)
 
-    ids = np.unique(streams[rows, cols])
-    width = s.width_per_sqrt_km2 * np.sqrt([max(area_km2.get(int(i), 1.0), 0.01) for i in ids])
-    width = np.where(width >= s.min_width_cells * cell, width, 0.0)[np.searchsorted(ids, streams[rows, cols])]
+    # Low ground only along rivers expected to be at least min_width_cells wide
+    width = np.where(width >= s.min_width_cells * cell, width, 0.0)
     water = np.zeros(dem.shape, bool)
     whole = np.zeros(dem.shape, bool)
     ncols = dem.shape[1]
@@ -185,7 +199,7 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
         rise = dem[r0:r1] - level[k]
         corridor = valid[r0:r1] & (distance <= s.corridor_m)
         if flat is not None:
-            water[r0:r1] = flat[r0:r1] & corridor & (rise <= s.flat_rise_m)
+            water[r0:r1] = flat[r0:r1] & corridor & (rise <= s.flat_rise_m) & (distance <= flat_reach[k])
         w = width[k]
         whole[r0:r1] = water[r0:r1] | (corridor & (rise <= s.rise_m) & (w > 0) & (distance <= s.widths * w))
     del nearest, index

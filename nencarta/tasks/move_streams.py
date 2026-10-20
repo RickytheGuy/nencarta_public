@@ -157,6 +157,26 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
     so the DEM is raised to 11 m or more first, whole: no difference between two cells changes.
     """
     valid = np.asarray(valid, bool)
+    filled, raise_by = _fill_padded(dem, valid, geotransform)
+    routed = _resolve_flats(filled)[1:-1, 1:-1]
+    filled = filled[1:-1, 1:-1] - raise_by
+    dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
+    flowdir = _d8_pointers(routed, valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS, _D8_CODES)
+    return np.where(valid, filled, np.nan), flowdir
+
+
+def fill_depressions(dem: np.ndarray, valid: np.ndarray, geotransform: tuple) -> np.ndarray:
+    """``dem`` with its depressions filled, in double precision (NaN off ``valid``), as fill_and_flow_directions fills it."""
+    valid = np.asarray(valid, bool)
+    filled, raise_by = _fill_padded(dem, valid, geotransform)
+    return np.where(valid, filled[1:-1, 1:-1] - raise_by, np.nan)
+
+
+def _fill_padded(dem: np.ndarray, valid: np.ndarray, geotransform: tuple) -> tuple[np.ndarray, float]:
+    """
+    ``dem`` filled (see fill_and_flow_directions) in double precision, inside a ring lower than anything on it, and
+    raised by the returned amount.
+    """
     low = float(np.min(dem[valid])) - 10.0 if valid.any() else 0.0
     raise_by = 1.0 - math.floor(low)
     # The DEM in double precision inside a ring of ``low``. Its own cells off ``valid`` are ``low`` in the DEM's type,
@@ -170,12 +190,7 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
     gt[3] -= gt[5]
     filled = rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt)
     rd.FillDepressions(filled, in_place=True)
-    filled = np.asarray(filled)
-    routed = _resolve_flats(filled)[1:-1, 1:-1]
-    filled = filled[1:-1, 1:-1] - raise_by
-    dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
-    flowdir = _d8_pointers(routed, valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS, _D8_CODES)
-    return np.where(valid, filled, np.nan), flowdir
+    return np.asarray(filled), raise_by
 
 
 def _resolve_flats(z: np.ndarray) -> np.ndarray:
@@ -363,11 +378,11 @@ def derive_flow_directions(workspace: Workspace, dem_path: Path, filled_path: Pa
     """
     Fill the depressions in ``dem_path`` and derive its D8 flow directions (see fill_and_flow_directions), writing
     ``filled_path`` and ``flowdir_path`` (default: workspace.filled_dem and workspace.flowdir) with the configs'
-    compression. ``dem``, if given, is what ``dem_path`` holds, already read. Returns the filled DEM and the flow
-    directions as written, so they needn't be read back.
+    compression. ``dem``, if given, is used instead of reading ``dem_path``, on its grid (as the burned DEM's routing
+    copy is, see routing_dem). Returns the filled DEM and the flow directions as written, so they needn't be read back.
     """
     raster = Raster(dem_path)
-    dem = (raster.read_array() if dem is None else dem).astype(np.float64)
+    dem = np.asarray(raster.read_array() if dem is None else dem, np.float64)
     valid = np.isfinite(dem)
     if raster.nodata_value is not None:
         valid &= dem != raster.nodata_value
@@ -439,7 +454,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             workspace.relocated_StrmShp.unlink(missing_ok=True)
         # Moved, a reach in pieces is matched along one path through them (see stream_conflation._main_stem), and
         # only its trunk is burned (see _trunks): a branch burned and not matched stays carved in the DEM, and floods
-        # The flow directions, and the filled DEM, come from the burned DEM lowered where its lines rise
+        # The flow directions, and the filled DEM, come from the burned DEM filled, with its lines run down the fill
         _, dem_for_conflation = smooth_and_burn_dem(
             workspace,
             _trunks(source_gdf, configs.stream_id_field, configs.downstream_id_field, assigned_dem)
@@ -919,8 +934,8 @@ def smooth_and_burn_dem(
         ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
     """
     Burn ``source_gdf``'s streams into the DEM, smooth the burned channels, and write workspace.fixed_dem.
-    Returns the channel mask and the DEM to derive the flow directions from: the burned DEM, lowered where a line
-    rises along itself (see _lower_rises). With use_dem_derived_channel_mask, the water the DEM flattens along the
+    Returns the channel mask and the DEM to derive the flow directions from: the burned DEM, filled, with its lines
+    run down the fill (see routing_dem). With use_dem_derived_channel_mask, the water the DEM flattens along the
     streams (see channel_detection) is smoothed as water, and the burn leaves the lines on it (see
     burn_streams_into_dem).
     """
@@ -969,44 +984,97 @@ def smooth_and_burn_dem(
     output_ds = None
 
     if paths:
-        # Each line starts no higher than the ends of all the reaches flowing into it, not only the largest: a
-        # tributary's line left below the river at its mouth would take the river's flow down itself
-        ends = {}
-        for (_, cells), (reach, _) in zip(paths, path_reaches):
-            ends.setdefault(reach, []).append(cells[-1])
-        starts = [np.unique(np.concatenate([s, np.array([c for f in feeders for c in ends.get(f, [])], np.int64)]))
-                  for (s, _), (_, feeders) in zip(paths, path_reaches)]
-        _lower_rises(dem.ravel(), np.concatenate(starts), np.cumsum([s.size for s in starts]),
-                     np.concatenate([c for _, c in paths]), np.cumsum([c.size for _, c in paths]), nodata_value)
+        # The DEM the flow directions and the filled DEM come from (see routing_dem); ARC keeps the burned DEM
+        dem = routing_dem(dem, nodata_value, paths, path_reaches, dem_ds.GetGeoTransform(), dem_ds.GetProjection())
     return channel_mask, dem
 
-@njit(cache=True)
-def _lower_rises(values: np.ndarray, starts: np.ndarray, start_ends: np.ndarray, cells: np.ndarray,
-                 cell_ends: np.ndarray, nodata_value: float) -> None:
-    """
-    Lower ``values`` (flat) along each burned path in turn wherever it rises: path i runs down
-    cells[cell_ends[i - 1]:cell_ends[i]], starting no higher than its start cells, starts[start_ends[i - 1]:
-    start_ends[i]] (see smooth_burned_dem).
+# How far below the filled DEM a line may be lowered so that the cell above drains into it rather than onto the ground
+# beside (see _run_lines_down_fill). On the water a DEM levels, it takes centimetres; allowed 2 m or more, lines down
+# steep valleys were pulled below the slopes beside them, and the Colorado test tile (N39W109) lost connections.
+ROUTING_MAX_DROP_M = 1.0
+# How much lower each line cell is than the one above it, so the lines are the lowest way across the flats the fill
+# leaves: far more than the steps resolving flats adds (see _resolve_flats), far less than a DEM's precision
+ROUTING_STEP_M = 1e-6
 
-    The burned DEM keeps a line on the water the DEM flattens at the water's level, and a line can come to that
-    water from below it, where it was cut deeper upstream (toward lower ground beside it, or below a reach flowing
-    into it). The water then dams the line: filling pools the line behind it, and the flow directions cross the pool
-    and leave the line wherever its rim is lowest, a reach away at times. Lowered, the line drains along itself. ARC
-    keeps the burned DEM as it is: carried on below the water, a line deepens the river beds it measures.
+
+def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches: list, geotransform: tuple,
+                projection: str) -> np.ndarray:
     """
+    The DEM the flow directions and the filled DEM are derived from (see derive_flow_directions): ``dem``, the burned
+    DEM, filled (see fill_depressions), in double precision and ``nodata_value`` off the DEM, with each burned line run
+    down the fill (see _run_lines_down_fill). ``paths`` and ``path_reaches`` are as burn_streams_into_dem gives them.
+    Each line starts below the ends of all the reaches flowing into it, not only the largest: a tributary's line left
+    below the river at its mouth would take the river's flow down itself.
+
+    The burn keeps a line on the water the DEM flattens, at the water's level, and a line can come to that water from
+    below it, cut deeper upstream (toward lower ground beside it, or below a reach flowing into it). The water then
+    dams the line: filled, the line pools behind it, and the pool drains over its lowest rim, off the line at times, a
+    reach away. Run down the fill, the line is cut through the water only where the fill rises along it, and only to
+    the level the pool spills at, and it is the lowest way across the pool. Lowered instead wherever the burned line
+    rose, to its lowest point so far, a line carried that point down the whole network below it until the ground came
+    lower: on the flat south Florida tile (N26W081), 74% of the stream cells were lowered, by a median 0.5 m, 12% to 0 m
+    or below, and the FLDPLN library, built on the filled DEM, backfilled up the lowered channels.
+    """
+    valid = (dem != nodata_value) & np.isfinite(dem)
+    routing = fill_depressions(dem, valid, geotransform)
+    routing[~valid] = nodata_value
+    ends = {}
+    for (_, cells), (reach, _) in zip(paths, path_reaches):
+        ends.setdefault(reach, []).append(cells[-1])
+    starts = [np.unique(np.concatenate([s, np.array([c for f in feeders for c in ends.get(f, [])], np.int64)]))
+              for (s, _), (_, feeders) in zip(paths, path_reaches)]
+    dx_by_row, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
+    _run_lines_down_fill(routing, np.concatenate(starts), np.cumsum([s.size for s in starts]),
+                         np.concatenate([c for _, c in paths]), np.cumsum([c.size for _, c in paths]),
+                         float(nodata_value), ROUTING_STEP_M, ROUTING_MAX_DROP_M, np.asarray(dx_by_row, np.float64),
+                         float(dy))
+    return routing
+
+@njit(cache=True)
+def _run_lines_down_fill(values: np.ndarray, starts: np.ndarray, start_ends: np.ndarray, cells: np.ndarray,
+                         cell_ends: np.ndarray, nodata_value: float, step: float, max_drop: float,
+                         dx_by_row: np.ndarray, dy: float) -> None:
+    """
+    Run each burned path down ``values`` (the filled DEM, ``nodata_value`` off it), in turn: path i runs down
+    cells[cell_ends[i - 1]:cell_ends[i]] (flat indices), starting below the lowest of its start cells,
+    starts[start_ends[i - 1]:start_ends[i]], as they are set by then.
+
+    Each cell of a path is ``step`` below the one above it, and never above the fill: a path is cut only where the
+    fill rises along it, to the lowest the fill has been above, and across a flat the fill leaves it is the lowest
+    way. Each cell is also low enough that the cell above drains into it more steeply than onto the ground beside
+    that one, off the paths (see _drain_cap; ``dx_by_row`` is the cells' width on each row and ``dy`` their height, in
+    metres), but no more than ``max_drop`` below the fill. A cell on two paths keeps the lower.
+    """
+    nrows, ncols = values.shape
+    flat = values.ravel()
+    on_path = np.zeros(values.shape, np.bool_)
+    on_path.ravel()[cells] = True
+    done = np.zeros(flat.size, np.bool_)
+    fill = flat[cells]
     first_start, first_cell = 0, 0
     for i in range(cell_ends.size):
         level = np.inf
+        above = -1
         for k in range(first_start, start_ends[i]):
-            if values[starts[k]] != nodata_value:
-                level = min(level, values[starts[k]])
+            s = starts[k]
+            if flat[s] != nodata_value and flat[s] < level:
+                level = flat[s]
+                above = s
         for k in range(first_cell, cell_ends[i]):
             cell = cells[k]
-            if values[cell] == nodata_value:
+            if flat[cell] == nodata_value:
                 continue
-            if values[cell] > level:
-                values[cell] = level
-            level = values[cell]
+            value = min(fill[k], level - step)
+            if above >= 0:
+                cap = _drain_cap(values, on_path, above // ncols, above % ncols, level, cell // ncols, cell % ncols,
+                                 dx_by_row, dy, nodata_value) - step
+                value = min(value, max(cap, fill[k] - max_drop))
+            if done[cell]:
+                value = min(value, flat[cell])
+            flat[cell] = value
+            done[cell] = True
+            level = value
+            above = cell
         first_start, first_cell = start_ends[i], cell_ends[i]
 
 @njit(cache=True)
