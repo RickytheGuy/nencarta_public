@@ -144,12 +144,13 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
                              projection: str) -> tuple[np.ndarray, np.ndarray]:
     """
     ``dem`` with its depressions filled (NaN off ``valid``), and its D8 flow directions (see
-    stream_conflation.D8_OFFSETS; 0 where nothing around is lower, FLOWDIR_NODATA off the DEM), with RichDEM.
+    stream_conflation.D8_OFFSETS; 0 where nothing around is lower, FLOWDIR_NODATA off the DEM).
 
-    Every depression is filled to its spill level (Priority-Flood, Barnes et al. 2014), and the flats that leaves --
-    and the DEM's own, as FABDEM's leveled water -- are given a gradient for the flow directions alone (Barnes et al.
-    2014, "An efficient assignment of drainage direction over flat surfaces"): away from the higher ground around
-    them and toward their outlets, so flow paths run down a flat's middle rather than straight along one edge. Off
+    Every depression is filled to its spill level (Priority-Flood, Barnes et al. 2014, by RichDEM), and the flats that
+    leaves -- and the DEM's own, as FABDEM's leveled water -- are given a gradient for the flow directions alone (Barnes
+    et al. 2014, "An efficient assignment of drainage direction over flat surfaces", as RichDEM gives it, see
+    _resolve_flats): away from the higher ground around them and toward their outlets, so flow paths run down a
+    flat's middle rather than straight along one edge. Off
     the DEM, its edges and nodata, is lower than anything on it, so a flat running off it drains there. The gradient
     is imposed in double precision: in single precision its increments round away on a large flat, leaving pits.
     Its increments are a value's last digit, which at 0 m is so small that over a cell's width it is no slope at all,
@@ -169,11 +170,164 @@ def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: t
     gt[3] -= gt[5]
     filled = rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt)
     rd.FillDepressions(filled, in_place=True)
-    routed = np.asarray(rd.ResolveFlats(filled, in_place=False))[1:-1, 1:-1]
-    filled = np.asarray(filled)[1:-1, 1:-1] - raise_by
+    filled = np.asarray(filled)
+    routed = _resolve_flats(filled)[1:-1, 1:-1]
+    filled = filled[1:-1, 1:-1] - raise_by
     dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
     flowdir = _d8_pointers(routed, valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS, _D8_CODES)
     return np.where(valid, filled, np.nan), flowdir
+
+
+def _resolve_flats(z: np.ndarray) -> np.ndarray:
+    """
+    ``z`` (filled, positive, its edge lower than anything inside it) with the gradient Barnes et al. (2014) give its
+    flats, as RichDEM's ResolveFlats imposes it: each flat cell raised by as many units in its last place as its
+    step on the gradient (see _flat_gradient).
+
+    RichDEM raises a cell one unit at a time, which on a big flat, a lake FABDEM leaves level, is billions of steps;
+    here a cell is raised by all its steps at once, to the same value.
+    """
+    steps = _flat_gradient(z)
+    routed = z.copy()
+    raised = steps > 0
+    ulp = np.spacing(z[raised])
+    routed[raised] = z[raised] + steps[raised] * ulp
+    # One step at a time past a power of two, where the units grow; never seen on a DEM's values
+    for i in np.flatnonzero(np.spacing(routed[raised]) != ulp):
+        cell = np.unravel_index(np.flatnonzero(raised.ravel())[i], z.shape)
+        value = z[cell]
+        for _ in range(steps[cell]):
+            value = np.nextafter(value, np.inf)
+        routed[cell] = value
+    return routed
+
+
+@njit(cache=True)
+def _flat_gradient(z: np.ndarray) -> np.ndarray:
+    """
+    The gradient Barnes et al. (2014) give the flats of ``z`` (filled, without nodata), in steps, as RichDEM builds it
+    (GetFlatMask): 0 off them.
+
+    A flat is cells with no lower neighbour (the grid's edge drains off it), with an outlet: a cell at its level that
+    drains, a low edge. Each flat, the cells at its level joined to a low edge, is labelled. Its cells are numbered by
+    how many steps they are from the higher ground around it (its high edges: flat cells beside higher ground),
+    reversed so the cells farthest from the higher ground are lowest, and then raised by twice their steps from the
+    low edges, which are raised by 2.
+    """
+    nrows, ncols = z.shape
+    d_rows = np.array([0, -1, -1, -1, 0, 1, 1, 1])
+    d_cols = np.array([-1, -1, 0, 1, 1, 1, 0, -1])
+    no_flow = np.zeros((nrows, ncols), np.bool_)
+    for r in range(1, nrows - 1):
+        for c in range(1, ncols - 1):
+            no_flow[r, c] = True
+            for k in range(8):
+                if z[r + d_rows[k], c + d_cols[k]] < z[r, c]:
+                    no_flow[r, c] = False
+                    break
+
+    # Low edges (drain, beside a flat cell at their level) and high edges (flat cells beside higher ground)
+    low, high = [], []
+    for r in range(nrows):
+        for c in range(ncols):
+            for k in range(8):
+                nr, nc = r + d_rows[k], c + d_cols[k]
+                if nr < 0 or nr >= nrows or nc < 0 or nc >= ncols:
+                    continue
+                if not no_flow[r, c] and no_flow[nr, nc] and z[nr, nc] == z[r, c]:
+                    low.append(r * ncols + c)
+                    break
+                if no_flow[r, c] and z[r, c] < z[nr, nc]:
+                    high.append(r * ncols + c)
+                    break
+
+    steps = np.zeros((nrows, ncols), np.int32)
+    if len(low) == 0:
+        return steps
+    
+    # Label each flat from its low edges: the cells at its level joined to them
+    labels = np.zeros((nrows, ncols), np.int32)
+    queue = np.empty(nrows * ncols, np.int64)
+    label = 0
+    for start in low:
+        r, c = start // ncols, start % ncols
+        if labels[r, c]:
+            continue
+        label += 1
+        level = z[r, c]
+        labels[r, c] = label
+        queue[0] = start
+        head, tail = 0, 1
+        while head < tail:
+            cell = queue[head]
+            head += 1
+            r, c = cell // ncols, cell % ncols
+            for k in range(8):
+                nr, nc = r + d_rows[k], c + d_cols[k]
+                if 0 <= nr < nrows and 0 <= nc < ncols and not labels[nr, nc] and z[nr, nc] == level:
+                    labels[nr, nc] = label
+                    queue[tail] = nr * ncols + nc
+                    tail += 1
+
+    # Steps away from the higher ground, through the flat's cells, and the most of them in each flat
+    height = np.zeros(label + 1, np.int32)
+    tail = 0
+    for cell in high:
+        r, c = cell // ncols, cell % ncols
+        if labels[r, c] and not steps[r, c]:
+            steps[r, c] = 1
+            queue[tail] = cell
+            tail += 1
+
+    head = 0
+    while head < tail:
+        cell = queue[head]
+        head += 1
+        r, c = cell // ncols, cell % ncols
+        height[labels[r, c]] = max(height[labels[r, c]], steps[r, c])
+        for k in range(8):
+            nr, nc = r + d_rows[k], c + d_cols[k]
+            if not (0 <= nr < nrows and 0 <= nc < ncols) or steps[nr, nc]:
+                continue
+            if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
+                steps[nr, nc] = steps[r, c] + 1
+                queue[tail] = nr * ncols + nc
+                tail += 1
+
+    # Steps from the low edges, which are 1, through the flat's cells
+    toward = np.zeros((nrows, ncols), np.int32)
+    tail = 0
+    for cell in low:
+        r, c = cell // ncols, cell % ncols
+        if not toward[r, c]:
+            toward[r, c] = 1
+            queue[tail] = cell
+            tail += 1
+
+    head = 0
+    while head < tail:
+        cell = queue[head]
+        head += 1
+        r, c = cell // ncols, cell % ncols
+        for k in range(8):
+            nr, nc = r + d_rows[k], c + d_cols[k]
+            if not (0 <= nr < nrows and 0 <= nc < ncols) or toward[nr, nc]:
+                continue
+            if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
+                toward[nr, nc] = toward[r, c] + 1
+                queue[tail] = nr * ncols + nc
+                tail += 1
+
+    for r in range(nrows):
+        for c in range(ncols):
+            if not labels[r, c] or not toward[r, c]:
+                steps[r, c] = 0
+            elif steps[r, c]:
+                steps[r, c] = height[labels[r, c]] - steps[r, c] + 2 * toward[r, c]
+            else:
+                steps[r, c] = 2 * toward[r, c]
+                
+    return steps
 
 
 @njit(cache=True)

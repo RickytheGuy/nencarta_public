@@ -121,8 +121,31 @@ def _near_level(nrows: int, ncols: int, candidates: np.ndarray, distance: np.nda
     """
     near_the_rivers_level for ``candidates`` (flat indices on an ``nrows`` by ``ncols`` grid, each ``distance`` cells
     from the nearest stream cell and ``height`` high), with the stream cells bucketed in ``block``-cell squares.
+
+    A stream cell is never lower than its own height, so a square whose lowest stream cell isn't ``max_rise`` below a
+    candidate can't hold a lower level: the squares are searched from big (4 x 4 blocks, 16 x 16, ...) to small,
+    skipping those, and those beyond the search's reach. Water far from any stream, a lake's, searches far.
     """
     n_block_rows = (nrows + block - 1) // block
+    # The lowest stream cell of each block, and of each square of 4 x 4 of those, up to one square for the grid
+    lowest = [np.full((n_block_rows, n_block_cols), np.inf)]
+    for b in range(n_block_rows * n_block_cols):
+        for i in range(first[b], first[b] + count[b]):
+            if z[i] < lowest[0][b // n_block_cols, b % n_block_cols]:
+                lowest[0][b // n_block_cols, b % n_block_cols] = z[i]
+
+    while lowest[-1].shape[0] > 1 or lowest[-1].shape[1] > 1:
+        below = lowest[-1]
+        above = np.full(((below.shape[0] + 3) // 4, (below.shape[1] + 3) // 4), np.inf)
+        for br in range(below.shape[0]):
+            for bc in range(below.shape[1]):
+                if below[br, bc] < above[br // 4, bc // 4]:
+                    above[br // 4, bc // 4] = below[br, bc]
+        lowest.append(above)
+
+    stack_level = np.empty(16 * len(lowest) + 16, np.int64)
+    stack_row = np.empty_like(stack_level)
+    stack_col = np.empty_like(stack_level)
     out = np.zeros((nrows, ncols), np.bool_)
     for k in range(candidates.size):
         r = candidates[k] // ncols
@@ -130,22 +153,46 @@ def _near_level(nrows: int, ncols: int, candidates: np.ndarray, distance: np.nda
         d = distance[k]
         reach = 2.0 * d + 5.0
         lowest_allowed = height[k] - max_rise
+        # Start from the squares at least as big as the reach, at most 3 x 3 of them
+        level, size = 0, block
+        while level < len(lowest) - 1 and size < reach:
+            level += 1
+            size *= 4
+
+        top = 0
+        for br in range(max(int((r - reach) // size), 0), min(int((r + reach) // size), lowest[level].shape[0] - 1) + 1):
+            for bc in range(max(int((c - reach) // size), 0),
+                            min(int((c + reach) // size), lowest[level].shape[1] - 1) + 1):
+                stack_level[top], stack_row[top], stack_col[top] = level, br, bc
+                top += 1
+
         near = True
-        for br in range(max(int((r - reach) // block), 0), min(int((r + reach) // block), n_block_rows - 1) + 1):
-            for bc in range(max(int((c - reach) // block), 0), min(int((c + reach) // block), n_block_cols - 1) + 1):
-                b = br * n_block_cols + bc
-                for i in range(first[b], first[b] + count[b]):
-                    d2 = (rows[i] - r) ** 2 + (cols[i] - c) ** 2
-                    if d2 > reach * reach:
-                        continue
-                    if z[i] + slope[i] * math.sqrt(max(d2 - d * d, 0.0)) < lowest_allowed:
-                        near = False
-                        break
-                if not near:
+        while top and near:
+            top -= 1
+            lv, br, bc = stack_level[top], stack_row[top], stack_col[top]
+            if lowest[lv][br, bc] >= lowest_allowed:
+                continue
+            size = block * 4 ** lv
+            off_rows = max(br * size - r, 0, r - (br * size + size - 1))
+            off_cols = max(bc * size - c, 0, c - (bc * size + size - 1))
+            if off_rows * off_rows + off_cols * off_cols > reach * reach:
+                continue
+            if lv:
+                for cr in range(4 * br, min(4 * br + 4, lowest[lv - 1].shape[0])):
+                    for cc in range(4 * bc, min(4 * bc + 4, lowest[lv - 1].shape[1])):
+                        stack_level[top], stack_row[top], stack_col[top] = lv - 1, cr, cc
+                        top += 1
+                continue
+            b = br * n_block_cols + bc
+            for i in range(first[b], first[b] + count[b]):
+                d2 = (rows[i] - r) ** 2 + (cols[i] - c) ** 2
+                if d2 > reach * reach:
+                    continue
+                if z[i] + slope[i] * math.sqrt(max(d2 - d * d, 0.0)) < lowest_allowed:
+                    near = False
                     break
-            if not near:
-                break
         out[r, c] = near
+        
     return out
 
 
