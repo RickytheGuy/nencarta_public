@@ -144,6 +144,8 @@ UNDERLYING_NAMES = {
     "mannings_mode": "LU_Manning_n",
     "mannings_text_file": "mannings_text_file",
     "standard_step": "Standard_Step",
+    "valley_sections": "Valley_Sections",
+    "valley_dir_dist": "Valley_Dir_Dist",
     "bathy_args": "bathy_args",
     "make_curvefile": "Print_Curve_File",
     "create_reach_average_curve_file": "Reach_Average_Curve_File",
@@ -1426,6 +1428,12 @@ class FloodSimulationGUI(QMainWindow):
         group = self._make_group(tab, "Advanced")
         self._add_checkbox(group, "standard_step", "Link the water surfaces along the stream network by the "
                                                    "standard step", _default("standard_step"))
+        self._add_checkbox(group, "valley_sections", "Take the overbanks' flow square to the valley",
+                           _default("valley_sections"))
+        self._add_spin(group, "valley_dir_dist", "Cells along the stream either way for the valley's direction",
+                       _default("valley_dir_dist"), minimum=2)
+        self.show_when(lambda: self._on("valley_sections"), "valley_dir_dist")
+        self._indent("valley_dir_dist")
         self._add_arg_table(group, "bathy_args", "More ARC arguments",
                             "Other ARC settings, by their names in ARC's input file, such as shallow_factor, "
                             "deep_factor, k_decay or slope_adjustment_factor.")
@@ -1466,7 +1474,7 @@ class FloodSimulationGUI(QMainWindow):
                        parser="float")
         self._add_line(group, "fldpln_max_depth", "Deepest flood the library covers (m)", _default("fldpln_max_depth"),
                        parser="float")
-        self._add_line(group, "fldpln_spill_decay", "Depth added per cell along a spill (m)",
+        self._add_line(group, "fldpln_spill_decay", "Head a spill loses per cell (m)",
                        _default("fldpln_spill_decay"), parser="float")
         self._add_line(group, "fldpln_max_cells_per_segment", "Most cells one segment may flood", "", parser="int",
                        placeholder="Optional")

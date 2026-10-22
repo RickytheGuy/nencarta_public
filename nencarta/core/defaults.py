@@ -212,6 +212,13 @@ CONFIG_SECTIONS = {
         "standard_step": ConfigOption(False, "bool", "Link ARC's water surfaces along the stream network by the "
                                                      "standard-step method, instead of each cross section's normal "
                                                      "depth."),
+        "valley_sections": ConfigOption(False, "bool", "Take ARC's overbank flow on lines out from each cross "
+                                                       "section's banks square to the valley, at the valley's slope: "
+                                                       "over a meandering river's floodplain, the water runs down the "
+                                                       "valley, not along the channel."),
+        "valley_dir_dist": ConfigOption(40, "int", "How far along the stream, in cells either way, ARC takes the "
+                                                   "valley's direction and the stream's sinuosity over, for "
+                                                   "valley_sections: about a meander's length. At least 2."),
         "bathy_args": ConfigOption(DEFAULT_BATHY_ARGS, "dict", "More ARC settings for the bathymetry run. Replaces "
                                                                "the whole default set."),
     },

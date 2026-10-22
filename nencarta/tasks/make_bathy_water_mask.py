@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from numba import njit
 from osgeo import gdal
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_dilation, distance_transform_edt, label
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
@@ -18,6 +18,9 @@ from curve2flood import remove_cells_not_connected
 
 # Land cover's water this far above the river's level on the DEM isn't the river (see near_the_rivers_level)
 WATER_MAX_RISE_M = 1.0
+# A reach more than this share of whose stream cells have no water beside them in the mask is 1 cell wide all along
+# (see one_cell_wide_where_mostly)
+NARROW_SHARE = 0.5
 
 
 def reach_areas_km2(streams_gdf: gpd.GeoDataFrame | pd.DataFrame, configs) -> dict:
@@ -204,9 +207,14 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
     near_the_rivers_level), in patches touching a stream cell. The water is the land cover's, and with
     use_dem_derived_channel_mask also the channel the DEM shows (see channel_detection), where the imagery saw the
     river elsewhere. The ocean is left out: the burned DEM has no data there (see load_ocean_array).
+
+    The water in a lake (see load_lake_array) is the lake's, whatever its level: no stream runs in a lake the network
+    is cut at (FLDPLN's), and the river nearest a reservoir's water by its dam is the one below the dam, metres lower.
+    A reach the mask has mostly 1 cell wide is made 1 cell wide all along, but in lakes (see
+    one_cell_wide_where_mostly).
     """
     # Imported here: move_streams imports this module
-    from nencarta.tasks.move_streams import load_ocean_array
+    from nencarta.tasks.move_streams import load_lake_array, load_ocean_array
 
     configs = workspace.configs
     dem = dem_raster.read_array()
@@ -225,8 +233,42 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
         water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}, flat_water=False).channel
     if ocean is not None:
         water &= ~ocean
-    water &= near_the_rivers_level(dem, streams, cells=water)
-    return remove_cells_not_connected(water | (streams > 0), streams) > 0
+    lakes = load_lake_array(workspace, dem_raster)
+    if lakes is None:
+        water &= near_the_rivers_level(dem, streams, cells=water)
+    else:
+        lakes = lakes.reshape(dem.shape)
+        water &= lakes | near_the_rivers_level(dem, streams, cells=water & ~lakes)
+    mask = remove_cells_not_connected(water | (streams > 0), streams) > 0
+    return one_cell_wide_where_mostly(mask, streams, lakes)
+
+
+def one_cell_wide_where_mostly(mask: np.ndarray, streams: np.ndarray, lakes: np.ndarray | None = None) -> np.ndarray:
+    """
+    ``mask`` with the reaches of ``streams`` (reach ids, 0 off them) it has mostly 1 cell wide made 1 cell wide all
+    along: those more than NARROW_SHARE of whose stream cells have no water among their 8 neighbours but stream cells.
+    The patches of water (8-connected, the stream cells aside) that touch only such reaches' stream cells are dropped:
+    a pond or a wet field beside a river the DEM and the imagery show no wider than a cell, which ARC would carve as
+    the river. A patch that touches a wider reach's stream cells is that river's water, though a narrow reach's line
+    runs into it, and is kept; so is one with water in a lake (``lakes``).
+    """
+    on = streams > 0
+    water = mask & ~on
+    if not water.any():
+        return mask
+    eight = np.ones((3, 3), bool)
+    reaches, of_cell = np.unique(streams[on], return_inverse=True)
+    beside_water = np.bincount(of_cell, binary_dilation(water, eight)[on])
+    wide = np.zeros(mask.shape, bool)
+    wide[on] = (beside_water >= (1 - NARROW_SHARE) * np.bincount(of_cell))[of_cell]
+    patches, count = label(water, eight)
+    kept = binary_dilation(wide, eight) & water
+    if lakes is not None:
+        kept |= lakes & water
+    keep = np.zeros(count + 1, bool)
+    keep[patches[kept]] = True
+    keep[0] = False
+    return mask & ~(water & ~keep[patches])
 
 
 def make_water_mask(workspace: Workspace) -> Path:

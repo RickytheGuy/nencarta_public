@@ -291,6 +291,8 @@ class NencartaConfig:
         self.find_banks_based_on_landcover: bool = self.get("find_banks_based_on_landcover")
         self.create_reach_average_curve_file: bool = self.get("create_reach_average_curve_file")
         self.standard_step: bool = self.get("standard_step")
+        self.valley_sections: bool = self.get("valley_sections")
+        self.valley_dir_dist: int = self.get("valley_dir_dist")
         self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem")
         self.geoglows_vpu: str = self.get("geoglows_vpu")
         self.specified_bathyflow_field: str = self.get("specified_bathyflow_field")

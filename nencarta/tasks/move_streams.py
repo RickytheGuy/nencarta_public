@@ -12,7 +12,7 @@ from numba import njit
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
 import richdem as rd
-from scipy.ndimage import label
+from scipy.ndimage import binary_dilation, label
 import shapely
 from shapely.geometry import Point, LineString
 from shapely.ops import substring
@@ -527,6 +527,13 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
         make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask), configs.compression)
 
+        if configs.burn_streams:
+            # Nothing is moved onto a line burned where the moved network doesn't run, and it floods
+            rederived = restore_unfollowed_burns(workspace, final_streams, channel_mask, dem_for_conflation,
+                                                 flowdir_array)
+            if rederived is not None:
+                _, flowdir_array = rederived
+
     if configs.mapper.is_curve2flood_fldpln_mapper():
         if not should_move_streams:
             # Nothing was regenerated this run, so read back whichever stream raster the
@@ -542,6 +549,102 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             flow_direction_file=workspace.flowdir,
             flowdir=flowdir_array,
         )
+
+# How far the filled DEM may change where the streams and their water are before a restored burn is undone (m)
+RESTORE_FILL_TOLERANCE_M = 0.01
+# How many times the restored burns are filled again, and those that change the streams' drainage undone
+RESTORE_PASSES = 4
+
+
+def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, channel_mask: np.ndarray,
+                             routing: np.ndarray | None = None,
+                             flowdir: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Put the unburned DEM (workspace.assigned_dem) back in workspace.fixed_dem wherever the burn changed it and the
+    moved network doesn't run: more than a cell from every stream cell of ``final_streams`` and from the water mask
+    (``channel_mask``), and outside the lakes. The streams are burned where they are drawn before they are moved, and
+    a line the moving doesn't follow stays carved in the DEM, a trench no stream is mapped along, which floods from the
+    streams it meets. On the Colorado test tile (N39W109), stream relocation joined a tributary moved onto a wash back
+    to its GEOGLOWS junction by a straight stretch across the plain (see stream_relocation._Relocation._keeping_lines),
+    the burn cut it 4.5 to 9 m deep, and the moved tributary joined the wash's river instead: the trench flooded 1.28 m
+    deep at the 2-year flow.
+
+    But some of those cells carry the network's water: a line burned through a dam joins a reservoir to the river
+    below it, which starts a few cells below the dam (a lake's rivers stop at its shore), and put back, the dam holds
+    the reservoir metres higher in the filled DEM (8.6 m over 43 of a river's cells, on the N40W112 tile, Salt Lake
+    City). So the filled DEM is worked out again with the cells put back, and wherever it changes in a stretch of the
+    filled DEM that reaches a stream cell or a lake, the burned cells beside that stretch are kept, a connected piece
+    at a time, until the filled DEM changes at no stream cell or lake. Not at the water mask's cells: where a line
+    put back enters the mask, the cell its routing lowered (see routing_dem) is left a pit, which fills to the water
+    around it.
+
+    ``routing``, the DEM the flow directions came from (the burned DEM with its lines run down the fill, see
+    routing_dem), gets the unburned DEM where the cells are put back, and the filled DEM and flow directions are
+    derived from it again and written (see derive_flow_directions), since the floodplain library is routed across them.
+    The moved streams' own cells keep their flow directions (``flowdir``, or workspace.flowdir), which the network was
+    moved along and the stream info table walks: a flat the filling leaves can still drain another way. Returns the
+    filled DEM and flow directions written, or None where nothing was put back.
+    """
+    # Read and closed, not through Raster, which keeps the file open and so couldn't write it again
+    def read(path):
+        ds: gdal.Dataset = gdal.Open(str(path))
+        values, no_value = ds.ReadAsArray(), ds.GetRasterBand(1).GetNoDataValue()
+        ds = None
+        return values, no_value
+
+    fixed, nodata = read(workspace.fixed_dem)
+    assigned_raster = Raster(workspace.assigned_dem)
+    unburned = assigned_raster.read_array().astype(fixed.dtype)
+    valid = np.isfinite(fixed) & np.isfinite(unburned) & (unburned > -1000)
+    if nodata is not None:
+        valid &= fixed != nodata
+    if assigned_raster.nodata_value is not None:
+        valid &= unburned != assigned_raster.nodata_value
+    streams = np.asarray(final_streams) > 0
+    lakes = load_lake_array(workspace, assigned_raster)
+    drains = streams if lakes is None else streams | lakes  # what the filled DEM mustn't change at
+    eight = np.ones((3, 3), bool)
+    restore = valid & (fixed != unburned) & ~binary_dilation(streams | np.asarray(channel_mask, bool), structure=eight)
+    if lakes is not None:
+        restore &= ~lakes
+    if not restore.any():
+        return None
+
+    filled_before, _ = read(workspace.filled_dem)
+    if flowdir is None:
+        flowdir, _ = read(workspace.flowdir)
+    routing = np.array(fixed if routing is None else routing, np.float64)
+    routing_valid = np.isfinite(routing) & (routing != (-9999 if nodata is None else nodata))
+    pieces, _ = label(restore, structure=eight)
+    for _ in range(RESTORE_PASSES):
+        filled, new_flowdir = fill_and_flow_directions(np.where(restore, unburned, routing), routing_valid,
+                                                       assigned_raster.geotransform, assigned_raster.projection)
+        changed = routing_valid & ~(np.abs(filled - filled_before) <= RESTORE_FILL_TOLERANCE_M)
+        stretches, _ = label(changed, structure=eight)
+        reached = np.unique(stretches[changed & drains])
+        if reached.size == 0:
+            break
+        beside = binary_dilation(np.isin(stretches, reached), structure=eight)
+        kept = np.unique(pieces[beside & restore])
+        restore &= ~np.isin(pieces, kept)
+        if not restore.any():
+            return None
+    else:
+        LOG.warning("Some burned cells no moved stream runs along still change how the streams drain when put back; "
+                    "they stay burned")
+        return None
+
+    LOG.info(f"Restoring the unburned DEM at {int(restore.sum())} burned cells no moved stream runs along")
+    fixed[restore] = unburned[restore]
+    _write_raster(Path(workspace.fixed_dem), fixed, assigned_raster, gdal.GDT_Float32,
+                  -9999 if nodata is None else nodata, workspace.configs.compression)
+    new_flowdir[streams] = flowdir[streams]
+    filled = np.where(routing_valid, filled, FILLED_NODATA)
+    compression = workspace.configs.compression
+    _write_raster(Path(workspace.filled_dem), filled, assigned_raster, gdal.GDT_Float64, FILLED_NODATA, compression)
+    _write_raster(Path(workspace.flowdir), new_flowdir, assigned_raster, gdal.GDT_Int16, FLOWDIR_NODATA, compression)
+    return filled, new_flowdir
+
 
 def move_streams_onto_flow_directions(
         workspace: Workspace,
@@ -1003,8 +1106,12 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
     The DEM the flow directions and the filled DEM are derived from (see derive_flow_directions): ``dem``, the burned
     DEM, filled (see fill_depressions), in double precision and ``nodata_value`` off the DEM, with each burned line run
     down the fill (see _run_lines_down_fill). ``paths`` and ``path_reaches`` are as burn_streams_into_dem gives them.
-    Each line starts below the ends of all the reaches flowing into it, not only the largest: a tributary's line left
-    below the river at its mouth would take the river's flow down itself.
+    Each line starts below all the reaches flowing into it, not only the largest: a tributary's line left below the
+    river at its mouth would take the river's flow down itself. Below each where its line comes nearest the start, as
+    burn_linestring takes them: at a junction, its end, but a relocated line can run on past its junction. Below that
+    one's end, 2 km on and 34 m lower, the reach it flows into in Salt Lake City (n40w112) was cut to that level all
+    its length, up to 31 m below the ground, and the FLDPLN library, built on the filled DEM, took the cut for water:
+    the reach's 0.6 m deep water at the 2-year flow flooded the city 17 m deep.
 
     The burn keeps a line on the water the DEM flattens, at the water's level, and a line can come to that water from
     below it, cut deeper upstream (toward lower ground beside it, or below a reach flowing into it). The water then
@@ -1018,17 +1125,28 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
     valid = (dem != nodata_value) & np.isfinite(dem)
     routing = fill_depressions(dem, valid, geotransform)
     routing[~valid] = nodata_value
-    ends = {}
+    lines = {}
     for (_, cells), (reach, _) in zip(paths, path_reaches):
-        ends.setdefault(reach, []).append(cells[-1])
-    starts = [np.unique(np.concatenate([s, np.array([c for f in feeders for c in ends.get(f, [])], np.int64)]))
-              for (s, _), (_, feeders) in zip(paths, path_reaches)]
+        lines.setdefault(reach, []).append(cells)
+    lines = {reach: np.concatenate(cells) for reach, cells in lines.items()}
+    starts = [np.unique(np.concatenate([s, np.array([_nearest_cell(lines[f], cells[0], dem.shape[1])
+                                                     for f in feeders if f in lines], np.int64)]))
+              for (s, cells), (_, feeders) in zip(paths, path_reaches)]
     dx_by_row, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
     _run_lines_down_fill(routing, np.concatenate(starts), np.cumsum([s.size for s in starts]),
                          np.concatenate([c for _, c in paths]), np.cumsum([c.size for _, c in paths]),
                          float(nodata_value), ROUTING_STEP_M, ROUTING_MAX_DROP_M, np.asarray(dx_by_row, np.float64),
                          float(dy))
     return routing
+
+
+def _nearest_cell(cells: np.ndarray, cell: int, ncols: int) -> int:
+    """The one of ``cells`` (flat indices on a grid ``ncols`` wide) nearest ``cell``, the last of any tied: of a line
+    burned from upstream down, the one farthest down."""
+    rows, cols = np.divmod(cells[::-1], ncols)
+    row, col = divmod(int(cell), ncols)
+    return int(cells[::-1][np.argmin((rows - row) ** 2 + (cols - col) ** 2)])
+
 
 @njit(cache=True)
 def _run_lines_down_fill(values: np.ndarray, starts: np.ndarray, start_ends: np.ndarray, cells: np.ndarray,

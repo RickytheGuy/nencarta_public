@@ -16,7 +16,13 @@ hold across them, given the streams:
   one width and +0.0007 for three, and -0.0004 with flat water only on the streams).
 - Low ground by the stream: no more than ``rise_m`` above the river beside it, within ``widths`` of the river's
   expected width (``width_per_sqrt_km2`` metres per square root of the drainage area in km2) of the stream, along a
-  river expected to be at least a cell wide. A narrower river's channel is its stream cells.
+  river expected to be at least a cell wide. A narrower river's channel is its stream cells. Only on a DEM with no
+  flat water by its streams (one rounded coarsely, or that leaves its water as rough as the land): a DEM that
+  flattens its rivers' water leaves unflattened only those too narrow for it, and their low ground is the floodplain
+  beside them. The Jordan through Salt Lake City (n40w112, FABDEM) is about a cell wide but drains 9,400 km2, so
+  expected 107 m wide, and its low ground made a mask 200 to 300 m wide down its floodplain. On the FIM sites' FABDEM
+  the low ground added 83,000 cells to the flat water's 697,000, 2,700 of them the land cover's river water, and the
+  flat water alone finds that water better at 61 of 63 sites (F1 0.84 against 0.79 over all of them).
 
 The river beside a cell is its nearest stream cell, whose level is the lowest of the DEM within ``snap_m`` of it (the
 stream may be drawn a cell or two off the water), averaged along the streams over ``smooth_m``. On the eight DEMs of the
@@ -54,7 +60,8 @@ class ChannelSettings:
     flat_widths: float | None = 2.0
     flat_min_m: float = 60.0
     # Low ground: no more than rise_m above the river, within widths times the river's expected width of the stream,
-    # along rivers expected to be at least min_width_cells wide (a narrower one's channel is its stream cells)
+    # along rivers expected to be at least min_width_cells wide (a narrower one's channel is its stream cells), on a
+    # DEM with no flat water by its streams
     rise_m: float = 1.0
     widths: float = 1.5
     width_per_sqrt_km2: float = 1.1
@@ -64,8 +71,8 @@ class ChannelSettings:
 @dataclass
 class Channel:
     """
-    The flat water and the whole channel (flat water or low ground by the streams), as boolean rasters, or None for
-    one river_channel was told not to work out.
+    The flat water and the whole channel (the flat water, or on a DEM without any by its streams, the low ground by
+    them), as boolean rasters, or None for one river_channel was told not to work out.
     """
     flat_water: np.ndarray | None
     channel: np.ndarray | None
@@ -188,7 +195,7 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     # Low ground only along rivers expected to be at least min_width_cells wide
     width = np.where(width >= s.min_width_cells * cell, width, 0.0)
     water = np.zeros(dem.shape, bool)
-    whole = np.zeros(dem.shape, bool)
+    low = np.zeros(dem.shape, bool)
     ncols = dem.shape[1]
     for r0 in range(0, dem.shape[0], _CHUNK_ROWS):
         r1 = min(r0 + _CHUNK_ROWS, dem.shape[0])
@@ -201,11 +208,16 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
         if flat is not None:
             water[r0:r1] = flat[r0:r1] & corridor & (rise <= s.flat_rise_m) & (distance <= flat_reach[k])
         w = width[k]
-        whole[r0:r1] = water[r0:r1] | (corridor & (rise <= s.rise_m) & (w > 0) & (distance <= s.widths * w))
+        low[r0:r1] = corridor & (rise <= s.rise_m) & (w > 0) & (distance <= s.widths * w)
     del nearest, index
     if connected:
-        water = touching(water, on_stream) if flat_water else None
-        whole = touching(whole, on_stream)
+        water = touching(water, on_stream)
+    # A DEM that flattens its rivers' water shows their channels by it, and the low ground by a river it left
+    # unflattened is the floodplain of one too narrow for it (see the module)
+    if water.any():
+        whole = water.copy()
+    else:
+        whole = touching(low, on_stream) if connected else low
     return Channel(water if flat_water else None, whole)
 
 

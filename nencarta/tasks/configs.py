@@ -1,6 +1,8 @@
 import io
 from pathlib import Path
 
+import pyarrow.parquet as pq
+import pyogrio
 import yaml
 
 from nencarta.logger import LOG
@@ -38,6 +40,62 @@ def _arc_inputs(dem: Path,
     params.update(bathy_args)
 
     return params
+
+def _vector_columns(path: Path) -> set[str] | None:
+    """The attribute columns of a stream file, or None if it isn't there yet."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        if path.suffix.lower() == ".parquet":
+            return set(pq.read_schema(path).names)
+        return set(pyogrio.read_info(path)["fields"])
+    except Exception:  # not a stream file yet, such as an empty placeholder: as if it weren't there
+        return None
+
+
+def _valley_sections(configs) -> dict:
+    """ARC's Valley_Sections and its Valley_Dir_Dist, when valley_sections is on: the overbanks' flow on lines out from
+    each cross section's banks square to the valley, at the valley's slope."""
+    if not configs.valley_sections:
+        return {}
+    return {"Valley_Sections": True, "Valley_Dir_Dist": int(configs.valley_dir_dist)}
+
+
+def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> dict:
+    """
+    ARC's drainage-area power laws, from the area in km2: always the width's, and the depth's too with
+    use_power_laws_for_bathymetry. ARC sizes with the width's the channels whose banks the water mask, the land cover
+    and the DEM don't show: a single cell as wide as the law says, where that's narrower than a cell. Without it, on a
+    flat valley floor, ARC found banks at a few of a creek's cross sections, hundreds of metres to kilometres apart,
+    and carved the rest of the reach as wide as their median (262 m for a creek of 15 m3/s in Salt Lake City,
+    N40W112); with it, the creek is a single cell along most of its reach, and so its median width is too.
+
+    The area is area_km2_field's, which nencarta adds to the stream lines (tasks.make_stream_geometry). A stream file
+    made before it did has only area_m2_field: the coefficients are then scaled to take m2, which gives the same
+    widths and depths. Without either field, ARC gets no power laws.
+    """
+    field, scale = configs.area_km2_field, 1.0
+    columns = _vector_columns(stream_vector)
+    if columns is not None and field not in columns:
+        if configs.area_m2_field and configs.area_m2_field in columns:
+            field, scale = configs.area_m2_field, 1e-6
+        else:
+            LOG.warning(f"The stream lines {stream_vector} have no drainage area ({configs.area_km2_field} or "
+                        f"{configs.area_m2_field}), so ARC gets no width power law.")
+            return {}
+    exponent_width = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
+    params = {"drainage_area_field": field,
+              "coefficient_width": (configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"])
+              * scale ** exponent_width,
+              "exponent_width": exponent_width}
+    if configs.use_power_laws_for_bathymetry:
+        exponent_depth = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
+        params["coefficient_depth"] = (configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]) \
+            * scale ** exponent_depth
+        params["exponent_depth"] = exponent_depth
+    return params
+
 
 def _fldpln_inputs(workspace: Workspace):
     """The FLDPLN section of a Curve2Flood config. The mapper reads neither the filled DEM (the VDT's Elev and the
@@ -156,12 +214,8 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     params["downstream_reach_id"] = configs.downstream_id_field
     if configs.standard_step:
         params["Standard_Step"] = True
-    if configs.use_power_laws_for_bathymetry:
-        params["drainage_area_field"] = configs.area_km2_field
-        params["coefficient_depth"] = configs.coefficient_depth
-        params["exponent_depth"] = configs.exponent_depth
-        params["coefficient_width"] = configs.coefficient_width
-        params["exponent_width"] = configs.exponent_width
+    params.update(_valley_sections(configs))
+    params.update(_drainage_area_power_laws(configs, streamlines))
 
     params["#VDT_Output_File_and_CurveFile"] = ""
     params["VDT_Database_NumIterations"] = configs.bathy_args.get("VDT_Database_NumIterations", DEFAULT_BATHY_ARGS["VDT_Database_NumIterations"])
@@ -246,16 +300,12 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["Standard_Step"] = True
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
+    params.update(_valley_sections(configs))
 
     if not configs.disable_bathymetry:
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
-        if configs.use_power_laws_for_bathymetry:
-            params["drainage_area_field"] = configs.area_km2_field
-            params["coefficient_depth"] = configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]
-            params["exponent_depth"] = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
-            params["coefficient_width"] = configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"]
-            params["exponent_width"] = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
+        params.update(_drainage_area_power_laws(configs, stream_vector))
 
         params["# Mapper Input Data"] = ""
         params["Comid_Flow_File"] = workspace.COMID_Q_File

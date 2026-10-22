@@ -13,8 +13,9 @@ most-voted cells flowing into it (see _Relocation._path). But D8 paths cross the
 lines, and cut meanders the DEM is too coarse to show, so a reach only moves onto its path where the DEM shows a
 channel along the path that its line misses, and the path is about as long as the line or the line runs well above it
 (see RelocationSettings), and drains on into the next reach. Moved reaches are carried down their D8 path onto the next
-reach's line; where neither a reach nor the reach it flows into gets to the other that way, the moved ones keep their
-lines where their paths don't reach (see _Relocation._keeping_lines), so the network stays joined.
+reach's line, but not on past its start (see RelocationSettings.junction_m); where neither a reach nor the reach it
+flows into gets to the other that way, the moved ones keep their lines where their paths don't reach (see
+_Relocation._keeping_lines), so the network stays joined.
 
 A river flowing in across the domain's edge drains little within it, so what the source says it drains is added to
 the flow paths from where it comes in: at the first cell whose flow path follows it, and again wherever it comes back
@@ -81,6 +82,12 @@ class RelocationSettings:
     # meanders run on the floodplain, as low as a path cutting across them.
     min_length_ratio: float = 0.9
     meander_max_rise_m: float = 1.5
+    # A moved reach is carried down D8 onto the line of the reach it flows into. Where that line is drawn a cell or
+    # more off the river, D8 carries it on past the line's start, down the river beside it to where they cross, or a
+    # reach or more down. So where the reach it flows into kept its line, a path that comes within junction_m of its
+    # start (at least 1.5 cells) but doesn't meet its line that near ends at its cell nearest the start, and keeps its
+    # line below there
+    junction_m: float = 150.0
     # Where the DEM under a line rises dam_height_m or more and comes back down within max_dam_reaches reaches,
     # with no way round less high, the DEM dams the river, and the line is burned through (see breach_dammed_rivers):
     # from a low with the cell above it within dam_end_step_m of it, to one with the cell below it so
@@ -124,7 +131,8 @@ def relocate_misplaced_reaches(
              f"along than their lines, {relocation.shortcut} whose paths cut their meanders, {relocation.stranded} "
              f"whose paths are neither their river nor drain on to the next reach; {len(relocation.trails)} moved "
              f"reaches keep their lines below and {len(relocation.leads)} above where their paths don't reach the "
-             f"reaches they join")
+             f"reaches they join, {relocation.past_junction} of the former where their paths ran on past the next "
+             f"reach's start")
     return relocation.result()
 
 
@@ -306,20 +314,20 @@ class _Relocation:
                     del self.paths[x]
                     self.stranded += 1
                     changed = True
-        # The reaches below first, so that a reach is carried onto where the next one is carried; failing the next
-        # reach, onto the reach below it: down a braided river a branch can bypass a short reach
+        # The reaches below first, so that a reach is carried onto where the next one is carried; a path that runs on
+        # past the next reach's start ends near it instead, and keeps its line below there (see _to_junction)
         depth = self._depths()
         joined = set()
+        self.past_junction = 0
         for x in sorted(self.paths, key=lambda r: (depth[r], -source.area[r])):
             d = int(source.ds[x])
             if d < 0:
                 continue
             down = onto(x, d, int(self.paths[x][-1]))
-            if down is None and source.ds[d] >= 0:
-                down = _down_to(int(self.paths[x][-1]), self.flow.down,
-                                set(self._cells_of(int(source.ds[d])).tolist()), int(3 * self._radius(x) / self.R) + 10)
-            if down is not None:
-                self.paths[x] = np.concatenate((self.paths[x], down))
+            path = self.paths[x] if down is None else np.concatenate((self.paths[x], down))
+            self.paths[x], joins, past = self._to_junction(d, path, down is not None)
+            self.past_junction += past
+            if joins:
                 joined.add(x)
         # Then a kept line whose downstream reach moved is carried onto its new line. Moved reaches not carried on, and
         # kept ones that can't be, end off the reach they flow into
@@ -366,6 +374,28 @@ class _Relocation:
                 head = self._centres(self.paths[d][:1])[0]
                 k = int(np.argmin(np.hypot(*(h - head).T)))
                 self.leads[d] = np.vstack((h[:k + 1], self._densified(np.vstack((h[k], head)))[1:-1]))
+
+    def _to_junction(self, d: int, path: np.ndarray, reached: bool) -> tuple[np.ndarray, bool, bool]:
+        """
+        A ``path`` carried down D8 onto the line of reach d, the reach it flows into, where ``reached``: ending where
+        it first comes onto that line, or where it runs on past d's start (see RelocationSettings.junction_m). With
+        whether it still ends on d (or on the reach flowing into d it was carried onto), and whether it ran on past
+        d's start.
+        """
+        line = self._cells_of(d)
+        if line.size == 0:
+            return path, reached, False
+        on_line = np.flatnonzero(np.isin(path, line))
+        if on_line.size:
+            path, reached = path[:max(int(on_line[0]), 1) + 1], True
+        if reached and d in self.paths:
+            return path, True, False  # two flow paths meet where they join
+        gap = np.hypot(*(self._centres(path) - self._centres(line[:1])[0]).T)
+        near = max(self.settings.junction_m, 1.5 * self.R)
+        nearest = max(int(np.argmin(gap)), 1)
+        if (reached and gap[-1] <= near) or gap.min() > near or nearest == path.size - 1:
+            return path, reached, False
+        return path[:nearest + 1], False, True
 
     def _depths(self) -> np.ndarray:
         """How many reaches each reach is above its network's outlet."""
@@ -532,9 +562,13 @@ class _Relocation:
                     above, below = self.off_dem[x]
                     points = np.vstack((above, points, below))
             xy = self._to_map(points)
+            # Drawn as the source draws it: downstream end first where the source's first vertex is nearer the end its
+            # line runs down to (see prepare_source_network). Not judged from the new line's ends: a path can end
+            # farther from the line's downstream end than it starts
             first = shapely.get_coordinates(shapely.force_2d(geometry[row]))[0]
-            if np.hypot(*(first - xy[-1])) < np.hypot(*(first - xy[0])):
-                xy = xy[::-1]  # drawn as the source draws it
+            ends = shapely.get_coordinates(self.source.geometry[x])[[0, -1]]
+            if np.hypot(*(first - ends[1])) < np.hypot(*(first - ends[0])):
+                xy = xy[::-1]
             geometry[row] = shapely.LineString(xy)
         out[out.geometry.name] = geometry
         return out
