@@ -145,6 +145,7 @@ UNDERLYING_NAMES = {
     "mannings_text_file": "mannings_text_file",
     "standard_step": "Standard_Step",
     "valley_sections": "Valley_Sections",
+    "valley_dir_widths": "Valley_Dir_Widths",
     "valley_dir_dist": "Valley_Dir_Dist",
     "bathy_args": "bathy_args",
     "make_curvefile": "Print_Curve_File",
@@ -1430,10 +1431,12 @@ class FloodSimulationGUI(QMainWindow):
                                                    "standard step", _default("standard_step"))
         self._add_checkbox(group, "valley_sections", "Take the overbanks' flow square to the valley",
                            _default("valley_sections"))
-        self._add_spin(group, "valley_dir_dist", "Cells along the stream either way for the valley's direction",
+        self._add_line(group, "valley_dir_widths", "Channel widths along the stream either way for the valley's "
+                                                   "direction", _default("valley_dir_widths"), parser="float")
+        self._add_spin(group, "valley_dir_dist", "Cells either way, where a reach has no banks",
                        _default("valley_dir_dist"), minimum=2)
-        self.show_when(lambda: self._on("valley_sections"), "valley_dir_dist")
-        self._indent("valley_dir_dist")
+        self.show_when(lambda: self._on("valley_sections"), "valley_dir_widths", "valley_dir_dist")
+        self._indent("valley_dir_widths", "valley_dir_dist")
         self._add_arg_table(group, "bathy_args", "More ARC arguments",
                             "Other ARC settings, by their names in ARC's input file, such as shallow_factor, "
                             "deep_factor, k_decay or slope_adjustment_factor.")

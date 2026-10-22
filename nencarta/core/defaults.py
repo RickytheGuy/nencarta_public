@@ -216,9 +216,14 @@ CONFIG_SECTIONS = {
                                                        "section's banks square to the valley, at the valley's slope: "
                                                        "over a meandering river's floodplain, the water runs down the "
                                                        "valley, not along the channel."),
+        "valley_dir_widths": ConfigOption(16.0, "float", "How far along the stream, in channel widths either way, ARC "
+                                                         "takes the valley's direction and the stream's sinuosity "
+                                                         "over, for valley_sections: about a meander's length, which "
+                                                         "is 10 to 14 widths. 0 uses valley_dir_dist everywhere."),
         "valley_dir_dist": ConfigOption(40, "int", "How far along the stream, in cells either way, ARC takes the "
                                                    "valley's direction and the stream's sinuosity over, for "
-                                                   "valley_sections: about a meander's length. At least 2."),
+                                                   "valley_sections, where a reach has no banks to give its width "
+                                                   "(or with valley_dir_widths 0). At least 2."),
         "bathy_args": ConfigOption(DEFAULT_BATHY_ARGS, "dict", "More ARC settings for the bathymetry run. Replaces "
                                                                "the whole default set."),
     },

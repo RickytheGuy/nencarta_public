@@ -55,11 +55,12 @@ def _vector_columns(path: Path) -> set[str] | None:
 
 
 def _valley_sections(configs) -> dict:
-    """ARC's Valley_Sections and its Valley_Dir_Dist, when valley_sections is on: the overbanks' flow on lines out from
-    each cross section's banks square to the valley, at the valley's slope."""
+    """ARC's Valley_Sections and its windows, Valley_Dir_Widths and Valley_Dir_Dist, when valley_sections is on: the
+    overbanks' flow on lines out from each cross section's banks square to the valley, at the valley's slope."""
     if not configs.valley_sections:
         return {}
-    return {"Valley_Sections": True, "Valley_Dir_Dist": int(configs.valley_dir_dist)}
+    return {"Valley_Sections": True, "Valley_Dir_Widths": float(configs.valley_dir_widths),
+            "Valley_Dir_Dist": int(configs.valley_dir_dist)}
 
 
 def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> dict:
