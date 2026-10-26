@@ -13,12 +13,26 @@ from nencarta.workspace import Workspace
 def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]:
     """
     Thin rasterized streams: remove cells that stick out of a stream, then cells that make a reach two cells
-    wide at a bend. ``array`` has a one-cell border of zeros. Returns it and the cells each kind of pass removed.
+    wide at a bend. ``array`` has a one-cell border of zeros, and is thinned in place, with its cells below 0 set to 0.
+    Returns it and the cells each kind of pass removed.
     """
-    mask = array > 0
-    array = np.where(mask, array, 0)
-    (RR,CC) = np.where(mask)
-    num_nonzero = len(RR)
+    nrows, ncols = array.shape
+    num_nonzero = 0
+    for r in range(nrows):
+        for c in range(ncols):
+            if array[r, c] > 0:
+                num_nonzero += 1
+            else:
+                array[r, c] = 0
+    RR = np.empty(num_nonzero, np.int64)
+    CC = np.empty(num_nonzero, np.int64)
+    k = 0
+    for r in range(nrows):
+        for c in range(ncols):
+            if array[r, c] > 0:
+                RR[k] = r
+                CC[k] = c
+                k += 1
     first_pass = 0
     second_pass = 0
     
@@ -85,7 +99,7 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
 def _clean_stream_raster(stream_ds: gdal.Dataset) -> None:
     """Thin the streams of an open stream raster, in place."""
     shape = (stream_ds.RasterYSize + 2, stream_ds.RasterXSize + 2)
-    array = np.zeros(shape, dtype=np.int64)
+    array = np.zeros(shape, dtype=np.int32)  # the raster's own type
     array[1:-1, 1:-1] = stream_ds.ReadAsArray()
 
     array, first_pass, second_pass = _clean_stream_raster_array(array)

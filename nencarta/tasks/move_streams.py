@@ -11,7 +11,6 @@ import networkx as nx
 from numba import njit
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
-import richdem as rd
 from scipy.ndimage import binary_dilation, label
 import shapely
 from shapely.geometry import Point, LineString
@@ -140,57 +139,290 @@ _D8_COLS = np.array([offset[1] for offset in D8_OFFSETS.values()], np.int64)
 _D8_CODES = np.array(list(D8_OFFSETS), np.int16)
 
 
-def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: tuple,
-                             projection: str) -> tuple[np.ndarray, np.ndarray]:
+def fill_and_flow_directions(dem: np.ndarray, valid: np.ndarray, geotransform: tuple, projection: str,
+                             unfilled: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """
     ``dem`` with its depressions filled (NaN off ``valid``), and its D8 flow directions (see
     stream_conflation.D8_OFFSETS; 0 where nothing around is lower, FLOWDIR_NODATA off the DEM).
 
-    Every depression is filled to its spill level (Priority-Flood, Barnes et al. 2014, by RichDEM), and the flats that
-    leaves -- and the DEM's own, as FABDEM's leveled water -- are given a gradient for the flow directions alone (Barnes
-    et al. 2014, "An efficient assignment of drainage direction over flat surfaces", as RichDEM gives it, see
-    _resolve_flats): away from the higher ground around them and toward their outlets, so flow paths run down a
+    Every depression is filled to its spill level (Priority-Flood, Barnes et al. 2014, see _priority_flood), and the
+    flats that leaves -- and the DEM's own, as FABDEM's leveled water -- are given a gradient for the flow directions
+    alone (Barnes et al. 2014, "An efficient assignment of drainage direction over flat surfaces", as RichDEM gives it,
+    see _resolve_flats): away from the higher ground around them and toward their outlets, so flow paths run down a
     flat's middle rather than straight along one edge. Off
     the DEM, its edges and nodata, is lower than anything on it, so a flat running off it drains there. The gradient
     is imposed in double precision: in single precision its increments round away on a large flat, leaving pits.
     Its increments are a value's last digit, which at 0 m is so small that over a cell's width it is no slope at all,
     so the DEM is raised to 11 m or more first, whole: no difference between two cells changes.
+
+    ``unfilled``, if given, are the only cells (flat indices) that may lie below the DEM's fill: elsewhere on the DEM it
+    is filled already, and only these and the cells off it are filled. Lowering a filled DEM's cells can't raise its
+    fill anywhere, nor lower it below the DEM itself, so its other cells keep their heights: the burned DEM's routing
+    copy is filled but for the lines run down the fill (see routing_dem), and is filled as a whole would fill it.
     """
     valid = np.asarray(valid, bool)
-    filled, raise_by = _fill_padded(dem, valid, geotransform)
-    routed = _resolve_flats(filled)[1:-1, 1:-1]
-    filled = filled[1:-1, 1:-1] - raise_by
-    dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
-    flowdir = _d8_pointers(routed, valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS, _D8_CODES)
-    return np.where(valid, filled, np.nan), flowdir
+    filled, raise_by = _fill_padded(dem, valid, unfilled)
+    flowdir = _padded_flow_directions(filled, valid, geotransform, projection)
+    return _unpadded(filled, raise_by, valid), flowdir
 
 
-def fill_depressions(dem: np.ndarray, valid: np.ndarray, geotransform: tuple) -> np.ndarray:
+def fill_depressions(dem: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """``dem`` with its depressions filled, in double precision (NaN off ``valid``), as fill_and_flow_directions fills it."""
     valid = np.asarray(valid, bool)
-    filled, raise_by = _fill_padded(dem, valid, geotransform)
-    return np.where(valid, filled[1:-1, 1:-1] - raise_by, np.nan)
+    return _unpadded(*_fill_padded(dem, valid), valid)
 
 
-def _fill_padded(dem: np.ndarray, valid: np.ndarray, geotransform: tuple) -> tuple[np.ndarray, float]:
+def _padded_flow_directions(filled: np.ndarray, valid: np.ndarray, geotransform: tuple, projection: str) -> np.ndarray:
+    """
+    The flow directions of fill_and_flow_directions, from the DEM filled as _fill_padded fills it. Its flats are
+    resolved in place for them (see _resolve_flats), and put back.
+    """
+    raised, before = _raise_flats(filled, _flat_gradient(filled))
+    dx, dy = cell_sizes_m(geotransform, projection, valid.shape[0])
+    flowdir = _d8_pointers(filled[1:-1, 1:-1], valid, np.asarray(dx, np.float64), float(dy), _D8_ROWS, _D8_COLS,
+                           _D8_CODES)
+    filled.ravel()[raised] = before
+    return flowdir
+
+
+def _unpadded(filled: np.ndarray, raise_by: float, valid: np.ndarray) -> np.ndarray:
+    """The DEM filled as _fill_padded fills it, lowered back and without its ring: NaN off ``valid``."""
+    out = filled[1:-1, 1:-1] - raise_by
+    out[~valid] = np.nan
+    return out
+
+
+def _fill_padded(dem: np.ndarray, valid: np.ndarray, unfilled: np.ndarray | None = None,
+                 put: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, float]:
     """
     ``dem`` filled (see fill_and_flow_directions) in double precision, inside a ring lower than anything on it, and
-    raised by the returned amount.
+    raised by the returned amount. With ``unfilled``, only those cells and the cells off ``valid`` are filled. With
+    ``put``, a mask and values, the DEM is np.where(mask, values, dem), without making that copy of it.
     """
-    low = float(np.min(dem[valid])) - 10.0 if valid.any() else 0.0
+    # The lowest valid cell, without a copy of them (SRTM and AW3D30 store whole metres, as integers)
+    def lowest(values: np.ndarray, where: np.ndarray):
+        return np.min(values, where=where, initial=np.inf if values.dtype.kind == "f" else np.iinfo(values.dtype).max)
+
+    if not valid.any():
+        low = 0.0
+    elif put is None:
+        low = float(lowest(dem, valid)) - 10.0
+    else:
+        low = float(min(lowest(dem, valid & ~put[0]), lowest(put[1], valid & put[0]))) - 10.0
     raise_by = 1.0 - math.floor(low)
     # The DEM in double precision inside a ring of ``low``. Its own cells off ``valid`` are ``low`` in the DEM's type,
     # as np.where(valid, dem, low) has them.
     padded = np.full((dem.shape[0] + 2, dem.shape[1] + 2), low, np.float64)
     padded[1:-1, 1:-1] = dem
+    if put is not None:
+        padded[1:-1, 1:-1][put[0]] = put[1][put[0]]
     padded[1:-1, 1:-1][~valid] = np.asarray(low, np.result_type(dem, low))
     padded += raise_by
-    gt = list(geotransform)
-    gt[0] -= gt[1]
-    gt[3] -= gt[5]
-    filled = rd.rdarray(padded, no_data=-np.finfo(np.float64).max, geotransform=gt)
-    rd.FillDepressions(filled, in_place=True)
-    return np.asarray(filled), raise_by
+    closed = np.zeros(padded.shape, np.bool_)
+    if unfilled is None:
+        closed[[0, -1], :] = closed[:, [0, -1]] = True
+        seeds = np.flatnonzero(closed)
+    else:
+        # Filled already but for these and the cells off the DEM (see fill_and_flow_directions)
+        closed[1:-1, 1:-1] = valid
+        rows, cols = np.divmod(np.asarray(unfilled, np.int64), dem.shape[1])
+        closed[rows + 1, cols + 1] = False
+        closed[[0, -1], :] = closed[:, [0, -1]] = True
+        seeds = _beside_open(closed)
+    _priority_flood(padded, closed.ravel(), seeds)
+    return padded, raise_by
+
+
+@njit(cache=True)
+def _beside_open(closed: np.ndarray) -> np.ndarray:
+    """The ``closed`` cells (flat indices, in order) with one of their eight neighbours not."""
+    nrows, ncols = closed.shape
+    beside = np.zeros((nrows, ncols), np.bool_)
+    for r in range(nrows):
+        for c in range(ncols):
+            if closed[r, c]:
+                continue
+            for rr in range(max(r - 1, 0), min(r + 2, nrows)):
+                for cc in range(max(c - 1, 0), min(c + 2, ncols)):
+                    if closed[rr, cc]:
+                        beside[rr, cc] = True
+    return np.flatnonzero(beside)
+
+
+@njit(cache=True)
+def _grown(buffer: np.ndarray, head: int) -> np.ndarray:
+    """A ring buffer's contents from ``head`` on, at the start of a buffer twice as big."""
+    out = np.empty(buffer.size * 2, buffer.dtype)
+    k = buffer.size - head
+    out[:k] = buffer[head:]
+    out[k:buffer.size] = buffer[:head]
+    return out
+
+
+@njit(cache=True)
+def _heap_push(keys: np.ndarray, cells: np.ndarray, size: int, key: float, cell: int) -> int:
+    """Push onto a binary min-heap of ``size`` entries with room for one more; returns its new size."""
+    i = size
+    while i > 0:
+        parent = (i - 1) >> 1
+        if keys[parent] <= key:
+            break
+        keys[i] = keys[parent]
+        cells[i] = cells[parent]
+        i = parent
+    keys[i] = key
+    cells[i] = cell
+    return size + 1
+
+
+@njit(cache=True)
+def _heap_pop(keys: np.ndarray, cells: np.ndarray, size: int) -> int:
+    """Take the smallest entry (keys[0], cells[0]) off a binary min-heap of ``size`` entries; returns the new size."""
+    size -= 1
+    if size > 0:
+        key = keys[size]
+        cell = cells[size]
+        i = 0
+        while True:
+            left = 2 * i + 1
+            if left >= size:
+                break
+            right = left + 1
+            child = right if right < size and keys[right] < keys[left] else left
+            if keys[child] >= key:
+                break
+            keys[i] = keys[child]
+            cells[i] = cells[child]
+            i = child
+        keys[i] = key
+        cells[i] = cell
+    return size
+
+
+@njit(cache=True)
+def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> None:
+    """
+    Fill the depressions of ``z`` (2-D, without nodata) in place, every cell to its spill level: the lowest any
+    8-connected way from it to the grid's edge has to climb to. That level is unique, so any Priority-Flood fills alike,
+    RichDEM's FillDepressions included, to the last bit: the levels are the DEM's own heights.
+
+    Barnes et al.'s (2014) Priority-Flood floods inward from the edge, lowest cell first. A cell first reached from a
+    lower one, up a slope, is at its spill level already, and so is every cell up the slopes from it: these are traced
+    without the heap (Zhou et al. 2016). Only the traced cells still beside a cell not reached once the slopes are
+    traced -- lower, the edge of a depression -- go on the heap, to fill the depression when the flood reaches them.
+
+    ``closed`` (flat) is True at the cells known to be at their spill level, the grid's edge at least, which are left
+    as they are, and ``seeds`` (flat indices) are those of them beside the others: the flood starts from there.
+    """
+    nrows, ncols = z.shape
+    flat = z.ravel()
+    # Every cell but the edge's, which are closed from the start, has all eight neighbours on the grid
+    offsets = np.array([-ncols - 1, -ncols, -ncols + 1, -1, 1, ncols - 1, ncols, ncols + 1], np.int64)
+    heap_keys = np.empty(1024, np.float64)
+    heap_cells = np.empty(1024, np.int64)
+    heap_size = 0
+    # Ring buffers, a power of two long, of the cells whose neighbours are still to be looked at: traced at their own
+    # height (trace), and raised to the level being filled (pit). And the traced cells left beside a cell not reached.
+    trace = np.empty(1 << 16, np.int64)
+    t_head = t_count = 0
+    pit = np.empty(1 << 16, np.int64)
+    p_head = p_count = 0
+    deferred = np.empty(1 << 16, np.int64)
+    d_count = 0
+
+    for j in range(seeds.size):
+        e = seeds[j]
+        row, col = e // ncols, e % ncols
+        queued = False
+        for r in range(max(row - 1, 0), min(row + 2, nrows)):
+            for c in range(max(col - 1, 0), min(col + 2, ncols)):
+                m = r * ncols + c
+                if closed[m]:
+                    continue
+                if flat[m] >= flat[e]:
+                    closed[m] = True
+                    if t_count == trace.size:
+                        trace, t_head = _grown(trace, t_head), 0
+                    trace[(t_head + t_count) & (trace.size - 1)] = m
+                    t_count += 1
+                elif not queued:
+                    queued = True
+                    if heap_size == heap_keys.size:
+                        heap_keys, heap_cells = _grown(heap_keys, 0), _grown(heap_cells, 0)
+                    heap_size = _heap_push(heap_keys, heap_cells, heap_size, flat[e], e)
+
+    level = -np.inf
+    p = -1
+    while True:
+        # Around the cell taken off the heap (none at first), and the pit it fills: raised to its level, or traced
+        while p >= 0 or p_count:
+            if p >= 0:
+                q, p = p, -1
+                row, col = q // ncols, q % ncols
+                on_edge = row == 0 or row == nrows - 1 or col == 0 or col == ncols - 1
+            else:
+                q = pit[p_head]
+                p_head = (p_head + 1) & (pit.size - 1)
+                p_count -= 1
+                on_edge = False
+            for k in range(8):
+                if on_edge:
+                    r = row + (k // 3 if k < 4 else (k + 1) // 3) - 1
+                    c = col + (k % 3 if k < 4 else (k + 1) % 3) - 1
+                    if r < 0 or r >= nrows or c < 0 or c >= ncols:
+                        continue
+                    m = r * ncols + c
+                else:
+                    m = q + offsets[k]
+                if closed[m]:
+                    continue
+                closed[m] = True
+                if flat[m] <= level:
+                    flat[m] = level
+                    if p_count == pit.size:
+                        pit, p_head = _grown(pit, p_head), 0
+                    pit[(p_head + p_count) & (pit.size - 1)] = m
+                    p_count += 1
+                else:
+                    if t_count == trace.size:
+                        trace, t_head = _grown(trace, t_head), 0
+                    trace[(t_head + t_count) & (trace.size - 1)] = m
+                    t_count += 1
+        # Up the slopes from there
+        while t_count:
+            t = trace[t_head]
+            t_head = (t_head + 1) & (trace.size - 1)
+            t_count -= 1
+            queued = False
+            for k in range(8):
+                m = t + offsets[k]
+                if closed[m]:
+                    continue
+                if flat[m] >= flat[t]:
+                    closed[m] = True
+                    if t_count == trace.size:
+                        trace, t_head = _grown(trace, t_head), 0
+                    trace[(t_head + t_count) & (trace.size - 1)] = m
+                    t_count += 1
+                elif not queued:
+                    queued = True
+                    if d_count == deferred.size:
+                        deferred = _grown(deferred, 0)
+                    deferred[d_count] = t
+                    d_count += 1
+        for j in range(d_count):
+            t = deferred[j]
+            for k in range(8):
+                if not closed[t + offsets[k]]:
+                    if heap_size == heap_keys.size:
+                        heap_keys, heap_cells = _grown(heap_keys, 0), _grown(heap_cells, 0)
+                    heap_size = _heap_push(heap_keys, heap_cells, heap_size, flat[t], t)
+                    break
+        d_count = 0
+        if heap_size == 0:
+            return
+        level, p = heap_keys[0], heap_cells[0]
+        heap_size = _heap_pop(heap_keys, heap_cells, heap_size)
 
 
 def _resolve_flats(z: np.ndarray) -> np.ndarray:
@@ -202,19 +434,29 @@ def _resolve_flats(z: np.ndarray) -> np.ndarray:
     RichDEM raises a cell one unit at a time, which on a big flat, a lake FABDEM leaves level, is billions of steps;
     here a cell is raised by all its steps at once, to the same value.
     """
-    steps = _flat_gradient(z)
     routed = z.copy()
-    raised = steps > 0
-    ulp = np.spacing(z[raised])
-    routed[raised] = z[raised] + steps[raised] * ulp
-    # One step at a time past a power of two, where the units grow; never seen on a DEM's values
-    for i in np.flatnonzero(np.spacing(routed[raised]) != ulp):
-        cell = np.unravel_index(np.flatnonzero(raised.ravel())[i], z.shape)
-        value = z[cell]
-        for _ in range(steps[cell]):
-            value = np.nextafter(value, np.inf)
-        routed[cell] = value
+    _raise_flats(routed, _flat_gradient(z))
     return routed
+
+
+def _raise_flats(z: np.ndarray, steps: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Raise each cell of ``z`` (C-contiguous) by as many units in its last place as its ``steps`` (see _resolve_flats), in
+    place. Returns the cells raised (flat indices) and their heights before.
+    """
+    flat = z.ravel()
+    raised = np.flatnonzero(steps.ravel() > 0)
+    before = flat[raised]
+    up = steps.ravel()[raised]
+    ulp = np.spacing(before)
+    flat[raised] = before + up * ulp
+    # One step at a time past a power of two, where the units grow; never seen on a DEM's values
+    for i in np.flatnonzero(np.spacing(flat[raised]) != ulp):
+        value = before[i]
+        for _ in range(up[i]):
+            value = np.nextafter(value, np.inf)
+        flat[raised[i]] = value
+    return raised, before
 
 
 @njit(cache=True)
@@ -233,6 +475,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
     d_rows = np.array([0, -1, -1, -1, 0, 1, 1, 1])
     d_cols = np.array([-1, -1, 0, 1, 1, 1, 0, -1])
     no_flow = np.zeros((nrows, ncols), np.bool_)
+    n_flat = 0
     for r in range(1, nrows - 1):
         for c in range(1, ncols - 1):
             no_flow[r, c] = True
@@ -240,29 +483,36 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                 if z[r + d_rows[k], c + d_cols[k]] < z[r, c]:
                     no_flow[r, c] = False
                     break
+            if no_flow[r, c]:
+                n_flat += 1
 
-    # Low edges (drain, beside a flat cell at their level) and high edges (flat cells beside higher ground)
+    # Low edges (drain, beside a flat cell at their level) and high edges (flat cells beside higher ground), found
+    # from the flat cells, which are all inside the grid's edge. A low edge beside several is listed once for each: the
+    # order and repeats change neither the flats' labels nor the steps through them, found breadth first from all at
+    # once.
     low, high = [], []
-    for r in range(nrows):
-        for c in range(ncols):
+    for r in range(1, nrows - 1):
+        for c in range(1, ncols - 1):
+            if not no_flow[r, c]:
+                continue
+            beside_higher = False
             for k in range(8):
                 nr, nc = r + d_rows[k], c + d_cols[k]
-                if nr < 0 or nr >= nrows or nc < 0 or nc >= ncols:
-                    continue
-                if not no_flow[r, c] and no_flow[nr, nc] and z[nr, nc] == z[r, c]:
-                    low.append(r * ncols + c)
-                    break
-                if no_flow[r, c] and z[r, c] < z[nr, nc]:
-                    high.append(r * ncols + c)
-                    break
+                if z[nr, nc] > z[r, c]:
+                    beside_higher = True
+                elif not no_flow[nr, nc] and z[nr, nc] == z[r, c]:
+                    low.append(nr * ncols + nc)
+            if beside_higher:
+                high.append(r * ncols + c)
 
     steps = np.zeros((nrows, ncols), np.int32)
     if len(low) == 0:
         return steps
-    
-    # Label each flat from its low edges: the cells at its level joined to them
+
+    # Label each flat from its low edges: the cells at its level joined to them. The queue grows as it needs to, to
+    # about as many cells as the flats have.
     labels = np.zeros((nrows, ncols), np.int32)
-    queue = np.empty(nrows * ncols, np.int64)
+    queue = np.empty(max(n_flat + len(low), 1024), np.int64)
     label = 0
     for start in low:
         r, c = start // ncols, start % ncols
@@ -281,6 +531,8 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                 nr, nc = r + d_rows[k], c + d_cols[k]
                 if 0 <= nr < nrows and 0 <= nc < ncols and not labels[nr, nc] and z[nr, nc] == level:
                     labels[nr, nc] = label
+                    if tail == queue.size:
+                        queue = _grown(queue, 0)
                     queue[tail] = nr * ncols + nc
                     tail += 1
 
@@ -291,6 +543,8 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
         r, c = cell // ncols, cell % ncols
         if labels[r, c] and not steps[r, c]:
             steps[r, c] = 1
+            if tail == queue.size:
+                queue = _grown(queue, 0)
             queue[tail] = cell
             tail += 1
 
@@ -306,6 +560,8 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                 continue
             if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
                 steps[nr, nc] = steps[r, c] + 1
+                if tail == queue.size:
+                    queue = _grown(queue, 0)
                 queue[tail] = nr * ncols + nc
                 tail += 1
 
@@ -316,6 +572,8 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
         r, c = cell // ncols, cell % ncols
         if not toward[r, c]:
             toward[r, c] = 1
+            if tail == queue.size:
+                queue = _grown(queue, 0)
             queue[tail] = cell
             tail += 1
 
@@ -330,6 +588,8 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                 continue
             if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
                 toward[nr, nc] = toward[r, c] + 1
+                if tail == queue.size:
+                    queue = _grown(queue, 0)
                 queue[tail] = nr * ncols + nc
                 tail += 1
 
@@ -373,28 +633,39 @@ def _d8_pointers(z: np.ndarray, valid: np.ndarray, dx_by_row: np.ndarray, dy: fl
 
 
 def derive_flow_directions(workspace: Workspace, dem_path: Path, filled_path: Path | None = None,
-                           flowdir_path: Path | None = None,
-                           dem: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+                           flowdir_path: Path | None = None, dem: np.ndarray | None = None, write: bool = True,
+                           unfilled: np.ndarray | None = None,
+                           nodata: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Fill the depressions in ``dem_path`` and derive its D8 flow directions (see fill_and_flow_directions), writing
     ``filled_path`` and ``flowdir_path`` (default: workspace.filled_dem and workspace.flowdir) with the configs'
-    compression. ``dem``, if given, is used instead of reading ``dem_path``, on its grid (as the burned DEM's routing
-    copy is, see routing_dem). Returns the filled DEM and the flow directions as written, so they needn't be read back.
+    compression, unless not to ``write`` them yet (see write_flow_directions). ``dem``, if given, is used instead of
+    reading ``dem_path``, on its grid (as the burned DEM's routing copy is, see routing_dem), with ``unfilled`` the
+    only cells of it that may lie below its fill (see fill_and_flow_directions) and ``nodata`` its nodata value
+    (default: ``dem_path``'s). Returns the filled DEM and the flow directions as written, so they needn't be read back.
     """
     raster = Raster(dem_path)
     dem = np.asarray(raster.read_array() if dem is None else dem, np.float64)
     valid = np.isfinite(dem)
-    if raster.nodata_value is not None:
-        valid &= dem != raster.nodata_value
-    filled, flowdir = fill_and_flow_directions(dem, valid, raster.geotransform, raster.projection)
+    nodata = raster.nodata_value if nodata is None else nodata
+    if nodata is not None:
+        valid &= dem != nodata
+    filled, flowdir = fill_and_flow_directions(dem, valid, raster.geotransform, raster.projection, unfilled)
     del dem
-    filled = np.where(valid, filled, FILLED_NODATA)
-    compression = workspace.configs.compression
-    _write_raster(Path(filled_path or workspace.filled_dem), filled, raster, gdal.GDT_Float64, FILLED_NODATA,
-                  compression)
-    _write_raster(Path(flowdir_path or workspace.flowdir), flowdir, raster, gdal.GDT_Int16, FLOWDIR_NODATA,
-                  compression)
+    filled[~valid] = FILLED_NODATA
+    if write:
+        write_flow_directions(workspace, raster, filled, flowdir, filled_path, flowdir_path)
     return filled, flowdir
+
+
+def write_flow_directions(workspace: Workspace, reference: Raster, filled: np.ndarray, flowdir: np.ndarray,
+                          filled_path: Path | None = None, flowdir_path: Path | None = None) -> None:
+    """Write the filled DEM and flow directions derive_flow_directions derives, as it writes them."""
+    compression = workspace.configs.compression
+    _write_raster(Path(filled_path or workspace.filled_dem), filled, reference, gdal.GDT_Float64, FILLED_NODATA,
+                  compression)
+    _write_raster(Path(flowdir_path or workspace.flowdir), flowdir, reference, gdal.GDT_Int16, FLOWDIR_NODATA,
+                  compression)
 
 
 def _write_raster(path: Path, values: np.ndarray, reference: Raster, data_type: int, nodata: float,
@@ -434,8 +705,14 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
 
     assigned_dem = Raster(workspace.assigned_dem)
     flow_directions_ready = False
+    unfilled = None  # the cells of dem_for_conflation that may lie below its fill, if only those
     # The filled DEM and flow directions as derived and written this run, which are then not read back
     filled_array = flowdir_array = None
+    # The DEM burned this run and its nodata value, when it is written only once restore_unfollowed_burns has decided
+    # whether to put cells of it back
+    burned = []
+    # The assigned DEM, read once for all that reads it here
+    unburned = assigned_dem.read_array() if should_burn_streams or should_move_streams else None
 
     if should_burn_streams:
         workspace.dem_updated_folder.mkdir(parents=True, exist_ok=True)
@@ -449,27 +726,33 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             source_gdf = _kept_reaches(workspace, source_gdf, assigned_dem)
         # Unmoved, the floods are mapped along the source lines (STRM_File_Clean), so they are burned there too
         if configs.relocate_misplaced_streams and configs.move_stream_network_to_thalweg:
-            source_gdf = relocate_misplaced_streams(workspace, source_gdf, assigned_dem)
+            source_gdf = relocate_misplaced_streams(workspace, source_gdf, assigned_dem, dem=unburned)
         else:
             workspace.relocated_StrmShp.unlink(missing_ok=True)
         # Moved, a reach in pieces is matched along one path through them (see stream_conflation._main_stem), and
         # only its trunk is burned (see _trunks): a branch burned and not matched stays carved in the DEM, and floods
-        # The flow directions, and the filled DEM, come from the burned DEM filled, with its lines run down the fill
+        # The flow directions, and the filled DEM, come from the burned DEM filled, with its lines run down the fill:
+        # filled already but where they were (``lowered``)
+        lowered = []
         _, dem_for_conflation = smooth_and_burn_dem(
             workspace,
             _trunks(source_gdf, configs.stream_id_field, configs.downstream_id_field, assigned_dem)
             if configs.move_stream_network_to_thalweg else source_gdf,
             lakes,
             configs.stream_id_field, 
-            configs.downstream_id_field
+            configs.downstream_id_field,
+            lowered,
+            burned if should_move_streams else None,
+            unburned
         )
+        unfilled = lowered[0] if lowered else None
         dem_for_conflation_path = workspace.fixed_dem
     elif should_move_streams:
         if configs.burn_streams:
             dem_for_conflation = Raster(workspace.fixed_dem).read_array()
             dem_for_conflation_path = workspace.fixed_dem
         else:
-            dem_for_conflation = assigned_dem.read_array()
+            dem_for_conflation = unburned
             dem_for_conflation_path = workspace.assigned_dem
 
         if configs.burn_streams and workspace.relocated_StrmShp.exists():
@@ -485,19 +768,29 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
             flow_directions_ready = True
             source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
             source_gdf = relocate_misplaced_streams(workspace, _kept_reaches(workspace, source_gdf, assigned_dem),
-                                                    assigned_dem, derived=True)
+                                                    assigned_dem, derived=True, dem=unburned)
         else:
             source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(assigned_dem.projection)
             source_gdf = _kept_reaches(workspace, source_gdf, assigned_dem)
 
     if should_move_streams:
+        # With the burn, the filled DEM and flow directions are written once restore_unfollowed_burns has decided
+        # whether to derive them again, which it does from the filled DEM kept till then
+        unwritten = configs.burn_streams and not flow_directions_ready
         if not flow_directions_ready:
-            filled_array, flowdir_array = derive_flow_directions(workspace, dem_for_conflation_path,
-                                                                 dem=dem_for_conflation)
+            # On the burned DEM's grid, which is the assigned DEM's, while it isn't written yet
+            filled_array, flowdir_array = derive_flow_directions(
+                workspace, workspace.assigned_dem if burned else dem_for_conflation_path, dem=dem_for_conflation,
+                write=not unwritten, unfilled=unfilled, nodata=burned[1] if burned else None)
         streams_gdf, final_streams = move_streams_onto_flow_directions(workspace, source_gdf, dem_for_conflation,
                                                                         assigned_dem, flowdir_array, filled_array)
-        filled_array = None
+        if not unwritten:
+            filled_array = None
         if streams_gdf.empty:
+            if burned:
+                write_burned_dem(workspace, *burned)
+            if unwritten:
+                write_flow_directions(workspace, Raster(dem_for_conflation_path), filled_array, flowdir_array)
             if configs.raise_errors_if_nothing_in_domain:
                 raise ValueError("No stream geometries remain after conflation.")
             else:
@@ -522,17 +815,25 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         # carves bathymetry into all of it, so a line burned or drawn where no reach was moved onto (a relocated
         # line the water doesn't take, a reach left out) would be carved, and flood: it is no part of the mask.
         channel_mask = water_mask(workspace, assigned_dem, final_streams,
-                                  reach_areas_km2(streams_gdf, configs)).astype(np.uint8)
+                                  reach_areas_km2(streams_gdf, configs), unburned).astype(np.uint8)
 
         workspace.bathy_water_mask.parent.mkdir(parents=True, exist_ok=True)
-        make_channel_mask(channel_mask, str(dem_for_conflation_path), str(workspace.bathy_water_mask), configs.compression)
+        make_channel_mask(channel_mask, str(workspace.assigned_dem if burned else dem_for_conflation_path),
+                          str(workspace.bathy_water_mask), configs.compression)
 
         if configs.burn_streams:
             # Nothing is moved onto a line burned where the moved network doesn't run, and it floods
             rederived = restore_unfollowed_burns(workspace, final_streams, channel_mask, dem_for_conflation,
-                                                 flowdir_array)
+                                                 flowdir_array, filled_array, *(burned or (None, None)), unburned)
             if rederived is not None:
                 _, flowdir_array = rederived
+            else:
+                if burned:
+                    write_burned_dem(workspace, *burned)
+                if unwritten:
+                    write_flow_directions(workspace, Raster(dem_for_conflation_path), filled_array, flowdir_array)
+            filled_array = None
+            burned = []
 
     if configs.mapper.is_curve2flood_fldpln_mapper():
         if not should_move_streams:
@@ -557,8 +858,10 @@ RESTORE_PASSES = 4
 
 
 def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, channel_mask: np.ndarray,
-                             routing: np.ndarray | None = None,
-                             flowdir: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
+                             routing: np.ndarray | None = None, flowdir: np.ndarray | None = None,
+                             filled_before: np.ndarray | None = None, fixed: np.ndarray | None = None,
+                             nodata: float | None = None,
+                             unburned: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
     """
     Put the unburned DEM (workspace.assigned_dem) back in workspace.fixed_dem wherever the burn changed it and the
     moved network doesn't run: more than a cell from every stream cell of ``final_streams`` and from the water mask
@@ -582,8 +885,10 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
     routing_dem), gets the unburned DEM where the cells are put back, and the filled DEM and flow directions are
     derived from it again and written (see derive_flow_directions), since the floodplain library is routed across them.
     The moved streams' own cells keep their flow directions (``flowdir``, or workspace.flowdir), which the network was
-    moved along and the stream info table walks: a flat the filling leaves can still drain another way. Returns the
-    filled DEM and flow directions written, or None where nothing was put back.
+    moved along and the stream info table walks: a flat the filling leaves can still drain another way. The filled DEM
+    they come from is ``filled_before``, or workspace.filled_dem, and the burned DEM ``fixed`` (nodata ``nodata``), or
+    workspace.fixed_dem, and ``unburned`` is workspace.assigned_dem's DEM, if read already. Returns the filled DEM and
+    flow directions written, or None where nothing was put back, when workspace.fixed_dem is left as it is.
     """
     # Read and closed, not through Raster, which keeps the file open and so couldn't write it again
     def read(path):
@@ -592,9 +897,10 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
         ds = None
         return values, no_value
 
-    fixed, nodata = read(workspace.fixed_dem)
+    if fixed is None:
+        fixed, nodata = read(workspace.fixed_dem)
     assigned_raster = Raster(workspace.assigned_dem)
-    unburned = assigned_raster.read_array().astype(fixed.dtype)
+    unburned = (assigned_raster.read_array() if unburned is None else unburned).astype(fixed.dtype, copy=False)
     valid = np.isfinite(fixed) & np.isfinite(unburned) & (unburned > -1000)
     if nodata is not None:
         valid &= fixed != nodata
@@ -610,40 +916,63 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
     if not restore.any():
         return None
 
-    filled_before, _ = read(workspace.filled_dem)
+    if filled_before is None:
+        filled_before, _ = read(workspace.filled_dem)
     if flowdir is None:
         flowdir, _ = read(workspace.flowdir)
-    routing = np.array(fixed if routing is None else routing, np.float64)
+    routing = np.asarray(fixed if routing is None else routing, np.float64)
     routing_valid = np.isfinite(routing) & (routing != (-9999 if nodata is None else nodata))
     pieces, _ = label(restore, structure=eight)
     for _ in range(RESTORE_PASSES):
-        filled, new_flowdir = fill_and_flow_directions(np.where(restore, unburned, routing), routing_valid,
-                                                       assigned_raster.geotransform, assigned_raster.projection)
-        changed = routing_valid & ~(np.abs(filled - filled_before) <= RESTORE_FILL_TOLERANCE_M)
+        # Filled as fill_and_flow_directions fills it; its flow directions are only wanted from the last pass
+        padded, raise_by = _fill_padded(routing, routing_valid, put=(restore, unburned))
+        changed = _fill_changed(padded, raise_by, filled_before, routing_valid, RESTORE_FILL_TOLERANCE_M)
         stretches, _ = label(changed, structure=eight)
         reached = np.unique(stretches[changed & drains])
         if reached.size == 0:
             break
-        beside = binary_dilation(np.isin(stretches, reached), structure=eight)
+        beside = binary_dilation(np.isin(stretches, reached, kind="table"), structure=eight)
         kept = np.unique(pieces[beside & restore])
-        restore &= ~np.isin(pieces, kept)
+        restore &= ~np.isin(pieces, kept, kind="table")
+        del padded, changed, stretches, beside
         if not restore.any():
             return None
     else:
         LOG.warning("Some burned cells no moved stream runs along still change how the streams drain when put back; "
                     "they stay burned")
         return None
+    del changed, stretches, pieces
 
     LOG.info(f"Restoring the unburned DEM at {int(restore.sum())} burned cells no moved stream runs along")
+    new_flowdir = _padded_flow_directions(padded, routing_valid, assigned_raster.geotransform,
+                                          assigned_raster.projection)
+    filled = _unpadded(padded, raise_by, routing_valid)
+    del padded
     fixed[restore] = unburned[restore]
     _write_raster(Path(workspace.fixed_dem), fixed, assigned_raster, gdal.GDT_Float32,
                   -9999 if nodata is None else nodata, workspace.configs.compression)
     new_flowdir[streams] = flowdir[streams]
-    filled = np.where(routing_valid, filled, FILLED_NODATA)
+    filled[~routing_valid] = FILLED_NODATA
     compression = workspace.configs.compression
     _write_raster(Path(workspace.filled_dem), filled, assigned_raster, gdal.GDT_Float64, FILLED_NODATA, compression)
     _write_raster(Path(workspace.flowdir), new_flowdir, assigned_raster, gdal.GDT_Int16, FLOWDIR_NODATA, compression)
     return filled, new_flowdir
+
+
+@njit(cache=True)
+def _fill_changed(padded: np.ndarray, raise_by: float, before: np.ndarray, valid: np.ndarray,
+                  tolerance: float) -> np.ndarray:
+    """
+    Where the DEM filled as _fill_padded fills it (``padded``, raised by ``raise_by``) is more than ``tolerance`` off
+    ``before`` on the ``valid`` cells, as its _unpadded copy would be.
+    """
+    nrows, ncols = before.shape
+    out = np.zeros((nrows, ncols), np.bool_)
+    for r in range(nrows):
+        for c in range(ncols):
+            if valid[r, c]:
+                out[r, c] = not (abs((padded[r + 1, c + 1] - raise_by) - before[r, c]) <= tolerance)
+    return out
 
 
 def move_streams_onto_flow_directions(
@@ -824,14 +1153,15 @@ def _with_area_km2(source_gdf: gpd.GeoDataFrame, configs) -> tuple[gpd.GeoDataFr
     return source_gdf, None
 
 def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster: Raster,
-                               derived: bool = False) -> gpd.GeoDataFrame:
+                               derived: bool = False, dem: np.ndarray | None = None) -> gpd.GeoDataFrame:
     """
     Move the reaches the unburned DEM shows are off their river onto its D8 flow paths (see stream_relocation), and
     save the network to workspace.relocated_StrmShp when any line changed. Where the DEM dams a river, the source
     lines are burned through first (see breach_dammed_rivers).
 
     When ``derived``, workspace.filled_dem and workspace.flowdir are the unburned DEM's, and are used unless it
-    dams a river; otherwise the flow directions are derived here.
+    dams a river; otherwise the flow directions are derived here. ``dem``, if given, is what ``dem_raster`` holds,
+    already read.
     """
     configs = workspace.configs
     workspace.relocated_StrmShp.unlink(missing_ok=True)
@@ -841,7 +1171,8 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
                     "(area_km2_field or area_m2_field).")
         return source_gdf
 
-    dem = dem_raster.read_array()
+    if dem is None:
+        dem = dem_raster.read_array()
     valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
@@ -883,7 +1214,12 @@ def _replace_lines_in_water_mask(workspace: Workspace, dem_raster: Raster, redra
     if not workspace.bathy_water_mask.exists() or not workspace.STRM_File_Clean.exists():
         return
     mask = Raster(workspace.bathy_water_mask).read_array().astype(bool)
-    old = np.isin(Raster(workspace.STRM_File_Clean).read_array(), pd.to_numeric(ids).to_numpy())
+    strm, ids = Raster(workspace.STRM_File_Clean).read_array(), pd.to_numeric(ids).to_numpy()
+    # Looked up at the stream cells alone: the others are 0
+    old = np.full(strm.shape, bool(np.isin(0, ids)))
+    on = np.flatnonzero(strm)
+    old.ravel()[on] = np.isin(strm.ravel()[on], ids)
+    del strm
     if workspace.LAND_File.exists():
         old &= Raster(workspace.LAND_File).read_array() != workspace.configs.land_watervalue
 
@@ -1034,16 +1370,20 @@ def smooth_and_burn_dem(
         source_gdf: gpd.GeoDataFrame,
         lakes: np.ndarray | None = None, 
         id_col: str = 'LINKNO',
-        ds_col: str = 'DSLINKNO') -> tuple[np.ndarray, np.ndarray]:
+        ds_col: str = 'DSLINKNO',
+        lowered: list | None = None,
+        burned: list | None = None,
+        unburned: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """
-    Burn ``source_gdf``'s streams into the DEM, smooth the burned channels, and write workspace.fixed_dem.
-    Returns the channel mask and the DEM to derive the flow directions from: the burned DEM, filled, with its lines
-    run down the fill (see routing_dem). With use_dem_derived_channel_mask, the water the DEM flattens along the
-    streams (see channel_detection) is smoothed as water, and the burn leaves the lines on it (see
-    burn_streams_into_dem).
+    Burn ``source_gdf``'s streams into the DEM, smooth the burned channels, and write workspace.fixed_dem, or with
+    ``burned``, add it and its nodata value to that, to write later (see write_burned_dem). Returns the channel mask and
+    the DEM to derive the flow directions from: the burned DEM, filled, with its lines run down the fill (see
+    routing_dem; ``lowered``, if given, gets the cells they were run below it at). With use_dem_derived_channel_mask,
+    the water the DEM flattens along the streams (see channel_detection) is smoothed as water, and the burn leaves the
+    lines on it (see burn_streams_into_dem). ``unburned``, if given, is workspace.assigned_dem's DEM, already read.
     """
     dem_ds: gdal.Dataset = gdal.Open(workspace.assigned_dem)
-    dem = dem_ds.ReadAsArray()
+    dem = dem_ds.ReadAsArray() if unburned is None else unburned.copy()
     nodata_value = dem_ds.GetRasterBand(1).GetNoDataValue()
     if nodata_value is None:
         nodata_value = -9999
@@ -1079,17 +1419,26 @@ def smooth_and_burn_dem(
                             cell_size=cell_sizes_m(dem_ds.GetGeoTransform(), dem_ds.GetProjection(), dem.shape[0]))
 
     dem[dem < -1000] = nodata_value # Remove any DEM values that are less than -1000 m, since these are likely to be erroneous and will cause problems with the floodplain mapping.
+    if burned is None:
+        write_burned_dem(workspace, dem, nodata_value)
+    else:
+        burned.extend((dem, nodata_value))
+
+    if paths:
+        # The DEM the flow directions and the filled DEM come from (see routing_dem); ARC keeps the burned DEM
+        dem = routing_dem(dem, nodata_value, paths, path_reaches, dem_ds.GetGeoTransform(), dem_ds.GetProjection(),
+                          lowered)
+    return channel_mask, dem
+
+def write_burned_dem(workspace: Workspace, dem: np.ndarray, nodata_value: float) -> None:
+    """Write the burned DEM to workspace.fixed_dem, on workspace.assigned_dem's grid, as smooth_and_burn_dem does."""
+    dem_ds: gdal.Dataset = gdal.Open(str(workspace.assigned_dem))
     output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32, options=[f'COMPRESS={workspace.configs.compression}'])
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     output_ds.SetProjection(dem_ds.GetProjection())
     output_ds.GetRasterBand(1).SetNoDataValue(nodata_value)
     output_ds = None
-
-    if paths:
-        # The DEM the flow directions and the filled DEM come from (see routing_dem); ARC keeps the burned DEM
-        dem = routing_dem(dem, nodata_value, paths, path_reaches, dem_ds.GetGeoTransform(), dem_ds.GetProjection())
-    return channel_mask, dem
 
 # How far below the filled DEM a line may be lowered so that the cell above drains into it rather than onto the ground
 # beside (see _run_lines_down_fill). On the water a DEM levels, it takes centimetres; allowed 2 m or more, lines down
@@ -1101,7 +1450,7 @@ ROUTING_STEP_M = 1e-6
 
 
 def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches: list, geotransform: tuple,
-                projection: str) -> np.ndarray:
+                projection: str, lowered: list | None = None) -> np.ndarray:
     """
     The DEM the flow directions and the filled DEM are derived from (see derive_flow_directions): ``dem``, the burned
     DEM, filled (see fill_depressions), in double precision and ``nodata_value`` off the DEM, with each burned line run
@@ -1123,7 +1472,7 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
     or below, and the FLDPLN library, built on the filled DEM, backfilled up the lowered channels.
     """
     valid = (dem != nodata_value) & np.isfinite(dem)
-    routing = fill_depressions(dem, valid, geotransform)
+    routing = fill_depressions(dem, valid)
     routing[~valid] = nodata_value
     lines = {}
     for (_, cells), (reach, _) in zip(paths, path_reaches):
@@ -1133,10 +1482,13 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
                                                      for f in feeders if f in lines], np.int64)]))
               for (s, cells), (_, feeders) in zip(paths, path_reaches)]
     dx_by_row, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
-    _run_lines_down_fill(routing, np.concatenate(starts), np.cumsum([s.size for s in starts]),
-                         np.concatenate([c for _, c in paths]), np.cumsum([c.size for _, c in paths]),
-                         float(nodata_value), ROUTING_STEP_M, ROUTING_MAX_DROP_M, np.asarray(dx_by_row, np.float64),
-                         float(dy))
+    cells = np.concatenate([c for _, c in paths])
+    fill = routing.ravel()[cells]
+    _run_lines_down_fill(routing, np.concatenate(starts), np.cumsum([s.size for s in starts]), cells,
+                         np.cumsum([c.size for _, c in paths]), float(nodata_value), ROUTING_STEP_M, ROUTING_MAX_DROP_M,
+                         np.asarray(dx_by_row, np.float64), float(dy))
+    if lowered is not None:
+        lowered.append(np.unique(cells[routing.ravel()[cells] < fill]))
     return routing
 
 

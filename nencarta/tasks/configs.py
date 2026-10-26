@@ -106,6 +106,7 @@ def _fldpln_inputs(workspace: Workspace):
         "Flow_Direction_File": workspace.flowdir,
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
+        "FLDPLN_Min_Flood_Depth": workspace.configs.fldpln_min_flood_depth,
     }
     output[""] = ""
     return output
@@ -376,8 +377,6 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         params["Print_Curve_File"] = workspace.Curve_File_Bathy
     
     params["# Mapper Input Data"] = ""
-    if not curve2flood or make_gpkg:
-        params["StrmShp_File"] = workspace.new_StrmShp_matched if configs.move_stream_network_to_thalweg else workspace.DEM_StrmShp
     params["Comid_Flow_File"] = flow_file
     params["mapper"] = configs.mapper
     if configs.mapper.is_curve2flood_fldpln_mapper():
@@ -418,11 +417,7 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
 
     flood_maps = flood_map_paths(workspace, postfix)
     params["OutFLD"] = flood_maps["OutFLD"]
-
-    if not make_gpkg:
-        params["Make_Output_GPKG"] = False
-    elif not curve2flood:
-        params["OutSHP"] = flood_maps["OutSHP"]  # Curve2Flood names its GeoPackage after OutFLD
+    params["Make_Output_GPKG"] = make_gpkg
 
     if configs.make_velocity_maps:
         params["OutVEL"] = flood_maps["OutVEL"]

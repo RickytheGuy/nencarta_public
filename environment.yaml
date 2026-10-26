@@ -21,7 +21,6 @@ dependencies:
   - pyyaml
   - requests
   - rich
-  - richdem
   - s3fs
   - scipy
   - shapely

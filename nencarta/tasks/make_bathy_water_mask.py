@@ -6,12 +6,11 @@ import numpy as np
 import pandas as pd
 from numba import njit
 from osgeo import gdal
-from scipy.ndimage import binary_dilation, distance_transform_edt, label
 
 from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.channel_detection import _CHUNK_ROWS, _feature_distance, river_channel
+from nencarta.tasks.channel_detection import _CHUNK_ROWS, _feature_distance, flood_patches, nearest_cell, river_channel
 from nencarta.tasks.stream_conflation import cell_sizes_m
 from nencarta.workspace import Workspace
 from curve2flood import remove_cells_not_connected
@@ -73,7 +72,7 @@ def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float 
     on_stream = streams > 0
     if not on_stream.any():
         return np.zeros(dem.shape, bool)
-    nearest = distance_transform_edt(~on_stream, return_distances=False, return_indices=True)
+    nearest = nearest_cell(on_stream)
     # The level is never above the nearest stream cell's, so only cells within max_rise of that can pass. Found a
     # block of rows at a time, with their distance to the nearest stream cell, to keep the temporary arrays small.
     ncols = dem.shape[1]
@@ -82,7 +81,7 @@ def near_the_rivers_level(dem: np.ndarray, streams: np.ndarray, max_rise: float 
         r1 = min(r0 + _CHUNK_ROWS, dem.shape[0])
         rows, cols = np.nonzero(np.ones((r1 - r0, ncols), bool) if cells is None else cells[r0:r1])
         rows += r0
-        near_rows, near_cols = nearest[0][rows, cols], nearest[1][rows, cols]
+        near_rows, near_cols = np.divmod(nearest[rows, cols], ncols)
         keep = dem[rows, cols] <= dem[near_rows, near_cols] + max_rise
         rows, cols = rows[keep], cols[keep]
         found.append(rows * ncols + cols)
@@ -199,8 +198,8 @@ def _near_level(nrows: int, ncols: int, candidates: np.ndarray, distance: np.nda
     return out
 
 
-def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, area_km2: dict | None = None
-               ) -> np.ndarray:
+def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, area_km2: dict | None = None,
+               dem: np.ndarray | None = None) -> np.ndarray:
     """
     The bathymetry water mask for ``streams`` (reach ids, 0 off them, draining ``area_km2`` by id) on ``dem_raster``
     (before the burn): the stream cells and the water beside them at about the river's level (see
@@ -211,13 +210,14 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
     The water in a lake (see load_lake_array) is the lake's, whatever its level: no stream runs in a lake the network
     is cut at (FLDPLN's), and the river nearest a reservoir's water by its dam is the one below the dam, metres lower.
     A reach the mask has mostly 1 cell wide is made 1 cell wide all along, but in lakes (see
-    one_cell_wide_where_mostly).
+    one_cell_wide_where_mostly). ``dem``, if given, is what ``dem_raster`` holds, already read.
     """
     # Imported here: move_streams imports this module
     from nencarta.tasks.move_streams import load_lake_array, load_ocean_array
 
     configs = workspace.configs
-    dem = dem_raster.read_array()
+    if dem is None:
+        dem = dem_raster.read_array()
     ocean = load_ocean_array(workspace, dem_raster)
     if ocean is not None:
         streams = np.where(ocean, 0, streams)
@@ -256,19 +256,30 @@ def one_cell_wide_where_mostly(mask: np.ndarray, streams: np.ndarray, lakes: np.
     water = mask & ~on
     if not water.any():
         return mask
-    eight = np.ones((3, 3), bool)
-    reaches, of_cell = np.unique(streams[on], return_inverse=True)
-    beside_water = np.bincount(of_cell, binary_dilation(water, eight)[on])
-    wide = np.zeros(mask.shape, bool)
-    wide[on] = (beside_water >= (1 - NARROW_SHARE) * np.bincount(of_cell))[of_cell]
-    patches, count = label(water, eight)
-    kept = binary_dilation(wide, eight) & water
+    cells = np.flatnonzero(on)
+    reaches, of_cell = np.unique(streams.ravel()[cells], return_inverse=True)
+    beside_water = np.bincount(of_cell, _beside(water, cells))
+    wide = cells[(beside_water >= (1 - NARROW_SHARE) * np.bincount(of_cell))[of_cell]]
+    # The patches of water beside a wide reach's stream cells, or with water in a lake
+    kept = np.zeros(mask.shape, bool)
+    flood_patches(water, wide, 1, kept)
     if lakes is not None:
-        kept |= lakes & water
-    keep = np.zeros(count + 1, bool)
-    keep[patches[kept]] = True
-    keep[0] = False
-    return mask & ~(water & ~keep[patches])
+        flood_patches(water, np.flatnonzero(lakes & water), 0, kept)
+    return mask & ~(water & ~kept)
+
+
+@njit(cache=True)
+def _beside(mask: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Whether each of ``cells`` (flat indices) has a cell of ``mask`` among itself and its eight neighbours."""
+    nrows, ncols = mask.shape
+    out = np.zeros(cells.size, np.bool_)
+    for i in range(cells.size):
+        r0, c0 = cells[i] // ncols, cells[i] % ncols
+        for r in range(max(r0 - 1, 0), min(r0 + 2, nrows)):
+            for c in range(max(c0 - 1, 0), min(c0 + 2, ncols)):
+                if mask[r, c]:
+                    out[i] = True
+    return out
 
 
 def make_water_mask(workspace: Workspace) -> Path:

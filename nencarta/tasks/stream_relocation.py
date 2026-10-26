@@ -34,11 +34,10 @@ import pandas as pd
 import geopandas as gpd
 import shapely
 from numba import njit
-from scipy.ndimage import distance_transform_edt
 from scipy.spatial import cKDTree
 
 from nencarta.logger import LOG
-from nencarta.tasks.channel_detection import ChannelSettings, river_channel
+from nencarta.tasks.channel_detection import ChannelSettings, river_channel, within_distance
 from nencarta.tasks.stream_conflation import (FlowNetwork, SourceNetwork, prepare_source_network, _sample_lines,
                                               _inflow_cells)
 
@@ -426,7 +425,7 @@ class _Relocation:
         on = (hr >= 0) & (hr < wnr) & (hc >= 0) & (hc < wnc)
         free = np.ones((wnr, wnc), bool)
         free[hr[on], hc[on]] = False
-        corridor = self.valid[r0:r1, c0:c1] & (distance_transform_edt(free, sampling=(self.dy, self.dx)) <= radius)
+        corridor = self.valid[r0:r1, c0:c1] & within_distance(~free, (self.dy, self.dx), radius)
         area = np.ascontiguousarray(self.F[r0:r1, c0:c1]).ravel()
         starts = np.unique((hr[on & inside] + r0) * self.ncols + (hc[on & inside] + c0)).astype(np.int64)
         votes = np.zeros(wnr * wnc, np.int32)

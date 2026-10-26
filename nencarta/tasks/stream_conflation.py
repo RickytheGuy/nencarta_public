@@ -1394,7 +1394,7 @@ def conflate_to_flow_directions(
     stranded = np.flatnonzero((usable_length > 0) & ~has_cells)
     stubs = 0
     if stranded.size:
-        owner = np.full(nrows * ncols, -1, np.int64)
+        owner = np.full(nrows * ncols, -1, np.int32)  # reach indices: a raster's worth, int32 halves it
         owner[cells[label >= 0]] = label[label >= 0]
         wide = radius * settings.fallback_radius_factor
         new_cells, new_labels = [cells], [label]
@@ -1813,7 +1813,7 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
     if not labelled.any():
         return drawn
     nrows, ncols, down = flow.nrows, flow.ncols, flow.down
-    owner = np.full(nrows * ncols, -1, np.int64)
+    owner = np.full(nrows * ncols, -1, np.int32)  # reach indices: a raster's worth, int32 halves it
     owner[cells[labelled]] = label[labelled]
     position = {int(c): i for i, c in enumerate(cells.tolist())}
     counts = np.bincount(label[labelled], minlength=source.ids.size)
@@ -1906,7 +1906,7 @@ def _below_outlets(cells: np.ndarray, label: np.ndarray, drawn: np.ndarray, flow
     tail = max(int(settings.outlet_tailwater_cells), 0)
     min_cells = max(settings.min_reach_cells, 2)
 
-    owner = np.full(nrows * ncols, -1, np.int64)
+    owner = np.full(nrows * ncols, -1, np.int32)  # reach indices: a raster's worth, int32 halves it
     owner[cells[labelled]] = label[labelled]
     position = {int(c): i for i, c in enumerate(cells.tolist())}
     reach_cells, reach_label = cells[labelled], label[labelled]

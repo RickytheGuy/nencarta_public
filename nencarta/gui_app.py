@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 
 # third-party imports
-from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QSettings, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -85,13 +85,14 @@ MANNINGS_MODES = {"default": "NenCarta's table, for ESA WorldCover", "file": "My
 SLOPE_METHODS = ("local_average_corrected", "local_average", "reach_average", "end_points", "local_fit")
 
 # The ARC and Curve2Flood arguments with fields of their own; the rest of bathy_args and floodmap_args go in tables
-BATHY_ARG_FIELDS = ("X_Section_Dist", "Gen_Dir_Dist", "Degree_Manip", "Degree_Interval", "Low_Spot_Range",
-                    "Bathy_Trap_H", "Stream_Slope_Method", "Gen_Slope_Dist", "VDT_Database_NumIterations")
+BATHY_ARG_FIELDS = ("Gen_Dir_Dist", "Degree_Manip", "Degree_Interval", "Low_Spot_Range", "Bathy_Trap_H",
+                    "Stream_Slope_Method", "Gen_Slope_Dist", "VDT_Database_NumIterations")
 FLOODMAP_ARG_FIELDS = ("TW_MultFact", "TopWidthPlausibleLimit", "Make_Output_GPKG")
 ARG_FIELDS = {"bathy_args": BATHY_ARG_FIELDS, "floodmap_args": FLOODMAP_ARG_FIELDS}
 ARG_DEFAULTS = {"bathy_args": DEFAULT_BATHY_ARGS, "floodmap_args": DEFAULT_FLOODMAP_ARGS}
-# Arguments neither ARC nor Curve2Flood reads any more, dropped from the tables the form remembered
-RETIRED_ARGS = {"Str_Limit_Val", "FS_ADJUST_FLOW_BY_FRACTION"}
+# Arguments neither ARC nor Curve2Flood reads any more, dropped from the tables the form remembered. ARC's cross
+# sections reach as far as their water needs, so X_Section_Dist sets nothing.
+RETIRED_ARGS = {"Str_Limit_Val", "FS_ADJUST_FLOW_BY_FRACTION", "X_Section_Dist"}
 
 # The tags a folder path template can use (see Workspace.folder_path)
 FOLDER_TAGS = ("{output_dir}", "{name}", "{dem}", "{folder}")
@@ -127,7 +128,6 @@ UNDERLYING_NAMES = {
     "use_specified_depth_for_bathy_mask": "use_specified_depth_for_bathy_mask",
     "specify_depths_for_bathy_mask": "specify_depths_for_bathy_mask",
     # ARC
-    "bathy_args.X_Section_Dist": "X_Section_Dist",
     "bathy_args.Gen_Dir_Dist": "Gen_Dir_Dist",
     "bathy_args.Degree_Manip": "Degree_Manip",
     "bathy_args.Degree_Interval": "Degree_Interval",
@@ -162,6 +162,7 @@ UNDERLYING_NAMES = {
     "fldpln_keep_spilling": "fldpln_keep_spilling",
     "fldpln_parallel": "fldpln_parallel",
     "fldpln_min_depth": "fldpln_min_depth",
+    "fldpln_min_flood_depth": "FLDPLN_Min_Flood_Depth",
     "fldpln_max_depth": "fldpln_max_depth",
     "fldpln_spill_decay": "fldpln_spill_decay",
     "fldpln_max_cells_per_segment": "fldpln_max_cells_per_segment",
@@ -298,15 +299,30 @@ class QtLogHandler(logging.Handler):
             self.handleError(record)
 
 
+class LogRelay(QObject):
+    """
+    Carries log messages and printed text to the window from any thread. The window keeps one for as long as it is
+    open, since a run's stream outlives the run: ARC and Curve2Flood give their loggers the sys.stdout they are first
+    imported under, the first run's stream, and write to it in every run after. When each run's stream sent through
+    its own WorkerThread, the next run's replacing that worker left the stream emitting from a deleted object (PyQt
+    keeps no reference to a bound signal's object), and ARC's first warning crashed the GUI.
+    """
+    message = pyqtSignal(str)
+
+
 class WorkerThread(QThread):
-    """Runs process_watershed in the background, sending its log and any error to the window."""
+    """
+    Runs process_watershed in the background, sending its log and printed text to ``log_signal`` (a LogRelay's
+    message, which must outlive the run; by default its own log_signal) and any error to the window.
+    """
     finished_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, params: dict):
+    def __init__(self, params: dict, log_signal=None):
         super().__init__()
         self.params = dict(params)
+        self.log_target = self.log_signal if log_signal is None else log_signal
 
     @staticmethod
     def _format_exception(e: Exception, context: str = ""):
@@ -332,13 +348,13 @@ class WorkerThread(QThread):
         return "\n".join(summary_parts), traceback.format_exc()
 
     def run(self):
-        qt_handler = QtLogHandler(self.log_signal)
+        qt_handler = QtLogHandler(self.log_target)
         qt_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
         LOG.addHandler(qt_handler)
         LOG.setLevel(logging.INFO)
 
         old_stdout, old_stderr = sys.stdout, sys.stderr
-        stream = QtLogStream(self.log_signal)
+        stream = QtLogStream(self.log_target)
 
         try:
             sys.stdout = stream
@@ -924,6 +940,9 @@ class FloodSimulationGUI(QMainWindow):
         self._saved_args = {key: {arg: value for arg, value in _saved_dict(key, ARG_DEFAULTS[key]).items()
                                   if arg not in RETIRED_ARGS} for key in ARG_FIELDS}
         self.worker_thread = None
+        # The runs' log comes through this, which lives as long as the window (see LogRelay)
+        self.log_relay = LogRelay(self)
+        self.log_relay.message.connect(self.log_message)
         self._bars = {}  # each progress bar -> the log's line (block) it is on
         self._finished_bars = set()  # bars whose lines only their finished state may rewrite, as tqdm's close does
         self._last_bar = None
@@ -1355,8 +1374,6 @@ class FloodSimulationGUI(QMainWindow):
         tab = self._make_tab("ARC")
 
         group = self._make_group(tab, "Cross Sections")
-        self._add_arg(group, "bathy_args", "X_Section_Dist", "Cross-section length (m)", "float",
-                      tooltip="Each cross section's length in metres, from end to end (X_Section_Dist).")
         self._add_arg(group, "bathy_args", "Gen_Dir_Dist", "Cells either side to fit the stream's direction to",
                       "int", tooltip="How many cells each way around a stream cell to fit the stream's direction to "
                                      "(Gen_Dir_Dist).")
@@ -1473,8 +1490,10 @@ class FloodSimulationGUI(QMainWindow):
                            _default("fldpln_keep_spilling"))
         self._add_checkbox(group, "fldpln_parallel", "Build the FLDPLN library with several processes",
                            _default("fldpln_parallel"))
-        self._add_line(group, "fldpln_min_depth", "Shallowest depth counted as flooded (m)", _default("fldpln_min_depth"),
-                       parser="float")
+        self._add_line(group, "fldpln_min_depth", "Least depth a spill stops at (m)",
+                       _default("fldpln_min_depth"), parser="float")
+        self._add_line(group, "fldpln_min_flood_depth", "Shallowest water that floods a cell (m)",
+                       _default("fldpln_min_flood_depth"), parser="float")
         self._add_line(group, "fldpln_max_depth", "Deepest flood the library covers (m)", _default("fldpln_max_depth"),
                        parser="float")
         self._add_line(group, "fldpln_spill_decay", "Head a spill loses per cell (m)",
@@ -1492,13 +1511,14 @@ class FloodSimulationGUI(QMainWindow):
                             "Other Curve2Flood settings for the flood maps, by their names in its input file.")
         fldpln = self._is_fldpln
         solver = lambda: self.input_fields["fldpln_solver"].currentText()
-        self.show_when(fldpln, "use_parquet", "fldpln_solver", "fldpln_parallel", "fldpln_min_depth", "fldpln_max_depth",
-                       "fldpln_spill_decay")
-        self.show_when(lambda: fldpln() and solver() == "iterative", "fldpln_dh", "fldpln_keep_spilling")
+        self.show_when(fldpln, "use_parquet", "fldpln_solver", "fldpln_parallel", "fldpln_min_flood_depth",
+                       "fldpln_max_depth", "fldpln_spill_decay")
+        self.show_when(lambda: fldpln() and solver() == "iterative", "fldpln_dh", "fldpln_keep_spilling",
+                       "fldpln_min_depth")
         self.show_when(lambda: fldpln() and solver() == "exact", "fldpln_max_cells_per_segment")
         self.show_when(lambda: not fldpln(), "floodmap_args.TW_MultFact", "floodmap_args.TopWidthPlausibleLimit")
         self._indent("use_parquet", "fldpln_solver", "fldpln_dh", "fldpln_keep_spilling", "fldpln_parallel",
-                     "fldpln_min_depth", "fldpln_max_depth", "fldpln_spill_decay",
+                     "fldpln_min_depth", "fldpln_min_flood_depth", "fldpln_max_depth", "fldpln_spill_decay",
                      "fldpln_max_cells_per_segment")
 
         group = self._make_group(tab, "Outputs")
@@ -1793,9 +1813,8 @@ class FloodSimulationGUI(QMainWindow):
             self.show_error(f"Parameter error: {e}")
             return
 
-        self.worker_thread = WorkerThread(params)
+        self.worker_thread = WorkerThread(params, self.log_relay.message)
         self.worker_thread.finished_signal.connect(self.display_results)
-        self.worker_thread.log_signal.connect(self.log_message)
         self.worker_thread.error_signal.connect(self.show_error)
         self.worker_thread.start()
 

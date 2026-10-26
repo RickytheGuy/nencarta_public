@@ -349,6 +349,7 @@ class NencartaConfig:
         self.raise_errors_if_river_ids_missing: bool = self.get("raise_errors_if_river_ids_missing")
         self.fldpln_dh: float = self.get("fldpln_dh")
         self.fldpln_min_depth: float = self.get("fldpln_min_depth")
+        self.fldpln_min_flood_depth: float = self.get("fldpln_min_flood_depth")
         self.fldpln_max_depth: float = self.get("fldpln_max_depth")
         self.fldpln_spill_decay: float = self.get("fldpln_spill_decay")
         self.fldpln_max_cells_per_segment: int | None = self.get("fldpln_max_cells_per_segment")

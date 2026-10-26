@@ -36,10 +36,12 @@ def get_fist_inputs(workspace: Workspace, flow_file: Path) -> list[tuple]:
         return []
 
     streamflow_forecast_df = pd.read_csv(flow_file)
-    streamflow_columns = streamflow_forecast_df.select_dtypes(include=['float']).columns.tolist()
 
     # grab the stream id column, which should be the first column in the flow file and should be named 'rivid' or 'comid' depending on the source of streamflow data
     id_column_name = streamflow_forecast_df.columns[0]
+    # Every other numeric column is a flow, whole numbers included (they're read as integers)
+    streamflow_columns = [column for column in streamflow_forecast_df.columns[1:]
+                          if pd.api.types.is_numeric_dtype(streamflow_forecast_df[column])]
 
     geojson_files = {}
     for streamflow_column in streamflow_columns:

@@ -79,7 +79,8 @@ def make_land_cover(workspace: Workspace,
     cached_files = {}
     if workspace.configs.land_cover_cache:
         cached_files = {Path(path).stem: path for path in workspace.configs.land_cover_cache}
-    for tile in tiles:
+    # In a fixed order: the tiles are warped one after another, and where two meet, a cell takes the last one's
+    for tile in sorted(tiles):
         if tile in cached_files:
             landcover_files.append(cached_files[tile])
         else:

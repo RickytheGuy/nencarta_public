@@ -37,7 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from numba import njit
-from scipy.ndimage import binary_dilation, distance_transform_edt, label
+from scipy.ndimage import label
 
 # Rows of the grid worked on at a time where every cell's nearest stream cell is used, so the temporary arrays stay small
 _CHUNK_ROWS = 512
@@ -133,12 +133,43 @@ def height_step(dem: np.ndarray, valid: np.ndarray, sample: int = 200_000) -> fl
 
 def touching(mask: np.ndarray, streams: np.ndarray) -> np.ndarray:
     """The 8-connected patches of ``mask`` that touch a stream cell, or a cell next to one."""
-    near = binary_dilation(streams > 0, np.ones((3, 3), bool))
-    labels, _ = label(mask, np.ones((3, 3), int))
-    keep = np.zeros(labels.max() + 1, bool)
-    keep[np.unique(labels[near & (labels > 0)])] = True
-    keep[0] = False
-    return keep[labels]
+    out = np.zeros(np.shape(mask), np.bool_)
+    flood_patches(np.ascontiguousarray(mask, dtype=np.bool_), np.flatnonzero(np.asarray(streams) > 0), 1, out)
+    return out
+
+
+@njit(cache=True)
+def flood_patches(mask: np.ndarray, cells: np.ndarray, reach: int, out: np.ndarray) -> None:
+    """
+    Set ``out`` True on the 8-connected patches of ``mask`` with a cell within ``reach`` cells (a square) of one of
+    ``cells`` (flat indices): the patches scipy's label(mask, np.ones((3, 3))) finds there, flooded from those cells
+    rather than labelled across the grid. Patches already in ``out`` are left as they are.
+    """
+    nrows, ncols = mask.shape
+    queue = np.empty(1024, np.int64)
+    for i in range(cells.size):
+        r0, c0 = cells[i] // ncols, cells[i] % ncols
+        for r in range(max(r0 - reach, 0), min(r0 + reach + 1, nrows)):
+            for c in range(max(c0 - reach, 0), min(c0 + reach + 1, ncols)):
+                if not mask[r, c] or out[r, c]:
+                    continue
+                out[r, c] = True
+                queue[0] = r * ncols + c
+                head, tail = 0, 1
+                while head < tail:
+                    cell = queue[head]
+                    head += 1
+                    row, col = cell // ncols, cell % ncols
+                    for nr in range(max(row - 1, 0), min(row + 2, nrows)):
+                        for nc in range(max(col - 1, 0), min(col + 2, ncols)):
+                            if mask[nr, nc] and not out[nr, nc]:
+                                out[nr, nc] = True
+                                if tail == queue.size:
+                                    grown = np.empty(queue.size * 2, np.int64)
+                                    grown[:tail] = queue[:tail]
+                                    queue = grown
+                                queue[tail] = nr * ncols + nc
+                                tail += 1
 
 
 def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_km2: dict, dx_m: float, dy_m: float,
@@ -168,7 +199,7 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     have = np.zeros(dem.shape, bool)
     have[rows, cols] = True
     sampling = (dy_m, dx_m)
-    nearest = distance_transform_edt(~have, sampling=sampling, return_distances=False, return_indices=True)
+    nearest = nearest_cell(have, sampling)
     del have
     index = np.full(dem.shape, -1, np.int32)
     index[rows, cols] = np.arange(rows.size, dtype=np.int32)
@@ -180,35 +211,20 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     else:
         flat_reach = np.minimum(np.maximum(s.flat_widths * width, s.flat_min_m), s.corridor_m)
 
+    water = np.zeros(dem.shape, bool)
     if not channel:
         # Only the flat cells' rise above the river is needed
-        flat_rows, flat_cols = np.nonzero(flat)
-        near_rows, near_cols = nearest[0][flat_rows, flat_cols], nearest[1][flat_rows, flat_cols]
-        del nearest
-        distance = _feature_distance(near_rows - flat_rows, near_cols - flat_cols, sampling)
-        k = index[near_rows, near_cols]
-        keep = (distance <= flat_reach[k]) & (dem[flat_rows, flat_cols] - level[k] <= s.flat_rise_m)
-        water = np.zeros(dem.shape, bool)
-        water[flat_rows[keep], flat_cols[keep]] = True
+        _beside_the_river(dem, valid, flat, nearest, index, level, width, flat_reach, sampling[0], sampling[1],
+                          s.corridor_m, s.flat_rise_m, s.rise_m, s.widths, False, water, water)
+        del nearest, index
         return Channel(touching(water, on_stream) if connected else water, None)
 
     # Low ground only along rivers expected to be at least min_width_cells wide
     width = np.where(width >= s.min_width_cells * cell, width, 0.0)
-    water = np.zeros(dem.shape, bool)
     low = np.zeros(dem.shape, bool)
-    ncols = dem.shape[1]
-    for r0 in range(0, dem.shape[0], _CHUNK_ROWS):
-        r1 = min(r0 + _CHUNK_ROWS, dem.shape[0])
-        near_rows, near_cols = nearest[0, r0:r1], nearest[1, r0:r1]
-        distance = _feature_distance(near_rows - np.arange(r0, r1, dtype=np.int32)[:, None],
-                                     near_cols - np.arange(ncols, dtype=np.int32)[None, :], sampling)
-        k = index[near_rows, near_cols]
-        rise = dem[r0:r1] - level[k]
-        corridor = valid[r0:r1] & (distance <= s.corridor_m)
-        if flat is not None:
-            water[r0:r1] = flat[r0:r1] & corridor & (rise <= s.flat_rise_m) & (distance <= flat_reach[k])
-        w = width[k]
-        low[r0:r1] = corridor & (rise <= s.rise_m) & (w > 0) & (distance <= s.widths * w)
+    _beside_the_river(dem, valid, np.zeros((0, 0), np.bool_) if flat is None else flat, nearest, index, level, width,
+                      flat_reach, sampling[0], sampling[1], s.corridor_m, s.flat_rise_m, s.rise_m, s.widths, True,
+                      water, low)
     del nearest, index
     if connected:
         water = touching(water, on_stream)
@@ -219,6 +235,149 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     else:
         whole = touching(low, on_stream) if connected else low
     return Channel(water if flat_water else None, whole)
+
+
+@njit(cache=True)
+def _beside_the_river(dem: np.ndarray, valid: np.ndarray, flat: np.ndarray, nearest: np.ndarray, index: np.ndarray,
+                      level: np.ndarray, width: np.ndarray, flat_reach: np.ndarray, s0: float, s1: float,
+                      corridor_m: float, flat_rise_m: float, rise_m: float, widths: float, channel: bool,
+                      water: np.ndarray, low: np.ndarray) -> None:
+    """
+    river_channel's flat water and, with ``channel``, its low ground, set in ``water`` and ``low``, a cell at a time.
+    The river beside a cell is its ``nearest`` stream cell (a flat index), the ``index``-th one with a ``level``, and
+    its ``width`` and ``flat_reach``. Distances are in metres, rows ``s0`` and columns ``s1`` apart, as
+    _feature_distance has them. Without ``channel`` only the ``flat`` cells are looked at; with it, every cell, and
+    ``flat`` may be empty: no flat water.
+    """
+    nrows, ncols = dem.shape
+    with_flat = flat.size > 0
+    for r in range(nrows):
+        for c in range(ncols):
+            is_flat = with_flat and flat[r, c]
+            if not channel and not is_flat:
+                continue
+            near = nearest[r, c]
+            near_row = near // ncols
+            near_col = near - near_row * ncols
+            d_row = float(near_row - r) * s0
+            d_col = float(near_col - c) * s1
+            distance = np.sqrt(d_row * d_row + d_col * d_col)
+            k = index[near_row, near_col]
+            rise = np.float64(dem[r, c]) - level[k]
+            if not channel:
+                water[r, c] = distance <= flat_reach[k] and rise <= flat_rise_m
+                continue
+            corridor = valid[r, c] and distance <= corridor_m
+            if is_flat:
+                water[r, c] = corridor and rise <= flat_rise_m and distance <= flat_reach[k]
+            w = width[k]
+            low[r, c] = corridor and rise <= rise_m and w > 0 and distance <= widths * w
+
+
+def within_distance(cells: np.ndarray, sampling: tuple[float, float], distance: float) -> np.ndarray:
+    """
+    The cells no farther than ``distance`` from the nearest of ``cells`` (a boolean raster, with at least one True), the
+    cells ``sampling`` (height, width) apart: distance_transform_edt(~cells, sampling) <= distance, to the last bit.
+    """
+    return _within(nearest_cell(cells, sampling), float(sampling[0]), float(sampling[1]), float(distance))
+
+
+@njit(cache=True)
+def _within(nearest: np.ndarray, s0: float, s1: float, distance: float) -> np.ndarray:
+    """
+    Whether each cell is no farther than ``distance`` from its ``nearest`` cell (a flat index), as _feature_distance
+    has it.
+    """
+    nrows, ncols = nearest.shape
+    out = np.empty((nrows, ncols), np.bool_)
+    for r in range(nrows):
+        for c in range(ncols):
+            near_row = nearest[r, c] // ncols
+            d_row = float(near_row - r) * s0
+            d_col = float(nearest[r, c] - near_row * ncols - c) * s1
+            out[r, c] = np.sqrt(d_row * d_row + d_col * d_col) <= distance
+    return out
+
+
+def nearest_cell(cells: np.ndarray, sampling: tuple[float, float] = (1.0, 1.0)) -> np.ndarray:
+    """
+    The flat index of the nearest of ``cells`` (a boolean raster, with at least one True) to each cell, the cells
+    ``sampling`` (height, width) apart: the cell scipy's distance_transform_edt(~cells, sampling,
+    return_indices=True) gives, ties and all, in half its memory.
+    """
+    cells = np.ascontiguousarray(cells, dtype=np.bool_)
+    out = np.empty(cells.shape, np.int32 if cells.size < np.iinfo(np.int32).max else np.int64)
+    _feature_transform(cells, float(sampling[0]), float(sampling[1]), out)
+    return out
+
+
+@njit(cache=True)
+def _feature_transform(feature: np.ndarray, s0: float, s1: float, out: np.ndarray) -> None:
+    """
+    Set ``out`` to the flat index of the nearest ``feature`` cell to each cell, rows ``s0`` and columns ``s1`` apart,
+    by scipy's exact Euclidean feature transform (Maurer et al. 2003; ni_morphology.c), in its arithmetic: down each
+    column to its nearest feature, the upper one of two as near, and then along each row to the nearest of those, by
+    the lower envelope of their parabolas. Left -1 without features.
+    """
+    nrows, ncols = feature.shape
+    above = np.full(ncols, -1, np.int64)
+    for r in range(nrows):
+        for c in range(ncols):
+            if feature[r, c]:
+                above[c] = r
+            out[r, c] = above[c]
+    below = np.full(ncols, -1, np.int64)
+    for r in range(nrows - 1, -1, -1):
+        for c in range(ncols):
+            if feature[r, c]:
+                below[c] = r
+            up = out[r, c]
+            if below[c] >= 0 and (up < 0 or r - up > below[c] - r):
+                out[r, c] = below[c]
+    # Each row's columns, by the row of their nearest feature (-1 for none), and the columns on the envelope
+    frow = np.empty(ncols, np.int64)
+    g = np.empty(ncols, np.int64)
+    for r in range(nrows):
+        for c in range(ncols):
+            frow[c] = out[r, c]
+        last = -1
+        for c in range(ncols):
+            if frow[c] < 0:
+                continue
+            tw = float(frow[c] - r) * s0
+            w = 0.0 + tw * tw
+            while last >= 1:
+                c1, c2 = g[last], g[last - 1]
+                a = (float(c1) - float(c2)) * s1
+                b = (float(c) - float(c1)) * s1
+                ab = a + b
+                tu = (float(frow[c2]) - float(r)) * s0
+                tv = (float(frow[c1]) - float(r)) * s0
+                u = 0.0 + tu * tu
+                v = 0.0 + tv * tv
+                if ab * v - b * u - a * w - a * b * ab <= 0.0:
+                    break
+                last -= 1
+            last += 1
+            g[last] = c
+        if last < 0:
+            for c in range(ncols):
+                out[r, c] = -1
+            continue
+        k = 0
+        for c in range(ncols):
+            t0 = float(frow[g[k]] - r) * s0
+            t1 = float(g[k] - c) * s1
+            here = 0.0 + t0 * t0 + t1 * t1
+            while k < last:
+                t0 = float(frow[g[k + 1]] - r) * s0
+                t1 = float(g[k + 1] - c) * s1
+                after = 0.0 + t0 * t0 + t1 * t1
+                if here <= after:
+                    break
+                here = after
+                k += 1
+            out[r, c] = frow[g[k]] * ncols + g[k]
 
 
 def _feature_distance(d_row: np.ndarray, d_col: np.ndarray, sampling: tuple[float, float]) -> np.ndarray:
@@ -296,6 +455,11 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
     ``kernel`` and its reflected edges, summed in the order scipy sums them (down the columns, then along the rows,
     each pair of cells either side of the middle from the outermost in) so the result is the same to the last bit.
     With ``single``, ``values`` are float32 and each pass is rounded to float32, as scipy stores them.
+
+    ``values`` are 0 off ``weight``, which is sparse: down a column, a pair of cells neither of which ``weight`` has
+    adds nothing, and is skipped. Each column's ``weight`` cells are listed by row, and the cells worked out from the
+    top down, so where each column's cells near a cell start is found by moving on from where they started for the one
+    before. Only near the grid's edges, where the kernel reflects, is every pair added.
     """
     nrows, ncols = values.shape
     half = kernel.size // 2
@@ -303,20 +467,65 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
     down_v = np.empty(kernel.size)
     down_w = np.empty(kernel.size)
     out = np.empty(rows.size)
-    for i in range(rows.size):
+    # The weight cells of each column, by row: col_rows[col_start[col]:col_start[col + 1]]
+    col_start = np.zeros(ncols + 1, np.int64)
+    for r in range(nrows):
+        for c in range(ncols):
+            if weight[r, c]:
+                col_start[c + 1] += 1
+    for c in range(ncols):
+        col_start[c + 1] += col_start[c]
+    col_rows = np.empty(col_start[ncols], np.int64)
+    filled = col_start[:ncols].copy()
+    for r in range(nrows):
+        for c in range(ncols):
+            if weight[r, c]:
+                col_rows[filled[c]] = r
+                filled[c] += 1
+    # Each column's first weight cell not above the window of the cell at hand, and its first below it
+    first = col_start[:ncols].copy()
+    after = col_start[:ncols].copy()
+    for i in np.argsort(rows, kind="mergesort"):
         r, c = rows[i], cols[i]
         inside_rows = half <= r < nrows - half
+        inside = inside_rows and half <= c < ncols - half
         for j in range(-half, half + 1):
             col = c + j if 0 <= c + j < ncols else _reflect(c + j, ncols)
             v = np.float64(values[r, col]) * middle
             w = (1.0 if weight[r, col] else 0.0) * middle
-            for jj in range(-half, 0):
-                if inside_rows:
-                    above, below = r + jj, r - jj
-                else:
-                    above, below = _reflect(r + jj, nrows), _reflect(r - jj, nrows)
-                v += (np.float64(values[above, col]) + np.float64(values[below, col])) * kernel[half + jj]
-                w += ((1.0 if weight[above, col] else 0.0) + (1.0 if weight[below, col] else 0.0)) * kernel[half + jj]
+            if inside:
+                while first[col] < col_start[col + 1] and col_rows[first[col]] < r - half:
+                    first[col] += 1
+                while after[col] < col_start[col + 1] and col_rows[after[col]] <= r + half:
+                    after[col] += 1
+                lo, hi = first[col], after[col] - 1
+                # The pairs either side of the middle with a weight cell, from the outermost in
+                pairs = 0
+                while True:
+                    d_above = r - col_rows[lo] if lo <= hi and col_rows[lo] < r else 0
+                    d_below = col_rows[hi] - r if hi >= lo and col_rows[hi] > r else 0
+                    d = max(d_above, d_below)
+                    if d == 0:
+                        break
+                    v += (np.float64(values[r - d, col]) + np.float64(values[r + d, col])) * kernel[half - d]
+                    w += ((1.0 if weight[r - d, col] else 0.0)
+                          + (1.0 if weight[r + d, col] else 0.0)) * kernel[half - d]
+                    pairs += 1
+                    if d_above == d:
+                        lo += 1
+                    if d_below == d:
+                        hi -= 1
+                if pairs < half:
+                    v += 0.0  # as a skipped pair would have: -0.0 becomes 0.0
+            else:
+                for jj in range(-half, 0):
+                    if inside_rows:
+                        above, below = r + jj, r - jj
+                    else:
+                        above, below = _reflect(r + jj, nrows), _reflect(r - jj, nrows)
+                    v += (np.float64(values[above, col]) + np.float64(values[below, col])) * kernel[half + jj]
+                    w += ((1.0 if weight[above, col] else 0.0)
+                          + (1.0 if weight[below, col] else 0.0)) * kernel[half + jj]
             down_v[j + half] = np.float64(np.float32(v)) if single else v
             down_w[j + half] = w
         total = down_v[half] * middle

@@ -31,7 +31,6 @@ dependencies = [
 "pyyaml",
 "requests",
 "rich",
-"richdem2",
 "s3fs",
 "scipy",
 "shapely",
