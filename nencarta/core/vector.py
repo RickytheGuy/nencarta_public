@@ -6,13 +6,14 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import pyogrio
 import geopandas as gpd
+import pyogrio
 from pyproj import CRS
 from shapely.geometry import box
 
 from .abc_geo import GISDataSource
 from .geo_cache import LMDBCache
+
 
 class Vector(GISDataSource, LMDBCache):
     """A vector file. Its CRS and bounds are cached (see geo_cache)."""
@@ -110,7 +111,7 @@ class Vector(GISDataSource, LMDBCache):
             "epsg_4326_bbox": epsg_4326_bbox,
         }
 
-    def to_geopandas(self, bbox_epsg_4326: list[float] = None, columns: list[str] = None) -> gpd.GeoDataFrame:
+    def to_geopandas(self, bbox_epsg_4326: list[float] | None = None, columns: list[str] | None = None) -> gpd.GeoDataFrame:
         """Read the file (shapefile, GeoPackage, GeoJSON, GeoParquet, ...), or the part in a bbox (EPSG:4326)."""
         if bbox_epsg_4326 is not None:
             # If bbox is provided, we need to make sure it's in the same CRS as the data. We can check the CRS of the data by reading just the metadata with pyogrio, and then reprojecting the bbox if necessary.
@@ -130,7 +131,7 @@ class Vector(GISDataSource, LMDBCache):
                     minx, miny, maxx, maxy = bbox_epsg_4326
                     gdf = gdf.cx[minx:maxx, miny:maxy]
                     return gdf
-                raise e
+                raise
             
         if self.filepath.suffix.lower() == ".gdb":
             # Specify the layer you want to access

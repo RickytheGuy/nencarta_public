@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from nencarta.core.enumerations import Mapper
 from nencarta.core.configs import NencartaConfig
+from nencarta.core.enumerations import Mapper
 
 # The folders a workspace writes to, which 'folder_paths' can move, and where they go by default
 WORKSPACE_FOLDERS = ('DEM', 'ARC_InputFiles', 'FloodMap', 'Bathymetry', 'DEM_Updated', 'STRM', 'LAND',
@@ -19,6 +19,7 @@ FILE_BLURBS = (
     'VDT_Database_Initial', 'VDT_Database_Bathy', 'AP_Database_Bathy', 'CurveFile_Initial',
     'CurveFile_Bathy', 'XS', 'Representative_XS',
     'water_mask', 'ARC_Bathy', 'FS_Bathy',
+    'Reanalysis_Boundary', 'ARC_Input_Boundary', 'VDT_Database_Boundary', 'ARC_Bathy_Boundary', 'outlet_wse',
     'ARC_Flood', 'ARC_Flood_Initial', 'ARC_FloodDepth', 'ARC_FloodWSE', 'ARC_FloodVEL',
     'Seed', 'FIST',
 )
@@ -146,6 +147,16 @@ class Workspace:
         self.bathy_water_mask = self.file_path(self.bathy_file_folder, 'water_mask', 'tif', 'source')
         self.ARC_BathyFile = self.file_path(self.bathy_file_folder, 'ARC_Bathy', 'tif', 'source')
         self.FS_BathyFile = self.file_path(self.bathy_file_folder, 'FS_Bathy', 'tif', 'source')
+
+        # outlet_exchange (see tasks/outlet_exchange.py): the folder the DEMs share, where pass1 writes this DEM's
+        # water for its neighbours; pass1's cut-down ARC run; and pass2's outlet water, gathered from the neighbours'
+        self.outlet_exchange_folder = Path(configs.outlet_exchange_dir) if configs.outlet_exchange_dir else             Path(configs.output_dir) / 'outlet_exchange'
+        self.boundary_wse_file = self.outlet_exchange_folder / f"{self.dem_name}_boundary_wse.parquet"
+        self.boundary_flow_file = self.file_path(self.FLOW_Folder, 'Reanalysis_Boundary', 'csv', 'source')
+        self.ARC_FileName_Boundary = self.file_path(self.ARC_Folder, 'ARC_Input_Boundary', self.config_end, 'source')
+        self.VDT_File_Boundary = self.file_path(self.VDT_Folder, 'VDT_Database_Boundary', 'parquet', 'source')
+        self.ARC_BathyFile_Boundary = self.file_path(self.bathy_file_folder, 'ARC_Bathy_Boundary', 'tif', 'source')
+        self.outlet_wse_file = self.file_path(self.ARC_Folder, 'outlet_wse', 'parquet', 'source')
 
         self.floodmap_id = configs.floodmap_id
 

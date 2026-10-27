@@ -6,14 +6,15 @@ from typing import Literal
 
 os.environ["AWS_NO_SIGN_REQUEST"] = "YES"  # for s3 access to ESA WorldCover data
 
-from osgeo import gdal
 import geopandas as gpd
+from osgeo import gdal
 from shapely.geometry import box
 
-from nencarta.logger import LOG
-from nencarta.core.raster import Raster
-from nencarta.workspace import Workspace
 from nencarta._constants import CACHED_ESA_GRID
+from nencarta.core.raster import Raster
+from nencarta.logger import LOG
+from nencarta.workspace import Workspace
+
 
 def _get_esa_tiles(bbox):
     """The names of the ESA WorldCover tiles overlapping ``bbox`` (EPSG:4326), e.g. 'N36W120'."""
@@ -26,7 +27,7 @@ def _get_esa_tiles(bbox):
                 grid.to_parquet(CACHED_ESA_GRID, write_covering_bbox=True)
                 return set(grid[grid.intersects(box(*bbox))]['ll_tile'])
 
-            raise e
+            raise
     
     url = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/esa_worldcover_grid.geojson"
     grid = _download_grid_with_retry(url)
@@ -45,7 +46,7 @@ def _download_grid_with_retry(url, max_retries=10, wait_seconds=10):
             attempt += 1
             LOG.warning(f"Attempt {attempt} failed: {e}")
             time.sleep(wait_seconds)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             attempt += 1
             LOG.warning(f"Unexpected error on attempt {attempt}: {e}")
             time.sleep(wait_seconds)
@@ -73,12 +74,14 @@ def make_land_cover(workspace: Workspace,
     version_by_year = {2020: "v100", 2021: "v200"}  # extend as needed for newer years
     if year not in version_by_year:
         raise ValueError(f"Year {year} not supported. Available: {list(version_by_year)}")
+    
     version = version_by_year[year]
 
     landcover_files: list[str] = []
     cached_files = {}
     if workspace.configs.land_cover_cache:
         cached_files = {Path(path).stem: path for path in workspace.configs.land_cover_cache}
+        
     # In a fixed order: the tiles are warped one after another, and where two meet, a cell takes the last one's
     for tile in sorted(tiles):
         if tile in cached_files:

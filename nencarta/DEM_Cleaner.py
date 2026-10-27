@@ -10,9 +10,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from osgeo import gdal
 from numba import njit
+from osgeo import gdal
+
 from nencarta.logger import LOG
+
 
 def convert_cell_size(dem_cell_size, dem_lower_left, dem_upper_right):
     """
@@ -124,9 +126,8 @@ def FindFlowRateForEachCOMID(FlowFileName, COMID_Unique, COMID_to_ID, MinCOMID, 
     num_unique = len(COMID_Unique)
     COMID_Unique_Flow = np.zeros(num_unique)
     LOG.info(f'Opening and Reading {FlowFileName}')
-    infile = open(FlowFileName,'r')
-    lines = infile.readlines()
-    infile.close()
+    with open(FlowFileName,'r') as infile:
+        lines = infile.readlines()
     
     num_lines = len(lines)
     for n in range(1,num_lines):
@@ -283,10 +284,8 @@ def FindStreamCharacteristics( E, B, COMID_to_ID, MinCOMID, RR, CC, num_comids):
         if V>0:
             i = COMID_to_ID[(V-MinCOMID)]
             
-            if Elev < E_Min[i]:
-                E_Min[i] = Elev 
-            if Elev > E_Max[i]:
-                E_Max[i] = Elev 
+            E_Min[i] = min(E_Min[i], Elev) 
+            E_Max[i] = max(E_Max[i], Elev) 
 
     return E_Min, E_Max
 
@@ -479,8 +478,7 @@ def FindPathToNextAnchor(r_start, c_start, ncols, ANCHOR, B, E, dx, dy, dz, num_
             C_List.append(c_next-1)
             RC.add(r_next*(ncols+2)+c_next)
             D_List.append(d)
-            if E[r_next][c_next] < E_Min:
-                E_Min = E[r_next][c_next]
+            E_Min = min(E_Min, E[r_next][c_next])
         if r_next>0 and ANCHOR[r,c]>0:
             E_End = E[r,c]
             r=-9999
@@ -511,8 +509,7 @@ def Adjust_Elevations_By_Perpendicular_Cells(Elevation, i, R_List, C_List, nrows
         
     if i<=(num_pnts*0.5):
         sd = num_pnts-i
-        if sd>searchdist:
-            sd = searchdist
+        sd = min(sd, searchdist)
         if sd>0:
             for s in range(i+1,i+sd):
                 #STat
@@ -561,8 +558,8 @@ def CreateWeightAndElipseMask(TW, dx, dy):
     for i in range(1,TW+1):
         TWDX = i*dx*i*dx
         TWDY = i*dy*i*dy
-        for r in range(0,i+1):
-            for c in range(0,i+1):
+        for r in range(i+1):
+            for c in range(i+1):
                 is_elipse = (c*dx*c*dx/(TWDX)) + (r*dy*r*dy/(TWDY))   #https://www.mathopenref.com/coordgeneralellipse.html
                 if is_elipse<=1.0:
                     ElipseMask[i,TW+r,TW+c] = 1.0
@@ -573,8 +570,8 @@ def CreateWeightAndElipseMask(TW, dx, dy):
     #LOG.info(ElipseMask[10,TW-14:TW+14+1,TW-14:TW+14+1].astype(int))
     #LOG.info(ElipseMask[40,TW-44:TW+44+1,TW-44:TW+44+1].astype(int))
     
-    for r in range(0,TW+1):
-        for c in range(0,TW+1):
+    for r in range(TW+1):
+        for c in range(TW+1):
             z = pow((c*dx*c*dx + r*dy*r*dy), 0.5)
             if z<0.0001:
                 z=0.001
@@ -605,16 +602,12 @@ def CreateFloodImpactMap(Flood, B, nrows, ncols, TW_m, dx, dy, COMID_to_ID, MinC
         #This is for the raster
         r_min = r_use-TW
         r_max = r_use+TW+1
-        if r_min<1:
-            r_min = 1 
-        if r_max>(nrows+1):
-            r_max=nrows+1
+        r_min = max(r_min, 1) 
+        r_max = min(r_max, nrows+1)
         c_min = c_use-TW
         c_max = c_use+TW+1
-        if c_min<1:
-            c_min = 1 
-        if c_max>(ncols+1):
-            c_max=ncols+1
+        c_min = max(c_min, 1) 
+        c_max = min(c_max, ncols+1)
         
         #This is for the elipse mask.
         #Here we use TW instead of COMID_TW.
@@ -641,8 +634,7 @@ def CreateFloodImpactMap(Flood, B, nrows, ncols, TW_m, dx, dy, COMID_to_ID, MinC
                 COMID_Value = int(COMID_V)
                 iii = COMID_to_ID[COMID_Value - MinCOMID]
                 COMID_TW_m = COMID_Unique_TW[iii]
-                if COMID_TW_m > TW_m:
-                    COMID_TW_m = TW_m
+                COMID_TW_m = min(COMID_TW_m, TW_m)
                 COMID_TW = round(max(COMID_TW_m/dx,COMID_TW_m/dy))  #This is how many cells we will be looking at surrounding our stream cell
                 if COMID_TW<=1:
                     COMID_TW=2
@@ -651,7 +643,8 @@ def CreateFloodImpactMap(Flood, B, nrows, ncols, TW_m, dx, dy, COMID_to_ID, MinC
                 #Note that the these now use COMID_TW, not TW
                 try:
                     Subset_Flood_Raster_Potential_Influence = B[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-                except:
+                except:  # noqa: E722, S112
+                    # I do not know why this sometimes fails. TODO
                     continue
                 
                 count_for_comid = np.count_nonzero(Subset_Flood_Raster_Potential_Influence == COMID_Value)
@@ -687,8 +680,7 @@ def MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, nc
         if COMID_Value > 0:
             iii = COMID_to_ID[COMID_Value - MinCOMID]
             COMID_TW_m = COMID_Unique_TW[iii]
-            if COMID_TW_m > TW_m:
-                COMID_TW_m = TW_m
+            COMID_TW_m = min(COMID_TW_m, TW_m)
             COMID_TW = int(max(round(COMID_TW_m/dx,0),round(COMID_TW_m/dy,0)))  #This is how many cells we will be looking at surrounding our stream cell
             if COMID_TW<=1:
                 COMID_TW=2
@@ -697,16 +689,12 @@ def MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, nc
             ELEV = float(Elev_Streams[ES_R[i],ES_C[i]])
             r_min = r_use-COMID_TW
             r_max = r_use+COMID_TW+1
-            if r_min<1:
-                r_min = 1 
-            if r_max>(nrows+1):
-                r_max=nrows+1
+            r_min = max(r_min, 1) 
+            r_max = min(r_max, nrows+1)
             c_min = c_use-COMID_TW
             c_max = c_use+COMID_TW+1
-            if c_min<1:
-                c_min = 1 
-            if c_max>(ncols+1):
-                c_max=ncols+1
+            c_min = max(c_min, 1) 
+            c_max = min(c_max, ncols+1)
             
             #This uses the weighting method from FloodSpreader to create a flood map
             #   Here we use TW instead of COMID_TW.  This is because we are trying to find the center of the weight raster, which was set based on TW (not COMID_TW).  COMID_TW mainly applies to the r_min, r_max, c_min, c_max
@@ -726,7 +714,8 @@ def MergeStreamElevationsWithDEM(E, B, FloodImpact, Elev_Streams, ES_R, ES_C, nc
             try:
                 Elev_Times_Weight[r_min:r_max,c_min:c_max] = Elev_Times_Weight[r_min:r_max,c_min:c_max] + ELEV * WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
                 Total_Weight[r_min:r_max,c_min:c_max] = Total_Weight[r_min:r_max,c_min:c_max] + WeightBox[w_r_min:w_r_max,w_c_min:w_c_max] * FloodBigImpact[r_min:r_max,c_min:c_max] * ElipseMask[COMID_TW, w_r_min:w_r_max,w_c_min:w_c_max]
-            except:
+            except:  # noqa: E722, S112
+                # Again, I do not know why this sometimes fails. TODO
                 continue
 
     Elev_divided_by_weight = np.where(Total_Weight != 0, Elev_Times_Weight / Total_Weight, 0.0).astype(np.float32)
@@ -744,9 +733,7 @@ def Last_Ditch_Effort_To_Smooth_Stream_Bumps(Elev_Streams, nrows, ncols, CON_r, 
         for r in range(CON_r[x]-1, CON_r[x]+2):
             for c in range(CON_c[x]-1, CON_c[x]+2):
                 if r>=0 and r<nrows and c>=0 and c<ncols and Elev_Streams[r,c]>0.0:
-                    if Elev_Streams[r,c] < Elev_Streams[CON_r[x],CON_c[x]]:
-                        Elev_Streams[CON_r[x],CON_c[x]] = Elev_Streams[r,c]
-    return
+                    Elev_Streams[CON_r[x],CON_c[x]] = min(Elev_Streams[CON_r[x],CON_c[x]], Elev_Streams[r,c])
 
 @njit(cache=True, nogil=True)
 def compute_stream_elevations(
@@ -773,7 +760,7 @@ def compute_stream_elevations(
     for i in range(num_anchors):
         Elev_Streams[A_R[i],A_C[i]] = DEM[A_R[i],A_C[i]]
         if A_RC[i]!=0:
-            (R_List, C_List, A1, A2, E_Start, E_End, E_Min_from_Path, D_List) = FindPathToNextAnchor(A_R[i]+1, A_C[i]+1, ncols, ANCHOR, B, E, dx, dy, dz, 9999)
+            (R_List, C_List, _, _, E_Start, E_End, E_Min_from_Path, D_List) = FindPathToNextAnchor(A_R[i]+1, A_C[i]+1, ncols, ANCHOR, B, E, dx, dy, dz, 9999)
             
             #Adjust the Start and Ending Elevations
             if search_dist_perp_cells>0:
@@ -783,7 +770,7 @@ def compute_stream_elevations(
             #Set the Low elevation anchor based on the Minimum elevation in the path
             if E_Start < E_End and E_Start>E_Min_from_Path:
                 E_Start = E_Min_from_Path
-            if E_Start > E_End and E_End>E_Min_from_Path:
+            if E_Start > E_End>E_Min_from_Path:
                 E_End = E_Min_from_Path
             
             if E_End >= 0:
@@ -830,7 +817,7 @@ def compute_stream_elevations(
                             for x_temp in range(x,i_end):
                                 E_Temp[x_temp] = E_Temp[x_temp-1] + slope_temp * D_List[x_temp]
 
-                    for x in range(0,num_steps-1):
+                    for x in range(num_steps-1):
                         Elev_Streams[R_List[x],C_List[x]] = E_Temp[x] 
 
     
@@ -865,15 +852,15 @@ def DEM_Cleaner_Program(OutputID,
 
         DEM_File = os.path.join(DEM_Folder, DEM_List[ddd])
         STRM_File_Clean = STRM_File_List[ddd]
-        (S, ncols, nrows, cellsize, yll, yur, xll, xur, lat, s_geotransform, s_projection) = Read_Raster_GDAL(STRM_File_Clean)
+        (S, ncols, nrows, cellsize, yll, yur, xll, _, _, _, _) = Read_Raster_GDAL(STRM_File_Clean)
         
         #Open DEM File
-        (DEM, ncols, nrows, cellsize, yll, yur, xll, xur, lat, dem_geotransform, dem_projection) = Read_Raster_GDAL(DEM_File)
+        (DEM, ncols, nrows, cellsize, yll, yur, xll, _, _, dem_geotransform, dem_projection) = Read_Raster_GDAL(DEM_File)
         E = np.zeros((nrows+2,ncols+2), dtype=np.float32)  #Create an array that is slightly larger than the STRM Raster Array
         E[1:(nrows+1), 1:(ncols+1)] = DEM
         
         #Get Cellsize Information
-        (dx, dy, dm) = convert_cell_size(cellsize, yll, yur)
+        (dx, dy, _) = convert_cell_size(cellsize, yll, yur)
         dz = pow(dx*dx+dy*dy,0.5)
         
         #Get list of Uniqe Stream IDs.  Also find where all the cell values are.
@@ -912,8 +899,7 @@ def DEM_Cleaner_Program(OutputID,
             if COMID_Unique_TW[x]>TopWidthPlausibleLimit:
                 LOG.info('Ignoring ' + str(COMID_Unique[x]) + '  ' + str(COMID_Unique_Flow[x])  + '  ' + str(COMID_Unique_Flow[x]*Q_Fraction) + '  ' + str(COMID_Unique_Depth[x]) + '  ' + str(COMID_Unique_TW[x]))             
         
-        if TopWidthPlausibleLimit < TopWidthMax:
-            TopWidthMax = TopWidthPlausibleLimit
+        TopWidthMax = min(TopWidthMax, TopWidthPlausibleLimit)
         
         #Create a Weight Box and an Elipse Mask that can be used for all of the cells
         X_cells = round(TopWidthMax/dx,0)
@@ -927,7 +913,7 @@ def DEM_Cleaner_Program(OutputID,
         if os.path.isfile(FloodMapName):
             LOG.info(f'Using Flood Map: {FloodMapName}')
             Flood = np.zeros((nrows+2,ncols+2))
-            (Flood[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(FloodMapName)
+            (Flood[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, _, _, _, dem_projection) = Read_Raster_GDAL(FloodMapName)
         else:
             LOG.info('YOU NEED TO CREATE AN INITIAL FLOOD MAP!!!')
             return
@@ -937,7 +923,7 @@ def DEM_Cleaner_Program(OutputID,
         if os.path.isfile(FloodImpact_File):
             LOG.info(f'Using Existing Flood Map: {FloodImpact_File}')
             FloodImpact = np.zeros((nrows+2,ncols+2))
-            (FloodImpact[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(FloodImpact_File)
+            (FloodImpact[1:nrows+1,1:ncols+1], ncols, nrows, cellsize, yll, yur, xll, _, _, _, dem_projection) = Read_Raster_GDAL(FloodImpact_File)
         else:
             LOG.info(f'Creating Flood Impact Map: {FloodImpact_File}')
             COMID_Unique_TW_Reduced = COMID_Unique_TW * 0.75
@@ -983,7 +969,7 @@ def DEM_Cleaner_Program(OutputID,
         ElevStreamsName = os.path.join(Working_Folder, f'Elev_Streams_{DEM_List[ddd]}')
         if os.path.isfile(ElevStreamsName):
             LOG.info(f'Using Existing Elevation-Streams File: {ElevStreamsName}')
-            (Elev_Streams, ncols, nrows, cellsize, yll, yur, xll, xur, lat, _, dem_projection) = Read_Raster_GDAL(ElevStreamsName)
+            (Elev_Streams, ncols, nrows, cellsize, yll, yur, xll, _, _, _, dem_projection) = Read_Raster_GDAL(ElevStreamsName)
         else:
             Elev_Streams = compute_stream_elevations(DEM, B, A_R, A_C, A_RC, num_anchors, nrows, ncols, search_dist_perp_cells, CON_r, CON_c, Flood, dx, dy, dz, ANCHOR, E)
             

@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from pyproj import CRS
 from osgeo import gdal, osr
+from pyproj import CRS
 from pyproj.aoi import AreaOfInterest
 from pyproj.database import query_utm_crs_info
 
-from nencarta.logger import LOG
 from nencarta.core.raster import Raster
+from nencarta.logger import LOG
 from nencarta.workspace import Workspace
 
 _WGS84 = osr.SpatialReference()
@@ -22,10 +22,10 @@ def _apply_buffer(bbox, distance):
     )
 
 def _build_options(bbox, vrt, src_proj, out_proj, xres=None, yres=None):
-    option_dict = dict(
-        resampleAlg="nearest",
-        outputBounds=bbox,
-    )
+    option_dict = {
+        "resampleAlg": "nearest",
+        "outputBounds": bbox,
+    }
 
     if xres is not None:
         option_dict["xRes"] = xres
@@ -55,7 +55,7 @@ def _validate_dem_coordinate_system(dem: Path):
     for raster_name, raster_projection in raster_projections.items():
         try:
             raster_crs = CRS.from_wkt(raster_projection)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001
             LOG.error(f'Unable to parse CRS for {raster_name} raster: {ex}')
             return False
 

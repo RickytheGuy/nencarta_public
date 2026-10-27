@@ -1,25 +1,24 @@
-# -*- coding: utf-8 -*-
 """
 Download forecast streamflow from GEOGLOWS or the National Water Model, and USGS DEMs where GEOGLOWS forecasts
 flooding.
 
 @author: mike, with a TON of help from Riley
 """
+import io
 import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
-import io
-import s3fs
-import requests
-import xarray as xr
 import pandas as pd
+import requests
+import s3fs
+import xarray as xr
 
-import nencarta.Download_USGS_DEM as Download_USGS_DEM
-from nencarta.logger import LOG
-from nencarta.core.enumerations import StreamflowSource
 from nencarta._constants import GEOGLOWS_FORECAST_PREFIX_URL
+from nencarta.core.enumerations import StreamflowSource
+from nencarta.download_usgs_dem import download_dem
+from nencarta.logger import LOG
 
 NWM_GOOGLE_STORAGE_URL = "https://storage.googleapis.com/national-water-model"
 
@@ -302,7 +301,7 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
                 raise ValueError("nwm_api_key is required for NWM forecast requests.")
 
             try:
-                for i in range(0, number_of_ensembles + 1):
+                for i in range(number_of_ensembles + 1):
 
                     header = {'x-api-key': nwm_api_key}
                     params = {'forecast_type': forecast_type,
@@ -357,7 +356,7 @@ def Process_and_Write_Forecast_Data(forecastdate, forecasthour, rivids, CSV_File
         if df_max.empty:
             raise ValueError("The primary forecast request returned no streamflow rows.")
 
-    except Exception as forecast_exc:
+    except Exception as forecast_exc:  # noqa: BLE001
         LOG.warning(
             "Primary %s streamflow access failed for forecastdate=%s forecasthour=%s. "
             "Attempting retrospective fallback. Error: %s",
@@ -411,10 +410,10 @@ def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_fo
         bad_url_list = []
 
     # Initialize S3 file system (anonymous access)
-    s3 = s3fs.S3FileSystem(anon=True, client_kwargs=dict(region_name=ODP_S3_BUCKET_REGION))
+    s3 = s3fs.S3FileSystem(anon=True, client_kwargs={'region_name': ODP_S3_BUCKET_REGION})
 
     # Start with today's date in UTC
-    current_date = datetime.utcnow()
+    current_date = datetime.now(tz=timezone.utc)
 
     # if forensic_forecast_date is provided, use it to set the current date
     if forensic_forecast_date is not None:
@@ -498,7 +497,7 @@ def Download_USGS_DEM_Data_Using_WarningFlag_Data(vpu, DEM_save_dir, forensic_fo
     for index, row in lat_lon_df.iterrows():
         lat = row['lat']
         lon = row['lon']
-        DEM_save_path, DEM_Filename, bad_url_list = Download_USGS_DEM.download_dem(lat, lon, bad_url_list, DEM_save_dir)
+        DEM_save_path, _, bad_url_list = download_dem(lat, lon, bad_url_list, DEM_save_dir)
         if DEM_save_path is not None:
             DEMs_with_flooding_forecast.append(DEM_save_path)
 

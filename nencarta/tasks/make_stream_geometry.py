@@ -1,24 +1,26 @@
 import json
 from pathlib import Path
 
-import pandas as pd
 import geopandas as gpd
+import pandas as pd
 
-from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
+from nencarta.logger import LOG
 from nencarta.workspace import Workspace
+
 
 def _filter_streams_with_lake_json(lake_filter_json: str, stream_df: gpd.GeoDataFrame, rivid_field: str) -> gpd.GeoDataFrame:
     """Drop the reaches the lake filter JSON lists as inside a lake: {"<lake>": {"inside": [<reach ID>, ...]}}."""
     with open(lake_filter_json, 'r') as f:
         lake_filter: dict[str, dict[str, list[int]]] = json.load(f)
         stream_ids_in_lake_list = []
-        for _k, v in lake_filter.items():
+        for v in lake_filter.values():
             inside = v.get("inside", [])
             for x in inside:
                 if x is not None:
                     stream_ids_in_lake_list.append(x)
+                    
     return stream_df[~stream_df[rivid_field].isin(stream_ids_in_lake_list)]
 
 def _filter_streams_by_stream_order(stream_df: gpd.GeoDataFrame, strm_order_field: str, strm_order_low: float | None, strm_order_high: float | None) -> gpd.GeoDataFrame:

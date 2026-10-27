@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 
 # third-party imports
-from PyQt5.QtCore import QObject, QSettings, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -37,9 +37,9 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -58,7 +58,6 @@ from nencarta.core.defaults import (
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 from nencarta.logger import LOG
 from nencarta.workspace import FILE_BLURBS, WORKSPACE_FOLDERS, Workspace
-
 
 settings = QSettings("NenCarta", "FloodSimulationGUI")
 
@@ -79,7 +78,7 @@ FLOODMAP_MODE_LABELS = {
 DEM_MODES = {"file": "A DEM file", "folder": "A folder of DEMs", "bbox": "Cut from source DEMs to a bounding box"}
 FLOWLINE_MODES = {"file": "One stream network file", "many": "Search several stream network files"}
 WATER_MASK_MODES = {"depth": "The streams flooded to set depths (ARC finds the banks without the water mask)",
-                    "water": "The water mask: the streams and the water along them (also ARC's banks)"}
+                    "water": "Water mask computed from the DEM (ARC finds the banks with the water mask)"}
 MANNINGS_MODES = {"default": "NenCarta's table, for ESA WorldCover", "file": "My own table"}
 
 SLOPE_METHODS = ("local_average_corrected", "local_average", "reach_average", "end_points", "local_fit")
@@ -147,6 +146,8 @@ UNDERLYING_NAMES = {
     "valley_sections": "Valley_Sections",
     "valley_dir_widths": "Valley_Dir_Widths",
     "valley_dir_dist": "Valley_Dir_Dist",
+    "drop_edge_sections": "Drop_Edge_Sections",
+    "edge_margin": "Edge_Margin",
     "bathy_args": "bathy_args",
     "make_curvefile": "Print_Curve_File",
     "create_reach_average_curve_file": "Reach_Average_Curve_File",
@@ -295,7 +296,7 @@ class QtLogHandler(logging.Handler):
     def emit(self, record):
         try:
             self.signal.emit(self.format(record))
-        except Exception:
+        except Exception:  # noqa: BLE001
             self.handleError(record)
 
 
@@ -336,7 +337,7 @@ class WorkerThread(QThread):
                 last = frames[-1]
                 location = f"{os.path.basename(last.filename)}:{last.lineno} in {last.name}()"
                 code_line = (last.line or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
         summary_parts = [context] if context else []
@@ -364,8 +365,8 @@ class WorkerThread(QThread):
             LOG.info("Running nencarta.process_watershed()")
             LOG.info(json.dumps(self.params, indent=2, default=str))
             process_watershed(dict(self.params))
-            self.finished_signal.emit(self.params["name"])
-        except Exception as e:
+            self.finished_signal.emit()
+        except Exception as e:  # noqa: BLE001
             summary, details = self._format_exception(e, context="Error running simulation")
             LOG.error(summary.replace("\n", " | "))
             self.error_signal.emit(summary + "\n\nDETAILS:\n" + details)
@@ -754,6 +755,7 @@ def _parse_scalar(value):
     value = str(value).strip()
     if value == "":
         return ""
+    
     lowered = value.lower()
     if lowered == "true":
         return True
@@ -761,14 +763,17 @@ def _parse_scalar(value):
         return False
     if lowered in {"none", "null"}:
         return None
+    
     try:
         return json.loads(value)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
+
     try:
         return int(value)
     except ValueError:
         pass
+
     try:
         return float(value)
     except ValueError:
@@ -785,18 +790,22 @@ def _setting_text(key, default="", multiline=False):
     value = settings.value(key, default)
     if value is None:
         return ""
+    
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except (TypeError, json.JSONDecodeError):
             return value
+        
         if isinstance(parsed, list):
             separator = "\n" if multiline else ", "
             return separator.join(str(item) for item in parsed)
         return str(parsed)
+    
     if isinstance(value, list):
         separator = "\n" if multiline else ", "
         return separator.join(str(item) for item in value)
+    
     return str(value)
 
 
@@ -804,6 +813,7 @@ def _setting_list(key, default=None):
     value = settings.value(key, default if default is not None else [])
     if value is None:
         return []
+    
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
@@ -812,6 +822,7 @@ def _setting_list(key, default=None):
         if isinstance(parsed, list):
             return parsed
         return [str(parsed)]
+    
     if isinstance(value, list):
         return value
     return [value]
@@ -842,6 +853,7 @@ def _split_paths(value):
     for line in str(value or "").splitlines():
         quoted = re.findall(r'"([^"]+)"', line)
         paths.extend(quoted or [line])
+
     return [strip_quotes(path) for path in paths if strip_quotes(path)]
 
 
@@ -857,20 +869,23 @@ def _parse_bbox(value):
     parts = _parse_float_list(value)
     if not parts:
         return None
+    
     if len(parts) != 4:
         raise ValueError("bbox must contain four values: minx, miny, maxx, maxy.")
+    
     return parts
 
 
 def _is_network_path(path_text):
     text = str(path_text or "").strip()
-    return text.startswith("\\\\") or text.startswith("//")
+    return text.startswith(("\\\\", "//"))
 
 
 def _local_dialog_dir(path_text):
     text = str(path_text or "").strip()
     if not text or _is_network_path(text):
         return None
+    
     try:
         path = Path(text).expanduser()
         if path.is_dir():
@@ -881,6 +896,7 @@ def _local_dialog_dir(path_text):
             return str(path.parent)
     except (OSError, RuntimeError, ValueError):
         return None
+    
     return None
 
 
@@ -893,12 +909,14 @@ def _dialog_start_dir(path_text=""):
         directory = _local_dialog_dir(candidate)
         if directory:
             return directory
+        
     return ""
 
 
 def _remember_dialog_dir(path_text):
     if not path_text or _is_network_path(path_text):
         return
+    
     try:
         path = Path(path_text).expanduser()
         directory = path if path.is_dir() else path.parent
@@ -912,6 +930,7 @@ def _dialog_options(*options):
     combined = QFileDialog.DontUseNativeDialog
     for option in options:
         combined |= option
+
     return combined
 
 
@@ -1227,7 +1246,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "use_warning_flags_to_download_dem",
                            "Download USGS DEMs into the folder where GEOGLOWS forecasts flooding (CONUS)",
                            _default("use_warning_flags_to_download_dem"))
-        self._add_combo(group, "geoglows_vpu", "GEOGLOWS VPU", ["", "704", "702", "703", "715", "714", "706", "713",
+        self._add_combo(group, "geoglows_vpu", "GEOGLOWS V2 VPU", ["", "704", "702", "703", "715", "714", "706", "713",
                                                                 "712", "709"], default="", editable=True)
         dem_mode = lambda: self.choices["dem_mode"].value()
         cut = lambda: dem_mode() == "bbox" or self._on("buffer")
@@ -1264,9 +1283,9 @@ class FloodSimulationGUI(QMainWindow):
 
         group = self._make_group(tab, "Flow")
         self._add_note(group, "flow_note", "")
-        self._add_combo(group, "specified_bathyflow_field", "Flow for the bathymetry", FLOW_FIELD_OPTIONS,
+        self._add_combo(group, "specified_bathyflow_field", "Flow for the bathymetry (m^3/s)", FLOW_FIELD_OPTIONS,
                         default=_default("specified_bathyflow_field"), editable=True)
-        self._add_combo(group, "specified_highflow_field", "Highest flow of the rating curves", FLOW_FIELD_OPTIONS,
+        self._add_combo(group, "specified_highflow_field", "Highest flow for the rating curves (m^3/s)", FLOW_FIELD_OPTIONS,
                         default=_default("specified_highflow_field"), editable=True)
         self._add_path(group, "reanalysis_file", "Flow statistics file", "", file_filter=csv_files)
         self._add_path(group, "return_period_file", "Return period flows file", "", file_filter=flow_datasets)
@@ -1316,11 +1335,11 @@ class FloodSimulationGUI(QMainWindow):
                            _default("minimize_output_files"))
         self._add_line(group, "new_strm_threshold_km2", "Smallest drainage area of the flow paths to move onto (km²)",
                        _default("new_strm_threshold_km2"), parser="float")
-        self._add_checkbox(group, "burn_streams", "Burn the streams into the DEM", _default("burn_streams"))
+        self._add_checkbox(group, "burn_streams", "Burn the streams into the DEM, ensuring each channel is properly represented", _default("burn_streams"))
         self._add_checkbox(group, "use_dem_derived_channel_mask",
                            "Find the channel the DEM shows: smooth the water it flattens, don't burn lines on it, "
                            "and add the channel to the water mask", _default("use_dem_derived_channel_mask"))
-        self._add_checkbox(group, "drop_multilinestrings", "Leave out reaches drawn in pieces",
+        self._add_checkbox(group, "drop_multilinestrings", "Leave out reaches drawn in pieces (multilinestrings)",
                            _default("drop_multilinestrings"))
         self._add_line(group, "q_baseflow_threshold", "Leave out reaches whose baseflow is below (m³/s)", "",
                        parser="float", placeholder="Optional")
@@ -1330,7 +1349,7 @@ class FloodSimulationGUI(QMainWindow):
         self._add_note(group, "area_note", "The drainage area is needed by the bathymetry's power laws and by "
                                            "redrawing misplaced streams. The m² field is used where the km² one is "
                                            "missing; otherwise both are optional.")
-        self._add_toggle(group, "filter_by_order", "Map only some stream orders",
+        self._add_toggle(group, "filter_by_order", "Process only some stream orders",
                          _saved_toggle("filter_by_order", bool(_setting_text("StrmOrder_Lower") or
                                                                _setting_text("StrmOrder_Upper"))))
         self._add_line(group, "StrmOrder_Lower", "Lowest stream order", "", parser="int")
@@ -1343,18 +1362,15 @@ class FloodSimulationGUI(QMainWindow):
                      "use_dem_derived_channel_mask", "StrmOrder_Lower", "StrmOrder_Upper")
 
         group = self._make_group(tab, "Lakes and Ocean")
-        self._add_note(group, "lakes_note", "Use one of these for lakes. With the Curve2Flood-FLDPLNpy mapper, prefer "
-                                            "the lake polygons.")
+        self._add_note(group, "lakes_note", "Use one of these for lakes. With the Curve2Flood-FLDPLNpy mapper, use the lake polygons.")
         self._add_path(group, "lake_filter_json", "Lake filter JSON", "", file_filter="JSON Files (*.json);;All Files (*)")
         self._add_path(group, "lakes", "Lake polygons", "", file_filter=vector_files)
         self._add_path(group, "ocean", "Ocean polygons, which the burned DEM has no data in", "",
                        file_filter=vector_files)
-        self._add_note(group, "ocean_note", "A DEM's cells at 0 m aren't taken for the sea. Polygons split into "
-                                            "tiles, in a GeoParquet with a bbox column, read fastest.")
-        self.show_when(lambda: self._on("burn_streams"), "ocean", "ocean_note")
+        self.show_when(lambda: self._on("burn_streams"), "ocean")
 
         group = self._make_group(tab, "Land Cover")
-        self._add_toggle(group, "use_land_cover_cache", "Use land cover tiles I have instead of downloading them",
+        self._add_toggle(group, "use_land_cover_cache", "Use land cover tiles instead of downloading them",
                          _saved_toggle("use_land_cover_cache", bool(_setting_list("land_cover_cache"))))
         self._add_multi_files(group, "land_cover_cache", "Land cover tiles", _default("land_cover_cache"),
                               "Raster Files (*.tif *.tiff *.vrt *.img);;All Files (*)")
@@ -1446,7 +1462,7 @@ class FloodSimulationGUI(QMainWindow):
         group = self._make_group(tab, "Advanced")
         self._add_checkbox(group, "standard_step", "Link the water surfaces along the stream network by the "
                                                    "standard step", _default("standard_step"))
-        self._add_checkbox(group, "valley_sections", "Take the overbanks' flow square to the valley",
+        self._add_checkbox(group, "valley_sections", "Use a seperate cross section orientation for overbank flow",
                            _default("valley_sections"))
         self._add_line(group, "valley_dir_widths", "Channel widths along the stream either way for the valley's "
                                                    "direction", _default("valley_dir_widths"), parser="float")
@@ -1454,6 +1470,22 @@ class FloodSimulationGUI(QMainWindow):
                        _default("valley_dir_dist"), minimum=2)
         self.show_when(lambda: self._on("valley_sections"), "valley_dir_widths", "valley_dir_dist")
         self._indent("valley_dir_widths", "valley_dir_dist")
+        self._add_checkbox(group, "drop_edge_sections", "Drop rating curves whose water reaches the DEM's edge",
+                           _default("drop_edge_sections"),
+                           tooltip="The edge cuts their cross sections off, so tiles whose buffers overlap give the "
+                                   "same cell different water, a seam where their maps meet.")
+        self._add_line(group, "edge_margin", "Distance from the edge that counts as reaching it (m)",
+                       _default("edge_margin"), parser="float")
+        self.show_when(lambda: self._on("drop_edge_sections"), "edge_margin")
+        self._indent("edge_margin")
+        self._add_combo(group, "outlet_exchange", "Start rivers leaving the DEM from the neighbouring DEMs' water",
+                        CONFIG_OPTIONS["outlet_exchange"].choices, default=_default("outlet_exchange"),
+                        tooltip="off maps as usual. pass1 rates only the reaches the neighbours need and writes their "
+                                "water; pass2, once every DEM has done pass1, maps each DEM from its neighbours' "
+                                "water. Needs buffer and the standard step.")
+        self._add_path(group, "outlet_exchange_dir", "Folder the DEMs' passes share", "", mode="directory")
+        self.show_when(lambda: self.input_fields["outlet_exchange"].currentText() != "off", "outlet_exchange_dir")
+        self._indent("outlet_exchange_dir")
         self._add_arg_table(group, "bathy_args", "More ARC arguments",
                             "Other ARC settings, by their names in ARC's input file, such as shallow_factor, "
                             "deep_factor, k_decay or slope_adjustment_factor.")
@@ -1492,7 +1524,7 @@ class FloodSimulationGUI(QMainWindow):
                            _default("fldpln_parallel"))
         self._add_line(group, "fldpln_min_depth", "Least depth a spill stops at (m)",
                        _default("fldpln_min_depth"), parser="float")
-        self._add_line(group, "fldpln_min_flood_depth", "Shallowest water that floods a cell (m)",
+        self._add_line(group, "fldpln_min_flood_depth", "Shallowest water that floods a cell in the flood map (m)",
                        _default("fldpln_min_flood_depth"), parser="float")
         self._add_line(group, "fldpln_max_depth", "Deepest flood the library covers (m)", _default("fldpln_max_depth"),
                        parser="float")
@@ -1647,13 +1679,16 @@ class FloodSimulationGUI(QMainWindow):
         for names, predicate in self.rules:
             try:
                 shown = predicate()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 shown = True
+
             if not shown:
                 hidden.update(names)
+
         for name, widgets in self.rows.items():
             for widget in widgets:
                 widget.setVisible(name not in hidden)
+                
         self.hidden = hidden
 
         self.input_fields["specify_depths_for_bathy_mask"].show_cleaner(self._on("clean_dem"))
@@ -1763,7 +1798,7 @@ class FloodSimulationGUI(QMainWindow):
                      workspace.bathy_water_mask, workspace.FS_BathyFile)
             lines = ["Folders:"] + [f"  {folder:<15} {workspace.folder_path(folder)}" for folder in WORKSPACE_FOLDERS]
             lines += ["", "Some of the files:"] + [f"  {path}" for path in files]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             lines = [f"The output paths can't be shown yet: {exc}"]
         self.names_preview.setPlainText("\n".join(lines))
 
@@ -1773,7 +1808,7 @@ class FloodSimulationGUI(QMainWindow):
             self.preview_text.setPlainText(json.dumps(params, indent=2, default=str))
             if write_log:
                 self.log_message("[INFO] Configuration preview updated.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.preview_text.setPlainText(f"Could not build configuration: {exc}")
             if write_log:
                 self.log_message(f"[WARNING] Could not build configuration preview: {exc}")
@@ -1787,7 +1822,7 @@ class FloodSimulationGUI(QMainWindow):
             for warning in warnings:
                 self.log_message(f"[WARNING] {warning}")
             self.log_message("[INFO] Configuration is valid.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.show_error(f"Parameter error: {exc}")
 
     def start_simulation(self):
@@ -1809,7 +1844,7 @@ class FloodSimulationGUI(QMainWindow):
                 self.log_text.append(f"[WARNING] {warning}")
             self.preview_text.setPlainText(json.dumps(params, indent=2, default=str))
             self.save_settings()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.show_error(f"Parameter error: {e}")
             return
 
@@ -1830,6 +1865,7 @@ class FloodSimulationGUI(QMainWindow):
             if bar is not None and (bar == "\r" or not _PROGRESS_COUNT.search(self._bar_text(bar))):
                 self._finished_bars.add(bar)  # a bar without a total, or a rewritten line, ends with its line
             return
+        
         rewritten = message.startswith("\r")
         text = _TERMINAL_ESCAPE.sub("", message.lstrip("\r")).rstrip()
         if not text:
@@ -1852,13 +1888,14 @@ class FloodSimulationGUI(QMainWindow):
             self._last_bar = bar
             if finished:
                 self._finished_bars.add(bar)
+
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def _bar_text(self, bar):
         block = self.log_text.document().findBlockByNumber(self._bars.get(bar, -1))
         return block.text() if block.isValid() else ""
 
-    def display_results(self, watershed_name: str):
+    def display_results(self):
         self.log_message("[COMPLETED] Simulation finished.")
         self.run_button.setEnabled(True)
         self.validate_button.setEnabled(True)

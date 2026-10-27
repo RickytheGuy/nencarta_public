@@ -1,16 +1,19 @@
 # build-in imports
+import argparse
 import json
 import sys
-import argparse
 from pathlib import Path
+
+from nencarta.core.configs import NencartaConfig
+from nencarta.core.defaults import CONFIG_OPTIONS, CONFIG_SECTIONS
+from nencarta.download_forecasts import (
+    Download_USGS_DEM_Data_Using_WarningFlag_Data,
+)
 
 # local imports
 from nencarta.logger import LOG
-from nencarta.workspace import Workspace, check_workspaces_do_not_share_folders
 from nencarta.pipeline import build_pipeline
-from nencarta.core.configs import NencartaConfig
-from nencarta.core.defaults import CONFIG_OPTIONS, CONFIG_SECTIONS
-from nencarta.Download_Process_ForecastData import Download_USGS_DEM_Data_Using_WarningFlag_Data
+from nencarta.workspace import Workspace, check_workspaces_do_not_share_folders
 
 
 def _resolve_workspace_dems(configs: NencartaConfig) -> list:
@@ -24,6 +27,7 @@ def _resolve_workspace_dems(configs: NencartaConfig) -> list:
                     configs.forensic_forecast_date,
                 )
             return []
+        
         return list(Path(configs.dem_dir).glob(configs.dem_filter))
 
     if configs.dem:
@@ -47,7 +51,25 @@ def _setup_workspace(input_dict: dict) -> list[Workspace]:
     return workspaces
 
 def process_watershed(input_dict: dict):
-    """Map one watershed, given as a config dictionary (see core/defaults.py for its keys)."""
+    """
+    Map one watershed: each of its DEMs, from the inputs to the flood maps.
+
+    The ``cli`` command runs this. Files that already exist are reused unless ``overwrite``, so running it again
+    only makes what is missing. A DEM that fails doesn't stop the others: their errors are printed at the end.
+
+    Parameters
+    ----------
+    input_dict : dict
+        The watershed's settings, by their keys in the configuration reference (`CONFIG_OPTIONS`). Paths may be
+        strings or ``Path`` objects, and a key left out or set to None takes its default.
+
+    Raises
+    ------
+    KeyError
+        When ``name``, ``output_dir``, a DEM or the streams are missing.
+    ValueError
+        When a setting is invalid, or two settings conflict.
+    """
     workspaces = _setup_workspace(input_dict)
     if not workspaces:
         return
@@ -55,7 +77,23 @@ def process_watershed(input_dict: dict):
     return
 
 def process_many_watersheds(input_dicts: list[dict]):
-    """Map several watersheds together. The first one's parallel and num_workers apply to all of them."""
+    """
+    Map several watersheds together, as `process_watershed` maps one.
+
+    Their DEMs run as one batch: the first watershed's ``parallel`` and ``num_workers`` apply to all of them.
+
+    Parameters
+    ----------
+    input_dicts : list of dict
+        Each watershed's settings, as `process_watershed` takes them.
+
+    Raises
+    ------
+    KeyError
+        When a watershed lacks ``name``, ``output_dir``, a DEM or the streams.
+    ValueError
+        When a setting is invalid, two settings conflict, or the watersheds' ``outlet_exchange`` differ.
+    """
     workspaces = []
     for input_dict in input_dicts:
         workspaces.extend(_setup_workspace(input_dict))
@@ -108,7 +146,11 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
     profile = workspaces[0].configs.profile and not workspaces[0].configs.parallel
     parallel = workspaces[0].configs.parallel
     num_workers = workspaces[0].configs.num_workers
-    pipeline = build_pipeline(profile)
+    passes = {workspace.configs.outlet_exchange for workspace in workspaces}
+    if len(passes) > 1:
+        raise ValueError(f"The watersheds run together must share outlet_exchange, not {sorted(passes)}.")
+    
+    pipeline = build_pipeline(profile, passes.pop())
     should_shutdown_executor = False
 
     if not parallel and num_workers is not None:
@@ -133,9 +175,9 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
 
         if profile:
             pipeline.print_profiling_stats()
-    except Exception as e:
+    except Exception:
         if not pipeline.error_snapshot:
-            raise e
+            raise
     finally:
         if should_shutdown_executor:
             executor.shutdown()
@@ -144,7 +186,6 @@ def run_pipeline(workspaces: list[Workspace], executor=None):
             _print_unencodable(pipeline.error_snapshot)
 
     LOG.info("Finished processing")
-    return
 
 
 def _apply_run_overrides(watersheds, parallel=None, num_workers=None):
@@ -161,8 +202,24 @@ def _apply_run_overrides(watersheds, parallel=None, num_workers=None):
 
 def process_json_input(json_file, parallel=None, num_workers=None):
     """
-    Map the watersheds in a JSON file, ``{"watersheds": [{...}, ...]}``. A top-level "parallel" or "num_workers"
-    applies to every watershed, and the arguments, when given, override both.
+    Map the watersheds of a JSON file together, as the ``json`` command does.
+
+    Parameters
+    ----------
+    json_file : str or os.PathLike
+        A JSON file of the form ``{"watersheds": [{...}, ...]}``, each watershed's settings as `process_watershed`
+        takes them. A top-level ``"parallel"`` or ``"num_workers"`` applies to every watershed.
+    parallel : bool, optional
+        Whether to map the DEMs in parallel, overriding the file's ``parallel``.
+    num_workers : int, optional
+        Number of processes when parallel, overriding the file's ``num_workers``.
+
+    Raises
+    ------
+    KeyError
+        When a watershed lacks ``name``, ``output_dir``, a DEM or the streams.
+    ValueError
+        When a setting is invalid, two settings conflict, or the watersheds' ``outlet_exchange`` differ.
     """
     with open(json_file, 'r') as file:
         LOG.info(f"Reading input file: {json_file}")
@@ -186,6 +243,7 @@ def _json_object(text: str) -> dict:
         raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError("must be a JSON object, e.g. '{\"key\": 1}'")
+    
     return value
 
 

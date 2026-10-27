@@ -6,8 +6,8 @@ from pathlib import Path
 
 from osgeo import gdal
 
-from nencarta.logger import LOG
 from nencarta.core.floodmapper_output import FloodMapperBulkOutput
+from nencarta.logger import LOG
 from nencarta.workspace import Workspace
 
 gdal.UseExceptions()
@@ -43,7 +43,6 @@ def _Create_Go_Consequence_GeoJSON(Consequences_JSON_Path, Container_Hazard_Path
     with open(Consequences_JSON_Path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
 
-    return
 
 def _hazard_raster(depth_file: Path) -> Path:
     """
@@ -54,8 +53,8 @@ def _hazard_raster(depth_file: Path) -> Path:
     hazard_file = depth_file.with_name(f"{depth_file.stem}_WGS84_ft{depth_file.suffix}")
     LOG.info(f"Converting depth raster to WGS84 and feet: {depth_file} -> {hazard_file}")
     warp_options = gdal.WarpOptions(format="MEM", dstSRS="EPSG:4326", resampleAlg=gdal.GRA_Bilinear)
-    ds = gdal.Warp("", str(depth_file), options=warp_options)
-    band = ds.GetRasterBand(1)
+    ds: gdal.Dataset = gdal.Warp("", str(depth_file), options=warp_options)
+    band: gdal.Band = ds.GetRasterBand(1)
     depth = band.ReadAsArray()
     nodata = band.GetNoDataValue()
     wet = slice(None) if nodata is None else depth != nodata
@@ -122,9 +121,10 @@ def _all_written(results: Path, stdout: str) -> bool:
     written = re.search(r"Closing, wrote (\d+) features", stdout)
     if written is None or not results.exists():
         return False
+    
     try:
-        ds = gdal.OpenEx(str(results), gdal.OF_VECTOR)
-        layer = ds.GetLayerByName("results")
+        ds: gdal.Dataset = gdal.OpenEx(str(results), gdal.OF_VECTOR)
+        layer: gdal.Layer = ds.GetLayerByName("results")
         return layer is not None and layer.GetFeatureCount() == int(written[1])
     except RuntimeError:
         return False
@@ -134,12 +134,13 @@ def run_consequences(floodmapper_bulk_output: FloodMapperBulkOutput, workspace: 
     if workspace.configs.estimate_consequences and shutil.which("docker") is None:
         LOG.error("Can't estimate flood damage: Docker isn't installed or isn't on the PATH (see the installation docs).")
         return
+    
     consequences_tasks = _get_consequences_tasks(floodmapper_bulk_output, workspace)
     for docker_command, results in consequences_tasks:
         # So that an earlier run's results can't pass for this one's
         results.unlink(missing_ok=True)
         LOG.info(f"Running consequences estimation with command: {' '.join(docker_command)}")
-        result = subprocess.run(docker_command, capture_output=True, text=True)
+        result = subprocess.run(docker_command, capture_output=True, text=True, check=False)
         if _NSI_FAILED.search(result.stdout):
             LOG.error(f"Go-Consequences couldn't get the structures from the NSI API, so {results} is missing some "
                       f"or all of them: {result.stdout}")

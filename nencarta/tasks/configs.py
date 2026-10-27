@@ -5,11 +5,16 @@ import pyarrow.parquet as pq
 import pyogrio
 import yaml
 
+from nencarta.core.configs import NencartaConfig
+from nencarta.core.defaults import (
+    DEFAULT_BATHY_ARGS,
+    DEFAULT_CONFIG,
+    DEFAULT_FLOODMAP_ARGS,
+)
+from nencarta.core.enumerations import FloodMapMode, Mapper
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.core.configs import NencartaConfig
-from nencarta.core.defaults import DEFAULT_BATHY_ARGS, DEFAULT_CONFIG, DEFAULT_FLOODMAP_ARGS
-from nencarta.core.enumerations import FloodMapMode, Mapper
+
 
 def _arc_inputs(dem: Path,
                 stream_raster: Path,
@@ -50,7 +55,7 @@ def _vector_columns(path: Path) -> set[str] | None:
         if path.suffix.lower() == ".parquet":
             return set(pq.read_schema(path).names)
         return set(pyogrio.read_info(path)["fields"])
-    except Exception:  # not a stream file yet, such as an empty placeholder: as if it weren't there
+    except Exception:  # not a stream file yet, such as an empty placeholder: as if it weren't there  # noqa: BLE001
         return None
 
 
@@ -63,14 +68,20 @@ def _valley_sections(configs) -> dict:
             "Valley_Dir_Dist": int(configs.valley_dir_dist)}
 
 
+def _edge_sections(configs) -> dict:
+    """ARC's Drop_Edge_Sections and its Edge_Margin, when drop_edge_sections is on: no rating curve whose water, at its
+    top flow, reaches the DEM's edge, which cuts its cross section off and makes overlapping tiles disagree."""
+    if not configs.drop_edge_sections:
+        return {}
+    return {"Drop_Edge_Sections": True, "Edge_Margin": float(configs.edge_margin)}
+
+
 def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> dict:
     """
     ARC's drainage-area power laws, from the area in km2: always the width's, and the depth's too with
     use_power_laws_for_bathymetry. ARC sizes with the width's the channels whose banks the water mask, the land cover
     and the DEM don't show: a single cell as wide as the law says, where that's narrower than a cell. Without it, on a
-    flat valley floor, ARC found banks at a few of a creek's cross sections, hundreds of metres to kilometres apart,
-    and carved the rest of the reach as wide as their median (262 m for a creek of 15 m3/s in Salt Lake City,
-    N40W112); with it, the creek is a single cell along most of its reach, and so its median width is too.
+    flat valley floor, ARC found banks at a few of a creek's cross sections, hundreds of metres to kilometres apart.
 
     The area is area_km2_field's, which nencarta adds to the stream lines (tasks.make_stream_geometry). A stream file
     made before it did has only area_m2_field: the coefficients are then scaled to take m2, which gives the same
@@ -85,16 +96,19 @@ def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> d
             LOG.warning(f"The stream lines {stream_vector} have no drainage area ({configs.area_km2_field} or "
                         f"{configs.area_m2_field}), so ARC gets no width power law.")
             return {}
+        
     exponent_width = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
     params = {"drainage_area_field": field,
               "coefficient_width": (configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"])
               * scale ** exponent_width,
               "exponent_width": exponent_width}
+    
     if configs.use_power_laws_for_bathymetry:
         exponent_depth = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
         params["coefficient_depth"] = (configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]) \
             * scale ** exponent_depth
         params["exponent_depth"] = exponent_depth
+
     return params
 
 
@@ -159,6 +173,7 @@ def forecast_postfix(configs: NencartaConfig, date: str, hour: str | None) -> st
     """The end of the flood map names of the forecast issued on ``date`` (and at ``hour``, for NWM)."""
     if configs.streamflow_source.is_nwm():
         return f"_{configs.streamflow_source.file_prefix}_ARC_Flood{configs.floodmap_id}Forecast_{date}_{hour}"
+    
     return f"Forecast_{date}"
 
 def flood_map_paths(workspace: Workspace, postfix: str) -> dict[str, Path]:
@@ -216,7 +231,9 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
     params["downstream_reach_id"] = configs.downstream_id_field
     if configs.standard_step:
         params["Standard_Step"] = True
+        
     params.update(_valley_sections(configs))
+    params.update(_edge_sections(configs))
     params.update(_drainage_area_power_laws(configs, streamlines))
 
     params["#VDT_Output_File_and_CurveFile"] = ""
@@ -303,6 +320,10 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
     params.update(_valley_sections(configs))
+    params.update(_edge_sections(configs))
+    if configs.outlet_exchange == "pass2" and workspace.outlet_wse_file.exists():
+        # The neighbouring DEMs' water where the rivers leave this one, to start them from (tasks/outlet_exchange.py)
+        params["Outlet_WSE_File"] = workspace.outlet_wse_file
 
     if not configs.disable_bathymetry:
         params["reach_id"] = configs.stream_id_field
@@ -365,6 +386,7 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params["DEM_File"] = workspace.model_dem if configs.disable_bathymetry else workspace.FS_BathyFile
     if not curve2flood:
         params["Stream_File"] = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
+        
     if not curve2flood or configs.make_velocity_maps:
         params["LU_Manning_n"] = workspace.mannings_n_text_file
 

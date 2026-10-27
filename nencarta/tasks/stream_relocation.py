@@ -29,17 +29,26 @@ import heapq
 import warnings
 from dataclasses import dataclass
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import shapely
 from numba import njit
 from scipy.spatial import cKDTree
 
 from nencarta.logger import LOG
-from nencarta.tasks.channel_detection import ChannelSettings, river_channel, within_distance
-from nencarta.tasks.stream_conflation import (FlowNetwork, SourceNetwork, prepare_source_network, _sample_lines,
-                                              _inflow_cells)
+from nencarta.tasks.channel_detection import (
+    ChannelSettings,
+    river_channel,
+    within_distance,
+)
+from nencarta.tasks.stream_conflation import (
+    FlowNetwork,
+    SourceNetwork,
+    _inflow_cells,
+    _sample_lines,
+    prepare_source_network,
+)
 
 
 @dataclass
@@ -122,16 +131,16 @@ def relocate_misplaced_reaches(
     settings = settings or RelocationSettings()
     if source_gdf.empty:
         return source_gdf
+    
     relocation = _Relocation(source_gdf, flowdir, filled, dem, geotransform, projection, id_col, ds_col, area_col,
                              valid_mask, settings)
     relocation.run()
-    LOG.info(f"Relocation: {len(relocation.paths)} of {len(source_gdf)} reaches moved onto the D8 paths their lines "
-             f"drain along; kept where they were: {relocation.off_channel} whose paths the DEM shows no more channel "
-             f"along than their lines, {relocation.shortcut} whose paths cut their meanders, {relocation.stranded} "
-             f"whose paths are neither their river nor drain on to the next reach; {len(relocation.trails)} moved "
-             f"reaches keep their lines below and {len(relocation.leads)} above where their paths don't reach the "
-             f"reaches they join, {relocation.past_junction} of the former where their paths ran on past the next "
-             f"reach's start")
+    LOG.info(f"{len(relocation.paths)} of {len(source_gdf)} reaches moved onto the D8 paths their lines drain along.")
+    LOG.info(f"Kept where they were: {relocation.off_channel} whose paths the DEM shows no more channel along than their lines.")
+    LOG.info(f"{relocation.shortcut} whose paths cut their meanders.")
+    LOG.info(f"{relocation.stranded} whose paths are neither their river nor drain on to the next reach.")
+    LOG.info(f"{len(relocation.trails)} moved reaches keep their lines below and {len(relocation.leads)} above where their paths don't reach the reaches they join.")
+    LOG.info(f"{relocation.past_junction} of the former where their paths ran on past the next reach's start.")
     return relocation.result()
 
 
@@ -247,6 +256,7 @@ class _Relocation:
             inside = self._on_dem(h)
             if inside.sum() < 2:
                 continue
+
             on = np.flatnonzero(inside)
             if on[0] > 0 or on[-1] < len(h) - 1:  # its stretches off the DEM are kept as they are
                 self.off_dem[x] = (h[:on[0]], h[on[-1] + 1:])
@@ -274,6 +284,7 @@ class _Relocation:
         upstream = [[] for _ in range(source.ids.size)]
         for r in np.flatnonzero(source.ds >= 0):
             upstream[source.ds[r]].append(r)
+
         main = [max(ups, key=lambda u: source.area[u]) if ups else -1 for ups in upstream]
         def onto(x: int, d: int, end: int, river: bool = False) -> np.ndarray | None:
             """The D8 path from ``end`` onto reach d's line, or with ``river`` onto wherever its river may be: its
@@ -284,6 +295,7 @@ class _Relocation:
                 target |= set(self._cells_of(y).tolist())
                 if river and y in voted:
                     target |= set(voted[y].tolist())
+
             return _down_to(end, self.flow.down, target, int(3 * self._radius(x) / self.R) + 10)
 
         # A moved reach's path has to be its river and lead on down it: draining at least what the reach does over
@@ -309,10 +321,12 @@ class _Relocation:
                     drains_on = (river and near_end) or onto(x, d, int(self.paths[x][-1]), river=True) is not None
                 else:
                     drains_on = river or near_end
+
                 if not drains_on:
                     del self.paths[x]
                     self.stranded += 1
                     changed = True
+
         # The reaches below first, so that a reach is carried onto where the next one is carried; a path that runs on
         # past the next reach's start ends near it instead, and keeps its line below there (see _to_junction)
         depth = self._depths()
@@ -322,12 +336,14 @@ class _Relocation:
             d = int(source.ds[x])
             if d < 0:
                 continue
+
             down = onto(x, d, int(self.paths[x][-1]))
             path = self.paths[x] if down is None else np.concatenate((self.paths[x], down))
             self.paths[x], joins, past = self._to_junction(d, path, down is not None)
             self.past_junction += past
             if joins:
                 joined.add(x)
+
         # Then a kept line whose downstream reach moved is carried onto its new line. Moved reaches not carried on, and
         # kept ones that can't be, end off the reach they flow into
         self.tails = {}
@@ -336,19 +352,24 @@ class _Relocation:
             d = int(source.ds[x])
             if d < 0 or (x in self.paths and (x in joined or len(self.off_dem.get(x, ((), ()))[1]))):
                 continue
+
             if x in self.paths:
                 stranded_ends.add(x)
                 continue
+
             if d not in self.paths:
                 continue
+
             h = self._densified(self._metric(source.geometry[x]))
             if len(h) < 2 or not self._on_dem(h[-1:])[0]:
                 continue
+
             down = onto(x, d, int(self._cells(h[-1:])[0]))
             if down is None:
                 stranded_ends.add(x)
             elif down.size:
                 self.tails[x] = np.vstack((h, self._centres(down)))
+
         # Where neither reaches the other, the moved reaches keep their lines (see _keeping_lines)
         self._keeping_lines(stranded_ends)
 
@@ -367,6 +388,7 @@ class _Relocation:
                 end = self._centres(self.paths[x][-1:])[0]
                 k = int(np.argmin(np.hypot(*(h - end).T)))
                 self.trails[x] = np.vstack((self._densified(np.vstack((end, h[k])))[1:-1], h[k:]))
+
             d = int(source.ds[x])
             if d in self.paths and d not in self.leads and not len(self.off_dem.get(d, ((), ()))[0]):
                 h = self._line(d)
@@ -384,16 +406,20 @@ class _Relocation:
         line = self._cells_of(d)
         if line.size == 0:
             return path, reached, False
+        
         on_line = np.flatnonzero(np.isin(path, line))
         if on_line.size:
             path, reached = path[:max(int(on_line[0]), 1) + 1], True
+
         if reached and d in self.paths:
             return path, True, False  # two flow paths meet where they join
+        
         gap = np.hypot(*(self._centres(path) - self._centres(line[:1])[0]).T)
         near = max(self.settings.junction_m, 1.5 * self.R)
         nearest = max(int(np.argmin(gap)), 1)
         if (reached and gap[-1] <= near) or gap.min() > near or nearest == path.size - 1:
             return path, reached, False
+        
         return path[:nearest + 1], False, True
 
     def _depths(self) -> np.ndarray:
@@ -405,9 +431,11 @@ class _Relocation:
             while x >= 0 and depth[x] < 0 and len(chain) <= ds.size:
                 chain.append(x)
                 x = int(ds[x])
+
             below = depth[x] if x >= 0 else -1
             for k, y in enumerate(reversed(chain)):
                 depth[y] = below + 1 + k
+
         return depth
 
     def _path(self, h: np.ndarray, inside: np.ndarray, radius: float, max_area: float,
@@ -433,6 +461,7 @@ class _Relocation:
                int(2 * len(h) + 4 * radius / self.R), votes)
         if votes.max() == 0:
             return None
+        
         top = np.flatnonzero(votes >= self.settings.plateau * votes.max())
         rows, cols = np.divmod(top, wnc)
         last = h[np.flatnonzero(inside)[-1]]
@@ -449,13 +478,16 @@ class _Relocation:
                                                         (wr + r0 + 0.5) * self.dy - first[1]) <= radius)
             if near.any():
                 low_area = min(low_area, float(area[near.ravel()].max()) / self.settings.area_factor)
+
             reaching = np.flatnonzero(area[path] >= low_area)
             if reaching.size:
                 path = path[reaching[0]:]
+
         rows, cols = np.divmod(path, wnc)
         cells = (rows + r0) * self.ncols + (cols + c0)
         if low_area > 0:
             cells = self._carried_up(cells, h[np.flatnonzero(inside)[0]], low_area)
+
         return cells
 
     def _carried_up(self, cells: np.ndarray, start: np.ndarray, low_area: float) -> np.ndarray:
@@ -474,14 +506,18 @@ class _Relocation:
                         u = r * self.ncols + c
                         if self.flow.down[u] == head and F[u] >= most and u not in seen:
                             best, most = u, F[u]
+
             if best < 0:
                 break
+
             gap = np.hypot(*(self._centres(np.array([best]))[0] - start))
             if gap >= nearest:
                 break
+
             nearest, head = gap, best
             extra.append(best)
             seen.add(best)
+
         return np.concatenate((np.asarray(extra[::-1], np.int64), cells)) if extra else cells
 
     def _channel_cells(self) -> np.ndarray:
@@ -494,11 +530,13 @@ class _Relocation:
         lines = np.zeros(raw.size, np.int32)
         for x in range(self.source.ids.size):
             lines[self._cells(self._line(x))] = x + 1
+
         areas = {x + 1: float(self.source.area[x]) for x in range(self.source.ids.size)}
         water = river_channel(raw, valid, lines.reshape(raw.shape), areas, self.dx, self.dy,
                               ChannelSettings(corridor_m=s.max_search_radius_m, flat_widths=None), connected=False,
                               channel=False, double=True).flat_water
         del lines
+
         return (water | _incised(raw, self.Z, valid, s.channel_reach_cells, s.channel_depth_m)).ravel()
 
     def _follows_a_bend(self, x: int, line_cells: np.ndarray, channel: np.ndarray) -> bool:
@@ -507,12 +545,14 @@ class _Relocation:
         s = self.settings
         if s.bend_channel_gain is None or len(line_cells) == 0 or self._length_ratio(x) < s.bend_length_ratio:
             return False
+        
         path_cells = np.unique(self.paths[x])
         line_xy, path_xy = self._centres(line_cells), self._centres(path_cells)
         line_off = line_cells[cKDTree(path_xy).query(line_xy)[0] > 1.5 * self.R]
         path_off = path_cells[cKDTree(line_xy).query(path_xy)[0] > 1.5 * self.R]
         if len(line_off) < 5 or len(path_off) < 5:
             return False
+        
         return channel[path_off].mean() >= channel[line_off].mean() + s.bend_channel_gain
 
     def _length_ratio(self, x: int) -> float:
@@ -521,11 +561,13 @@ class _Relocation:
         h = self._line(x)
         if len(h) < 2:
             return np.inf
+        
         line = shapely.LineString(h)
         centres = self._centres(self.paths[x])
         stretch = abs(line.project(shapely.Point(centres[-1])) - line.project(shapely.Point(centres[0])))
         if stretch < 3 * self.R:
             return np.inf
+        
         return float(np.hypot(*np.diff(centres, axis=0).T).sum()) / stretch
 
     def _line_above(self, x: int) -> float:
@@ -534,6 +576,7 @@ class _Relocation:
         h = self._line(x)
         if len(h) == 0:
             return 0.0
+        
         raw = self.raw.ravel()
         nearest = cKDTree(self._centres(self.paths[x])).query(h)[1]
         above = raw[self._cells(h)].astype(np.float64) - raw[self.paths[x][nearest]]
@@ -552,6 +595,7 @@ class _Relocation:
             x = position.get(int(rid)) if np.isfinite(rid) else None
             if x is None or (x not in self.paths and x not in self.tails):
                 continue
+
             if x in self.tails:  # kept, and carried onto the moved reach it flows into
                 points = self.tails[x]
             else:
@@ -560,6 +604,7 @@ class _Relocation:
                 if x in self.off_dem:
                     above, below = self.off_dem[x]
                     points = np.vstack((above, points, below))
+
             xy = self._to_map(points)
             # Drawn as the source draws it: downstream end first where the source's first vertex is nearer the end its
             # line runs down to (see prepare_source_network). Not judged from the new line's ends: a path can end
@@ -568,7 +613,9 @@ class _Relocation:
             ends = shapely.get_coordinates(self.source.geometry[x])[[0, -1]]
             if np.hypot(*(first - ends[1])) < np.hypot(*(first - ends[0])):
                 xy = xy[::-1]
+
             geometry[row] = shapely.LineString(xy)
+
         out[out.geometry.name] = geometry
         return out
 
@@ -586,16 +633,20 @@ def _incised(raw: np.ndarray, filled: np.ndarray, valid: np.ndarray, k: int, dep
         for c in range(ncols):
             if not valid[r, c] or filled[r, c] - raw[r, c] > 0.05:
                 continue
+
             for d_row, d_col in ((0, 1), (1, 0), (1, 1), (1, -1)):
                 ahead, behind = np.inf, np.inf
                 r1, c1, r2, c2 = r + d_row * k, c + d_col * k, r - d_row * k, c - d_col * k
                 if 0 <= r1 < nrows and 0 <= c1 < ncols and valid[r1, c1]:
                     ahead = raw[r1, c1]
+
                 if 0 <= r2 < nrows and 0 <= c2 < ncols and valid[r2, c2]:
                     behind = raw[r2, c2]
+
                 if raw[r, c] <= min(ahead, behind) - depth:
                     out[r, c] = True
                     break
+
     return out
 
 
@@ -610,12 +661,15 @@ def _votes(starts, down, ncols, r0, c0, wnr, wnc, corridor, area, max_area, max_
             wr, wc = row - r0, cell - row * ncols - c0
             if wr < 0 or wr >= wnr or wc < 0 or wc >= wnc:
                 break
+
             w = wr * wnc + wc
             if not corridor[w] or area[w] > max_area:
                 break
+            
             votes[w] += 1
             if down[cell] < 0:
                 break
+
             cell = down[cell]
 
 
@@ -637,14 +691,19 @@ def _trunk(start, down, ncols, r0, c0, wnr, wnc, votes, area):
                 r, c = wr + d_row, wc + d_col
                 if (d_row == 0 and d_col == 0) or r < 0 or r >= wnr or c < 0 or c >= wnc:
                     continue
+
                 u = r * wnc + c
                 if down[(r + r0) * ncols + (c + c0)] != cell or votes[u] == 0:
                     continue
+
                 if votes[u] > best_votes or (votes[u] == best_votes and area[u] > best_area):
                     best, best_votes, best_area = u, votes[u], area[u]
+
         if best < 0:
             break
+
         w = best
+
     return path[:n][::-1].copy()
 
 
@@ -655,10 +714,13 @@ def _down_to(cell: int, down: np.ndarray, target: set, max_steps: int) -> np.nda
     for _ in range(max_steps):
         if cell in target:
             return np.asarray(path, np.int64)
+        
         cell = int(down[cell])
         if cell < 0:
             break
+
         path.append(cell)
+
     return None
 
 
@@ -688,6 +750,7 @@ def breach_dammed_rivers(
     settings = settings or RelocationSettings()
     if source_gdf.empty:
         return None, []
+    
     z = np.asarray(dem, np.float64)
     valid = np.isfinite(z) if valid_mask is None else np.asarray(valid_mask, np.bool_) & np.isfinite(z)
     # No flow paths yet: the lines are turned to run downstream by the network alone, or by their heights
@@ -695,6 +758,7 @@ def breach_dammed_rivers(
     source = prepare_source_network(source_gdf, id_col, ds_col, None, None, flow)
     if source.ids.size == 0:
         return None, []
+    
     s_rows, s_cols, _, offsets, cell_of_sample, inside = _sample_lines(source.geometry, flow, flow.cell_size_m)
     z = z.ravel()
     in_domain = inside & flow.valid.ravel()[cell_of_sample]
@@ -702,11 +766,12 @@ def breach_dammed_rivers(
     s_rows, s_cols, cell_of_sample, in_domain = s_rows[order], s_cols[order], cell_of_sample[order], in_domain[order]
     heights = np.where(in_domain, z[cell_of_sample], np.nan)
 
-    reach, low, end_reach, end, rise = _rises_and_falls(heights, cell_of_sample, offsets, source.ds, in_domain,
+    reach, low, end_reach, end, _ = _rises_and_falls(heights, cell_of_sample, offsets, source.ds, in_domain,
                                                         settings.max_dam_reaches, settings.dam_height_m,
                                                         settings.dam_end_step_m)
     if reach.size == 0:
         return None, []
+    
     ground = np.where(flow.valid.ravel(), z, np.inf)
     seen = np.zeros(z.size, np.bool_)
     dx_m = float(np.median(flow.dx_m))
@@ -717,13 +782,16 @@ def breach_dammed_rivers(
         if _pass_height(ground, flow.nrows, flow.ncols, start, goal, heights[a] + settings.dam_height_m,
                         seen) < heights[a] + settings.dam_height_m:
             continue  # a lower way round
+
         samples, y = [], r
         while True:
             samples.append(np.arange(a, b + 1 if y == x else offsets[y + 1]))
             if y == x:
                 break
+
             y = int(source.ds[y])
             a = int(offsets[y])
+
         samples = np.concatenate(samples)
         along = np.concatenate(([0.0], np.cumsum(np.hypot(np.diff(s_rows[samples]) * flow.dy_m,
                                                           np.diff(s_cols[samples]) * dx_m))))
@@ -731,13 +799,17 @@ def breach_dammed_rivers(
         at = {}
         for cell, height in zip(cell_of_sample[samples].tolist(), level.tolist()):
             at[cell] = min(at.get(cell, np.inf), height)
+
         below = np.inf
         for cell in reversed(_eight_connected(cell_of_sample[samples].tolist(), flow.ncols)):
             below = at.get(cell, below)  # a cell filled in between two takes the lower one's level
             levels[cell] = min(levels.get(cell, np.inf), below)
+
         burned.add(int(source.ids[r]))
+
     if not levels:
         return None, []
+    
     out = np.array(dem, copy=True)
     cells = np.fromiter(levels, np.int64, len(levels))
     flat = out.reshape(-1)
@@ -747,6 +819,7 @@ def breach_dammed_rivers(
     LOG.info(f"Relocation: the DEM dams the river under {len(burned)} reaches, up to {cut.max():.0f} m high with no "
              f"way round {settings.dam_height_m:g} m lower; their lines were burned through {int((cut > 0).sum())} "
              f"cells to find their flow paths: {sorted(burned)}")
+    
     return out, sorted(burned)
 
 
@@ -765,6 +838,7 @@ def _downhill_where_alone(heights: np.ndarray, offsets: np.ndarray, ds: np.ndarr
             warnings.simplefilter("ignore", RuntimeWarning)
             if np.nanmedian(heights[a:a + quarter]) < np.nanmedian(heights[b - quarter:b]):
                 order[a:b] = order[a:b][::-1]
+
     return order
 
 
@@ -789,37 +863,46 @@ def _rises_and_falls(heights: np.ndarray, cells: np.ndarray, offsets: np.ndarray
             if not ok[i]:
                 i += 1
                 continue
+
             low = heights[i]
             before = i - 1
             while before >= offsets[r] and cells[before] == cells[i]:
                 before -= 1
+
             if before < offsets[r] or not ok[before] or abs(heights[before] - low) > max_step:
                 i += 1
                 continue
+
             x, s, count, peak, found = r, i + 1, 1, low, False
             while True:
                 if s >= offsets[x + 1]:
                     x = ds[x]
                     if x < 0 or count >= max_reaches:
                         break
+
                     count += 1
                     s = offsets[x]
                     continue
+
                 if not ok[s]:
                     break
+
                 if heights[s] <= low:
                     after = _next_cell(cells, offsets, ds, ok, x, s)
                     if after >= 0 and abs(heights[after] - heights[s]) <= max_step:
                         found = True
                         break
+
                 peak = max(peak, heights[s])
                 s += 1
+
             if found and peak - low >= min_rise:
                 out[m, 0], out[m, 1], out[m, 2], out[m, 3], out[m, 4] = r, i, x, s, peak - low
                 m += 1
                 i = s if x == r else last
             else:
                 i += 1
+
     out = out[:m]
     return (out[:, 0].astype(np.int64), out[:, 1].astype(np.int64), out[:, 2].astype(np.int64),
             out[:, 3].astype(np.int64), out[:, 4])
@@ -836,12 +919,16 @@ def _next_cell(cells: np.ndarray, offsets: np.ndarray, ds: np.ndarray, ok: np.nd
             x = ds[x]
             if x < 0:
                 return -1
+            
             s = offsets[x]
             continue
+
         if not ok[s]:
             return -1
+        
         if cells[s] != cell:
             return s
+        
         s += 1
 
 
@@ -860,9 +947,11 @@ def _pass_height(ground: np.ndarray, nrows: int, ncols: int, start: int, goal: i
         height, cell = heapq.heappop(heap)
         if height >= cap:
             break
+
         if cell == goal:
             result = height
             break
+
         row = cell // ncols
         col = cell - row * ncols
         for d_row in range(-1, 2):
@@ -870,14 +959,18 @@ def _pass_height(ground: np.ndarray, nrows: int, ncols: int, start: int, goal: i
                 r, c = row + d_row, col + d_col
                 if (d_row == 0 and d_col == 0) or r < 0 or r >= nrows or c < 0 or c >= ncols:
                     continue
+
                 neighbour = r * ncols + c
                 if seen[neighbour] or ground[neighbour] == np.inf:
                     continue
+
                 seen[neighbour] = True
                 visited.append(neighbour)
                 heapq.heappush(heap, (max(height, ground[neighbour]), neighbour))
+
     for cell in visited:
         seen[cell] = False
+
     return result
 
 
@@ -891,7 +984,9 @@ def _eight_connected(cells: list, ncols: int) -> list:
             steps = max(abs(r1 - r0), abs(c1 - c0))
             for k in range(1, steps):
                 out.append(round(r0 + (r1 - r0) * k / steps) * ncols + round(c0 + (c1 - c0) * k / steps))
+
         out.append(cell)
+
     return out
 
 
@@ -913,7 +1008,8 @@ def _inflow_entries(entering: np.ndarray, entry_cells: np.ndarray, inflow: np.nd
     cells, km2 = [], []
     if entering.size == 0:
         return np.asarray(cells, np.int64), np.asarray(km2, np.float64)
-    run = max(10, int(round(settings.min_inflow_run_m / flow.cell_size_m)))
+    
+    run = max(10, round(settings.min_inflow_run_m / flow.cell_size_m))
     max_cells = int(settings.max_course_m / flow.cell_size_m)
     own_inflow = np.zeros(source.ids.size, bool)
     own_inflow[entering] = True
@@ -928,34 +1024,41 @@ def _inflow_entries(entering: np.ndarray, entry_cells: np.ndarray, inflow: np.nd
             if near.size:
                 course = np.insert(course, near[0], first)
                 at = near[:1]
+
         if course.size == 0 or at.size == 0:
             cells.append(first)
             km2.append(inflow[r])
             continue
+
         tree = cKDTree(np.column_stack(np.divmod(course, flow.ncols)))
         beside = radius_m[r] / flow.cell_size_m
         end = course.size - 1 - run  # a path this far down the course has followed it out of the domain
         added = []
         k = int(at[0])
         while k < course.size:
-            for k in range(k, course.size):
-                path, ended = _walk(flow.down, int(course[k]), 4 * (course.size - k) + 100)
+            for j in range(k, course.size):
+                path, ended = _walk(flow.down, int(course[j]), 4 * (course.size - j) + 100)
                 distance, index = tree.query(np.column_stack(np.divmod(path, flow.ncols)),
                                              distance_upper_bound=beside)
-                reached = max(k, int(index[distance <= beside].max(initial=k)))
+                reached = max(j, int(index[distance <= beside].max(initial=j)))
                 gone = ended and distance[-1] <= beside and reached < end  # out of the domain beside the course
-                if not (gone and reached < k + run):
+                if not (gone and reached < j + run):
                     break
             else:
                 break
-            added.append(int(course[k]))
+
+            added.append(int(course[j]))
             if not gone:
                 break
+
             k = reached + 1
+
         if not added:
             added = [first]
+
         cells += added
         km2 += [inflow[r]] * len(added)
+
     return np.asarray(cells, np.int64), np.asarray(km2, np.float64)
 
 
@@ -972,9 +1075,11 @@ def _course(r: int, offsets: np.ndarray, in_domain: np.ndarray, cell_of_sample: 
         for cell in cell_of_sample[samples[in_domain[samples]]].tolist():
             if not course or course[-1] != cell:
                 course.append(cell)
+
         x = int(ds[x])
         if x >= 0 and stop[x]:
             break
+        
     return np.asarray(course[:max_cells], np.int64)
 
 

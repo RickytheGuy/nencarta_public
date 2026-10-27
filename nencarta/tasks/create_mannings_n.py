@@ -29,7 +29,6 @@ def Create_BaseLine_Manning_n_File_ESA(workspace: Workspace) -> Path:
     LOG.info('Creating Manning n file: ' + str(ManningN))
     with open(ManningN,'w') as out_file:
         out_file.write('LC_ID\tDescription\tManning_n')
-        for lc_id, description, mannings_n in ESA_MANNINGS_N:
-            out_file.write(f'\n{lc_id}\t{description}\t{mannings_n}')
+        out_file.writelines(f'\n{lc_id}\t{description}\t{mannings_n}' for lc_id, description, mannings_n in ESA_MANNINGS_N)
 
     return ManningN

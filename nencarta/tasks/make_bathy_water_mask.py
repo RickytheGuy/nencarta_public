@@ -4,22 +4,29 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from curve2flood import remove_cells_not_connected
 from numba import njit
 from osgeo import gdal
 
-from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.channel_detection import _CHUNK_ROWS, _feature_distance, flood_patches, nearest_cell, river_channel
+from nencarta.logger import LOG
+from nencarta.tasks.channel_detection import (
+    _feature_distance,
+    flood_patches,
+    nearest_cell,
+    river_channel,
+)
 from nencarta.tasks.stream_conflation import cell_sizes_m
 from nencarta.workspace import Workspace
-from curve2flood import remove_cells_not_connected
 
 # Land cover's water this far above the river's level on the DEM isn't the river (see near_the_rivers_level)
 WATER_MAX_RISE_M = 1.0
 # A reach more than this share of whose stream cells have no water beside them in the mask is 1 cell wide all along
 # (see one_cell_wide_where_mostly)
 NARROW_SHARE = 0.5
+# Rows of the grid worked on at a time where every cell's nearest stream cell is used, so the temporary arrays stay small
+_CHUNK_ROWS = 512
 
 
 def reach_areas_km2(streams_gdf: gpd.GeoDataFrame | pd.DataFrame, configs) -> dict:
@@ -133,16 +140,14 @@ def _near_level(nrows: int, ncols: int, candidates: np.ndarray, distance: np.nda
     lowest = [np.full((n_block_rows, n_block_cols), np.inf)]
     for b in range(n_block_rows * n_block_cols):
         for i in range(first[b], first[b] + count[b]):
-            if z[i] < lowest[0][b // n_block_cols, b % n_block_cols]:
-                lowest[0][b // n_block_cols, b % n_block_cols] = z[i]
+            lowest[0][b // n_block_cols, b % n_block_cols] = min(lowest[0][b // n_block_cols, b % n_block_cols], z[i])
 
     while lowest[-1].shape[0] > 1 or lowest[-1].shape[1] > 1:
         below = lowest[-1]
         above = np.full(((below.shape[0] + 3) // 4, (below.shape[1] + 3) // 4), np.inf)
         for br in range(below.shape[0]):
             for bc in range(below.shape[1]):
-                if below[br, bc] < above[br // 4, bc // 4]:
-                    above[br // 4, bc // 4] = below[br, bc]
+                above[br // 4, bc // 4] = min(above[br // 4, bc // 4], below[br, bc])
         lowest.append(above)
 
     stack_level = np.empty(16 * len(lowest) + 16, np.int64)
@@ -257,7 +262,7 @@ def one_cell_wide_where_mostly(mask: np.ndarray, streams: np.ndarray, lakes: np.
     if not water.any():
         return mask
     cells = np.flatnonzero(on)
-    reaches, of_cell = np.unique(streams.ravel()[cells], return_inverse=True)
+    _, of_cell = np.unique(streams.ravel()[cells], return_inverse=True)
     beside_water = np.bincount(of_cell, _beside(water, cells))
     wide = cells[(beside_water >= (1 - NARROW_SHARE) * np.bincount(of_cell))[of_cell]]
     # The patches of water beside a wide reach's stream cells, or with water in a lake
@@ -279,6 +284,7 @@ def _beside(mask: np.ndarray, cells: np.ndarray) -> np.ndarray:
             for c in range(max(c0 - 1, 0), min(c0 + 2, ncols)):
                 if mask[r, c]:
                     out[i] = True
+                    
     return out
 
 

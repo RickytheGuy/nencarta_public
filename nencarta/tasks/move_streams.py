@@ -5,32 +5,42 @@ import math
 import warnings
 from pathlib import Path
 
+import geopandas as gpd
+import networkx as nx
 import numpy as np
 import pandas as pd
-import networkx as nx
+import shapely
 from numba import njit
-import geopandas as gpd
 from osgeo import gdal, ogr, osr
 from scipy.ndimage import binary_dilation, label
-import shapely
-from shapely.geometry import Point, LineString
+from shapely.geometry import LineString, Point
 from shapely.ops import substring
 
-from nencarta.logger import LOG
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
-from nencarta.tasks.make_bathy_water_mask import dem_channel, reach_areas_km2, water_mask
+from nencarta.logger import LOG
+from nencarta.tasks.make_bathy_water_mask import (
+    dem_channel,
+    reach_areas_km2,
+    water_mask,
+)
 from nencarta.tasks.make_stream_geometry import _filter_streams_by_stream_order
 from nencarta.tasks.stream_conflation import (
     D8_OFFSETS,
     ConflationSettings,
+    _line_parts,
     cell_sizes_m,
     conflate_to_flow_directions,
-    d8_offset_tables as _d8_offset_tables,
-    _line_parts,
 )
-from nencarta.tasks.stream_relocation import breach_dammed_rivers, relocate_misplaced_reaches
+from nencarta.tasks.stream_conflation import (
+    d8_offset_tables as _d8_offset_tables,
+)
+from nencarta.tasks.stream_relocation import (
+    breach_dammed_rivers,
+    relocate_misplaced_reaches,
+)
 from nencarta.workspace import Workspace
+
 
 def _in_memory_ogr_layer(gdf: gpd.GeoDataFrame, projection: str,
                          values: pd.Series | None = None) -> tuple[ogr.DataSource, ogr.Layer]:
@@ -40,7 +50,7 @@ def _in_memory_ogr_layer(gdf: gpd.GeoDataFrame, projection: str,
     """
     # 'Memory' is the pre-GDAL-3.11 spelling and now warns on every call; 'MEM' is the
     # current name. Fall back so this still works on older GDAL builds.
-    driver = ogr.GetDriverByName('MEM') or ogr.GetDriverByName('Memory')
+    driver: gdal.Driver = ogr.GetDriverByName('MEM') or ogr.GetDriverByName('Memory')
     ogr_ds: ogr.DataSource = driver.CreateDataSource('lakes')
     srs = osr.SpatialReference()
     srs.ImportFromWkt(projection)
@@ -48,16 +58,19 @@ def _in_memory_ogr_layer(gdf: gpd.GeoDataFrame, projection: str,
     if values is not None:
         layer.CreateField(ogr.FieldDefn("value", ogr.OFTInteger64))
         values = pd.to_numeric(values, errors="coerce").to_numpy()
+
     layer_defn = layer.GetLayerDefn()
     for i, geometry in enumerate(gdf.geometry.values):
         if geometry is None or geometry.is_empty:
             continue
+
         feature = ogr.Feature(layer_defn)
         feature.SetGeometry(ogr.CreateGeometryFromWkb(geometry.wkb))
         if values is not None and np.isfinite(values[i]):
             feature.SetField("value", int(values[i]))
         layer.CreateFeature(feature)
         feature = None
+
     return ogr_ds, layer
 
 def load_lake_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
@@ -98,17 +111,16 @@ def load_lake_gdf(workspace: Workspace, dem_raster: Raster) -> gpd.GeoDataFrame 
 def load_ocean_array(workspace: Workspace, dem_raster: Raster) -> np.ndarray | None:
     """
     The ocean on the DEM's grid, True in it, or None without ``ocean`` or burn_streams, or with none of it on the
-    DEM. The burned DEM has no data there (see smooth_and_burn_dem), so the streams end at the shore.
-
-    Only the polygons overlapping the DEM are read. A global ocean's polygons are huge, and are read whole: split
-    them into tiles and write them as a GeoParquet with a bbox column to read just the pieces near the DEM.
+    DEM. The burned DEM has no data there (see smooth_and_burn_dem), so the streams end at the shore. Only the polygons overlapping the DEM are read.
     """
     configs = workspace.configs
     if not configs.ocean or not configs.burn_streams:
         return None
+    
     ocean_gdf = Vector(configs.ocean, not configs.parallel).to_geopandas(bbox_epsg_4326=dem_raster.epsg_4326_bbox)
     if ocean_gdf.empty:
         return None
+    
     ocean_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_raster.shape[1], dem_raster.shape[0], 1,
                                                                 gdal.GDT_Byte)
     ocean_ds.SetGeoTransform(dem_raster.geotransform)
@@ -121,12 +133,14 @@ def _rasterize_polygons(ds: gdal.Dataset, gdf: gpd.GeoDataFrame | None) -> None:
     """Burn 1 into ``ds``'s band in the cells whose centres are in ``gdf``'s polygons."""
     if gdf is None or gdf.empty:
         return
+    
     projection = ds.GetProjection()
     ogr_ds, layer = _in_memory_ogr_layer(gdf.to_crs(projection), projection)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gdal.RasterizeLayer(ds, [1], layer, burn_values=[1])
-    ogr_ds = None
+
+    ogr_ds = None  # noqa: F841
 
 # The burn fills the cells between a line's vertices up to this many cells apart (see _burn_linestring)
 MAX_BURN_GAP_CELLS = 3
@@ -209,6 +223,7 @@ def _fill_padded(dem: np.ndarray, valid: np.ndarray, unfilled: np.ndarray | None
         low = float(lowest(dem, valid)) - 10.0
     else:
         low = float(min(lowest(dem, valid & ~put[0]), lowest(put[1], valid & put[0]))) - 10.0
+
     raise_by = 1.0 - math.floor(low)
     # The DEM in double precision inside a ring of ``low``. Its own cells off ``valid`` are ``low`` in the DEM's type,
     # as np.where(valid, dem, low) has them.
@@ -216,6 +231,7 @@ def _fill_padded(dem: np.ndarray, valid: np.ndarray, unfilled: np.ndarray | None
     padded[1:-1, 1:-1] = dem
     if put is not None:
         padded[1:-1, 1:-1][put[0]] = put[1][put[0]]
+
     padded[1:-1, 1:-1][~valid] = np.asarray(low, np.result_type(dem, low))
     padded += raise_by
     closed = np.zeros(padded.shape, np.bool_)
@@ -229,6 +245,7 @@ def _fill_padded(dem: np.ndarray, valid: np.ndarray, unfilled: np.ndarray | None
         closed[rows + 1, cols + 1] = False
         closed[[0, -1], :] = closed[:, [0, -1]] = True
         seeds = _beside_open(closed)
+
     _priority_flood(padded, closed.ravel(), seeds)
     return padded, raise_by
 
@@ -242,10 +259,12 @@ def _beside_open(closed: np.ndarray) -> np.ndarray:
         for c in range(ncols):
             if closed[r, c]:
                 continue
+
             for rr in range(max(r - 1, 0), min(r + 2, nrows)):
                 for cc in range(max(c - 1, 0), min(c + 2, ncols)):
                     if closed[rr, cc]:
                         beside[rr, cc] = True
+
     return np.flatnonzero(beside)
 
 
@@ -267,9 +286,11 @@ def _heap_push(keys: np.ndarray, cells: np.ndarray, size: int, key: float, cell:
         parent = (i - 1) >> 1
         if keys[parent] <= key:
             break
+
         keys[i] = keys[parent]
         cells[i] = cells[parent]
         i = parent
+
     keys[i] = key
     cells[i] = cell
     return size + 1
@@ -291,11 +312,14 @@ def _heap_pop(keys: np.ndarray, cells: np.ndarray, size: int) -> int:
             child = right if right < size and keys[right] < keys[left] else left
             if keys[child] >= key:
                 break
+
             keys[i] = keys[child]
             cells[i] = cells[child]
             i = child
+
         keys[i] = key
         cells[i] = cell
+
     return size
 
 
@@ -339,6 +363,7 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                 m = r * ncols + c
                 if closed[m]:
                     continue
+
                 if flat[m] >= flat[e]:
                     closed[m] = True
                     if t_count == trace.size:
@@ -365,6 +390,7 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                 p_head = (p_head + 1) & (pit.size - 1)
                 p_count -= 1
                 on_edge = False
+
             for k in range(8):
                 if on_edge:
                     r = row + (k // 3 if k < 4 else (k + 1) // 3) - 1
@@ -374,8 +400,10 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                     m = r * ncols + c
                 else:
                     m = q + offsets[k]
+
                 if closed[m]:
                     continue
+
                 closed[m] = True
                 if flat[m] <= level:
                     flat[m] = level
@@ -388,6 +416,7 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                         trace, t_head = _grown(trace, t_head), 0
                     trace[(t_head + t_count) & (trace.size - 1)] = m
                     t_count += 1
+
         # Up the slopes from there
         while t_count:
             t = trace[t_head]
@@ -398,6 +427,7 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                 m = t + offsets[k]
                 if closed[m]:
                     continue
+
                 if flat[m] >= flat[t]:
                     closed[m] = True
                     if t_count == trace.size:
@@ -410,6 +440,7 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                         deferred = _grown(deferred, 0)
                     deferred[d_count] = t
                     d_count += 1
+
         for j in range(d_count):
             t = deferred[j]
             for k in range(8):
@@ -418,25 +449,13 @@ def _priority_flood(z: np.ndarray, closed: np.ndarray, seeds: np.ndarray) -> Non
                         heap_keys, heap_cells = _grown(heap_keys, 0), _grown(heap_cells, 0)
                     heap_size = _heap_push(heap_keys, heap_cells, heap_size, flat[t], t)
                     break
+
         d_count = 0
         if heap_size == 0:
             return
+        
         level, p = heap_keys[0], heap_cells[0]
         heap_size = _heap_pop(heap_keys, heap_cells, heap_size)
-
-
-def _resolve_flats(z: np.ndarray) -> np.ndarray:
-    """
-    ``z`` (filled, positive, its edge lower than anything inside it) with the gradient Barnes et al. (2014) give its
-    flats, as RichDEM's ResolveFlats imposes it: each flat cell raised by as many units in its last place as its
-    step on the gradient (see _flat_gradient).
-
-    RichDEM raises a cell one unit at a time, which on a big flat, a lake FABDEM leaves level, is billions of steps;
-    here a cell is raised by all its steps at once, to the same value.
-    """
-    routed = z.copy()
-    _raise_flats(routed, _flat_gradient(z))
-    return routed
 
 
 def _raise_flats(z: np.ndarray, steps: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -455,7 +474,9 @@ def _raise_flats(z: np.ndarray, steps: np.ndarray) -> tuple[np.ndarray, np.ndarr
         value = before[i]
         for _ in range(up[i]):
             value = np.nextafter(value, np.inf)
+
         flat[raised[i]] = value
+
     return raised, before
 
 
@@ -483,6 +504,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                 if z[r + d_rows[k], c + d_cols[k]] < z[r, c]:
                     no_flow[r, c] = False
                     break
+
             if no_flow[r, c]:
                 n_flat += 1
 
@@ -495,6 +517,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
         for c in range(1, ncols - 1):
             if not no_flow[r, c]:
                 continue
+
             beside_higher = False
             for k in range(8):
                 nr, nc = r + d_rows[k], c + d_cols[k]
@@ -502,6 +525,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                     beside_higher = True
                 elif not no_flow[nr, nc] and z[nr, nc] == z[r, c]:
                     low.append(nr * ncols + nc)
+
             if beside_higher:
                 high.append(r * ncols + c)
 
@@ -518,6 +542,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
         r, c = start // ncols, start % ncols
         if labels[r, c]:
             continue
+
         label += 1
         level = z[r, c]
         labels[r, c] = label
@@ -533,6 +558,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
                     labels[nr, nc] = label
                     if tail == queue.size:
                         queue = _grown(queue, 0)
+
                     queue[tail] = nr * ncols + nc
                     tail += 1
 
@@ -545,6 +571,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
             steps[r, c] = 1
             if tail == queue.size:
                 queue = _grown(queue, 0)
+
             queue[tail] = cell
             tail += 1
 
@@ -558,6 +585,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
             nr, nc = r + d_rows[k], c + d_cols[k]
             if not (0 <= nr < nrows and 0 <= nc < ncols) or steps[nr, nc]:
                 continue
+
             if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
                 steps[nr, nc] = steps[r, c] + 1
                 if tail == queue.size:
@@ -574,6 +602,7 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
             toward[r, c] = 1
             if tail == queue.size:
                 queue = _grown(queue, 0)
+
             queue[tail] = cell
             tail += 1
 
@@ -586,10 +615,12 @@ def _flat_gradient(z: np.ndarray) -> np.ndarray:
             nr, nc = r + d_rows[k], c + d_cols[k]
             if not (0 <= nr < nrows and 0 <= nc < ncols) or toward[nr, nc]:
                 continue
+
             if labels[nr, nc] == labels[r, c] and no_flow[nr, nc]:
                 toward[nr, nc] = toward[r, c] + 1
                 if tail == queue.size:
                     queue = _grown(queue, 0)
+
                 queue[tail] = nr * ncols + nc
                 tail += 1
 
@@ -615,20 +646,25 @@ def _d8_pointers(z: np.ndarray, valid: np.ndarray, dx_by_row: np.ndarray, dy: fl
     for row in range(nrows):
         for k in range(d_rows.size):
             distance[k] = np.sqrt((dx_by_row[row] * d_cols[k]) ** 2 + (dy * d_rows[k]) ** 2)
+
         for col in range(ncols):
             if not valid[row, col]:
                 continue
+
             steepest = 0.0
             code = 0
             for k in range(d_rows.size):
                 r, c = row + d_rows[k], col + d_cols[k]
                 if r < 0 or r >= nrows or c < 0 or c >= ncols or not valid[r, c]:
                     continue
+
                 slope = (z[row, col] - z[r, c]) / distance[k]
                 if slope > steepest:
                     steepest = slope
                     code = codes[k]
+
             out[row, col] = code
+
     return out
 
 
@@ -650,11 +686,14 @@ def derive_flow_directions(workspace: Workspace, dem_path: Path, filled_path: Pa
     nodata = raster.nodata_value if nodata is None else nodata
     if nodata is not None:
         valid &= dem != nodata
+
     filled, flowdir = fill_and_flow_directions(dem, valid, raster.geotransform, raster.projection, unfilled)
     del dem
+
     filled[~valid] = FILLED_NODATA
     if write:
         write_flow_directions(workspace, raster, filled, flowdir, filled_path, flowdir_path)
+
     return filled, flowdir
 
 
@@ -675,6 +714,7 @@ def _write_raster(path: Path, values: np.ndarray, reference: Raster, data_type: 
     driver: gdal.Driver = gdal.GetDriverByName("GTiff")
     if path.exists():
         driver.Delete(str(path))
+
     ds: gdal.Dataset = driver.Create(str(path), values.shape[1], values.shape[0], 1, data_type,
                                      [f"COMPRESS={compression}", "TILED=YES", "BIGTIFF=IF_SAFER"])
     ds.SetGeoTransform(reference.geotransform)
@@ -724,6 +764,7 @@ def burn_streams_and_move_streams(workspace: Workspace) -> Path:
         # DEM, and floods. Unmoved, the source network is already the one mapped.
         if configs.move_stream_network_to_thalweg:
             source_gdf = _kept_reaches(workspace, source_gdf, assigned_dem)
+
         # Unmoved, the floods are mapped along the source lines (STRM_File_Clean), so they are burned there too
         if configs.relocate_misplaced_streams and configs.move_stream_network_to_thalweg:
             source_gdf = relocate_misplaced_streams(workspace, source_gdf, assigned_dem, dem=unburned)
@@ -867,15 +908,12 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
     moved network doesn't run: more than a cell from every stream cell of ``final_streams`` and from the water mask
     (``channel_mask``), and outside the lakes. The streams are burned where they are drawn before they are moved, and
     a line the moving doesn't follow stays carved in the DEM, a trench no stream is mapped along, which floods from the
-    streams it meets. On the Colorado test tile (N39W109), stream relocation joined a tributary moved onto a wash back
-    to its GEOGLOWS junction by a straight stretch across the plain (see stream_relocation._Relocation._keeping_lines),
-    the burn cut it 4.5 to 9 m deep, and the moved tributary joined the wash's river instead: the trench flooded 1.28 m
-    deep at the 2-year flow.
+    streams it meets. 
 
     But some of those cells carry the network's water: a line burned through a dam joins a reservoir to the river
     below it, which starts a few cells below the dam (a lake's rivers stop at its shore), and put back, the dam holds
-    the reservoir metres higher in the filled DEM (8.6 m over 43 of a river's cells, on the N40W112 tile, Salt Lake
-    City). So the filled DEM is worked out again with the cells put back, and wherever it changes in a stretch of the
+    the reservoir metres higher in the filled DEM. So the filled DEM is worked out again with the cells put back, and 
+    wherever it changes in a stretch of the
     filled DEM that reaches a stream cell or a lake, the burned cells beside that stretch are kept, a connected piece
     at a time, until the filled DEM changes at no stream cell or lake. Not at the water mask's cells: where a line
     put back enters the mask, the cell its routing lowered (see routing_dem) is left a pit, which fills to the water
@@ -899,13 +937,16 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
 
     if fixed is None:
         fixed, nodata = read(workspace.fixed_dem)
+
     assigned_raster = Raster(workspace.assigned_dem)
     unburned = (assigned_raster.read_array() if unburned is None else unburned).astype(fixed.dtype, copy=False)
     valid = np.isfinite(fixed) & np.isfinite(unburned) & (unburned > -1000)
     if nodata is not None:
         valid &= fixed != nodata
+
     if assigned_raster.nodata_value is not None:
         valid &= unburned != assigned_raster.nodata_value
+
     streams = np.asarray(final_streams) > 0
     lakes = load_lake_array(workspace, assigned_raster)
     drains = streams if lakes is None else streams | lakes  # what the filled DEM mustn't change at
@@ -913,13 +954,16 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
     restore = valid & (fixed != unburned) & ~binary_dilation(streams | np.asarray(channel_mask, bool), structure=eight)
     if lakes is not None:
         restore &= ~lakes
+
     if not restore.any():
         return None
 
     if filled_before is None:
         filled_before, _ = read(workspace.filled_dem)
+
     if flowdir is None:
         flowdir, _ = read(workspace.flowdir)
+
     routing = np.asarray(fixed if routing is None else routing, np.float64)
     routing_valid = np.isfinite(routing) & (routing != (-9999 if nodata is None else nodata))
     pieces, _ = label(restore, structure=eight)
@@ -931,6 +975,7 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
         reached = np.unique(stretches[changed & drains])
         if reached.size == 0:
             break
+
         beside = binary_dilation(np.isin(stretches, reached, kind="table"), structure=eight)
         kept = np.unique(pieces[beside & restore])
         restore &= ~np.isin(pieces, kept, kind="table")
@@ -941,13 +986,14 @@ def restore_unfollowed_burns(workspace: Workspace, final_streams: np.ndarray, ch
         LOG.warning("Some burned cells no moved stream runs along still change how the streams drain when put back; "
                     "they stay burned")
         return None
-    del changed, stretches, pieces
+    
+    del changed, stretches, pieces  # noqa: F821
 
     LOG.info(f"Restoring the unburned DEM at {int(restore.sum())} burned cells no moved stream runs along")
-    new_flowdir = _padded_flow_directions(padded, routing_valid, assigned_raster.geotransform,
-                                          assigned_raster.projection)
-    filled = _unpadded(padded, raise_by, routing_valid)
-    del padded
+    new_flowdir = _padded_flow_directions(padded, routing_valid, assigned_raster.geotransform, assigned_raster.projection)  # noqa: F821
+    filled = _unpadded(padded, raise_by, routing_valid)  # noqa: F821
+    del padded  # noqa: F821
+
     fixed[restore] = unburned[restore]
     _write_raster(Path(workspace.fixed_dem), fixed, assigned_raster, gdal.GDT_Float32,
                   -9999 if nodata is None else nodata, workspace.configs.compression)
@@ -972,6 +1018,7 @@ def _fill_changed(padded: np.ndarray, raise_by: float, before: np.ndarray, valid
         for c in range(ncols):
             if valid[r, c]:
                 out[r, c] = not (abs((padded[r + 1, c + 1] - raise_by) - before[r, c]) <= tolerance)
+
     return out
 
 
@@ -999,6 +1046,7 @@ def move_streams_onto_flow_directions(
     valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
+
     lakes = load_lake_array(workspace, dem_raster)
     cut_lakes = lakes is not None and configs.mapper.is_curve2flood_fldpln_mapper()
     # The DEM the flow directions were derived from, filled, which they run down (see derive_flow_directions): where
@@ -1030,10 +1078,11 @@ def _kept_reaches(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster
     left_out = _reaches_left_out(workspace, source_gdf, dem_raster)
     if left_out:
         LOG.info(f"Leaving {len(left_out)} reaches out of the moved stream network.")
+
     ocean = load_ocean_array(workspace, dem_raster)
     if ocean is not None:
-        source_gdf = _cut_at_the_sea(source_gdf, ocean, dem_raster.geotransform, configs.stream_id_field,
-                                     configs.downstream_id_field)
+        source_gdf = _cut_at_the_sea(source_gdf, ocean, dem_raster.geotransform, configs.stream_id_field, configs.downstream_id_field)
+        
     return _without_reaches(source_gdf, left_out, configs.stream_id_field, configs.downstream_id_field)
 
 def _reaches_left_out(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster: Raster) -> set:
@@ -1051,6 +1100,7 @@ def _reaches_left_out(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_ra
     id_col, ds_col = configs.stream_id_field, configs.downstream_id_field
     if workspace.DEM_StrmShp.exists():
         source_gdf = Vector(workspace.DEM_StrmShp, not configs.parallel).to_geopandas().to_crs(dem_raster.projection)
+
     fldpln = configs.mapper.is_curve2flood_fldpln_mapper()
 
     left_out = set()
@@ -1079,6 +1129,7 @@ def _reaches_left_out(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_ra
         kept = _filter_streams_by_stream_order(source_gdf.copy(), configs.StrmOrder_Field, configs.StrmOrder_Lower,
                                                configs.StrmOrder_Upper)
         left_out |= set(source_gdf[id_col]) - set(kept[id_col])
+
     return left_out
 
 def _multipart_reaches(source_gdf: gpd.GeoDataFrame, id_col: str) -> set:
@@ -1116,11 +1167,13 @@ def _trunks(streams: gpd.GeoDataFrame, id_col: str, ds_col: str, dem_raster: Ras
         nonlocal dem
         if dem is None:
             dem = dem_raster.read_array()
+
         col, row = gdal.ApplyGeoTransform(gdal.InvGeoTransform(dem_raster.geotransform), xy[0], xy[1])
         row, col = math.floor(row), math.floor(col)
         if not (0 <= row < dem.shape[0] and 0 <= col < dem.shape[1]) or not np.isfinite(dem[row, col]) \
                 or dem[row, col] == dem_raster.nodata_value:
             return -np.inf
+        
         return float(dem[row, col])
 
     geometry = streams.geometry.to_numpy().copy()
@@ -1135,6 +1188,7 @@ def _trunks(streams: gpd.GeoDataFrame, id_col: str, ds_col: str, dem_raster: Ras
             geometry[i] = max(ends, key=lambda end: min(end[1].distance(line) for line in above))[0]
         else:
             geometry[i] = min(ends, key=lambda end: height(end[1].coords[0]))[0]
+
     streams = streams.copy()
     streams[streams.geometry.name] = geometry
     return streams
@@ -1147,9 +1201,11 @@ def _with_area_km2(source_gdf: gpd.GeoDataFrame, configs) -> tuple[gpd.GeoDataFr
     """
     if configs.area_km2_field and configs.area_km2_field in source_gdf.columns:
         return source_gdf, configs.area_km2_field
+    
     if configs.area_m2_field and configs.area_m2_field in source_gdf.columns:
         area = pd.to_numeric(source_gdf[configs.area_m2_field], errors="coerce") / 1e6
         return source_gdf.assign(__area_km2=area), "__area_km2"
+    
     return source_gdf, None
 
 def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFrame, dem_raster: Raster,
@@ -1173,21 +1229,24 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
 
     if dem is None:
         dem = dem_raster.read_array()
+
     valid = np.isfinite(dem)
     if dem_raster.nodata_value is not None:
         valid &= dem != dem_raster.nodata_value
+
     # The ocean is off the burned DEM the streams are moved onto (see smooth_and_burn_dem)
     ocean = load_ocean_array(workspace, dem_raster)
     if ocean is not None:
         valid &= ~ocean
+
     breached, _ = breach_dammed_rivers(gdf, dem, dem_raster.geotransform, dem_raster.projection,
                                        configs.stream_id_field, configs.downstream_id_field, valid_mask=valid)
     ground = dem if breached is None else breached
     if derived and breached is None:
         flowdir_array, filled_array = Raster(workspace.flowdir).read_array(), Raster(workspace.filled_dem).read_array()
     else:
-        filled_array, flowdir_array = fill_and_flow_directions(ground, valid, dem_raster.geotransform,
-                                                               dem_raster.projection)
+        filled_array, flowdir_array = fill_and_flow_directions(ground, valid, dem_raster.geotransform, dem_raster.projection)
+        
     filled_array[~valid] = np.nan
     streams = relocate_misplaced_reaches(gdf, flowdir_array, filled_array, ground, dem_raster.geotransform,
                                          dem_raster.projection, configs.stream_id_field, configs.downstream_id_field,
@@ -1196,9 +1255,11 @@ def relocate_misplaced_streams(workspace: Workspace, source_gdf: gpd.GeoDataFram
     changed = ~streams.geometry.geom_equals(source_gdf.geometry).to_numpy()
     if not changed.any():
         return source_gdf
+    
     kwargs = {'index': False}
     if workspace.relocated_StrmShp.suffix.lower() == '.parquet':
         kwargs.update(compression='brotli', write_covering_bbox=True, geometry_encoding='geoarrow')
+
     workspace.relocated_StrmShp.parent.mkdir(parents=True, exist_ok=True)
     Vector.save_any_geom(streams, workspace.relocated_StrmShp, **kwargs)
 
@@ -1213,6 +1274,7 @@ def _replace_lines_in_water_mask(workspace: Workspace, dem_raster: Raster, redra
     """
     if not workspace.bathy_water_mask.exists() or not workspace.STRM_File_Clean.exists():
         return
+    
     mask = Raster(workspace.bathy_water_mask).read_array().astype(bool)
     strm, ids = Raster(workspace.STRM_File_Clean).read_array(), pd.to_numeric(ids).to_numpy()
     # Looked up at the stream cells alone: the others are 0
@@ -1220,6 +1282,7 @@ def _replace_lines_in_water_mask(workspace: Workspace, dem_raster: Raster, redra
     on = np.flatnonzero(strm)
     old.ravel()[on] = np.isin(strm.ravel()[on], ids)
     del strm
+
     if workspace.LAND_File.exists():
         old &= Raster(workspace.LAND_File).read_array() != workspace.configs.land_watervalue
 
@@ -1229,7 +1292,7 @@ def _replace_lines_in_water_mask(workspace: Workspace, dem_raster: Raster, redra
     ogr_ds, layer = _in_memory_ogr_layer(redrawn, dem_raster.projection)
     gdal.RasterizeLayer(new_ds, [1], layer, burn_values=[1])
     new = new_ds.ReadAsArray().astype(bool)
-    ogr_ds = new_ds = None
+    ogr_ds = new_ds = None  # noqa: F841
 
     mask = (mask & ~old) | new
     make_channel_mask(mask.astype(np.uint8), str(workspace.assigned_dem), str(workspace.bathy_water_mask),
@@ -1244,6 +1307,7 @@ def _reaches_stuck_in_lakes(streams: gpd.GeoDataFrame, raster: np.ndarray, lakes
     in_lake = set(np.unique(raster[lakes & (raster > 0)]).tolist())
     if not in_lake:
         return set()
+    
     graph = nx.DiGraph()
     graph.add_nodes_from(streams[id_col])
     graph.add_edges_from((r, d) for r, d in zip(streams[id_col], streams[ds_col]) if d in graph and d != r)
@@ -1251,6 +1315,7 @@ def _reaches_stuck_in_lakes(streams: gpd.GeoDataFrame, raster: np.ndarray, lakes
     for reach in in_lake:
         if not (nx.descendants(graph, reach) - in_lake) or not (nx.ancestors(graph, reach) - in_lake):
             stuck.add(reach)
+
     return stuck
 
 def _network(streams: gpd.GeoDataFrame, id_col: str, ds_col: str) -> tuple[dict, nx.DiGraph]:
@@ -1271,8 +1336,10 @@ def _line_start(reach, lines: dict, graph: nx.DiGraph) -> Point | None:
     below = [lines[r] for r in graph.successors(reach)]
     if above:
         return min(ends, key=lambda end: min(end.distance(line) for line in above))
+    
     if below:
         return max(ends, key=lambda end: below[0].distance(end))
+    
     return None
 
 def _reaches_in_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: tuple, id_col: str, ds_col: str,
@@ -1292,6 +1359,7 @@ def _reaches_in_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransfo
         start = _line_start(reach, lines, graph)
         if start is None:
             return False
+        
         col, row = gdal.ApplyGeoTransform(inverse, start.x, start.y)
         row, col = math.floor(row), math.floor(col)
         return 0 <= row < ocean.shape[0] and 0 <= col < ocean.shape[1] and bool(ocean[row, col])
@@ -1304,6 +1372,7 @@ def _reaches_in_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransfo
             if reach not in in_sea and all(r in in_sea for r in largest[reach]):
                 in_sea.add(reach)
                 reaches.append(reach)
+
     return in_sea
 
 def _cut_at_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: tuple, id_col: str,
@@ -1322,9 +1391,11 @@ def _cut_at_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: 
         line = lines.get(reach)
         if line is None or line.geom_type != "LineString":
             continue
+
         start = _line_start(reach, lines, graph)
         if start is None:
             continue
+
         forward = start.distance(Point(line.coords[0])) <= start.distance(Point(line.coords[-1]))
         along = np.arange(0.0, line.length, step)
         xy = shapely.get_coordinates(shapely.line_interpolate_point(line, along if forward else line.length - along))
@@ -1335,8 +1406,10 @@ def _cut_at_the_sea(streams: gpd.GeoDataFrame, ocean: np.ndarray, geotransform: 
         sea[on] = ocean[rows[on], cols[on]]
         if not sea.any() or sea[0]:
             continue
+
         end = along[np.argmax(sea)]
         geometry[i] = substring(line, 0, end) if forward else substring(line, line.length - end, line.length)
+
     streams = streams.copy()
     streams[streams.geometry.name] = geometry
     return streams
@@ -1345,6 +1418,7 @@ def _without_reaches(streams: gpd.GeoDataFrame, reaches: set, id_col: str, ds_co
     """``streams`` without ``reaches``; reaches that drained into them become outlets."""
     if not reaches:
         return streams
+    
     streams = streams[~streams[id_col].isin(reaches)].copy()
     streams.loc[streams[ds_col].isin(reaches), ds_col] = -1
     return streams
@@ -1356,8 +1430,8 @@ def _write_stream_raster(path: Path, streams: np.ndarray, reference: Raster) -> 
     driver: gdal.Driver = gdal.GetDriverByName("GTiff")
     if path.exists():
         driver.Delete(str(path))
-    stream_ds: gdal.Dataset = driver.Create(str(path), streams.shape[1], streams.shape[0], 1, gdal.GDT_Int32,
-                                            ['COMPRESS=DEFLATE', 'PREDICTOR=2'])
+
+    stream_ds: gdal.Dataset = driver.Create(str(path), streams.shape[1], streams.shape[0], 1, gdal.GDT_Int32, ['COMPRESS=DEFLATE', 'PREDICTOR=2'])
     stream_ds.SetGeoTransform(reference.geotransform)
     stream_ds.SetProjection(reference.projection)
     stream_ds.GetRasterBand(1).WriteArray(streams.astype(np.int32, copy=False))
@@ -1387,6 +1461,7 @@ def smooth_and_burn_dem(
     nodata_value = dem_ds.GetRasterBand(1).GetNoDataValue()
     if nodata_value is None:
         nodata_value = -9999
+
     nan_mask = np.isnan(dem)
     dem[nan_mask] = nodata_value
     # The ocean is off the DEM: the lines end at its shore, and the flow directions drain into it
@@ -1415,6 +1490,7 @@ def smooth_and_burn_dem(
                                          nodata_value, order_col=configs.StrmOrder_Field, area_col=area_col,
                                          paths=paths, leveled=leveled, kept=kept, path_reaches=path_reaches)
     del leveled
+
     dem = smooth_burned_dem(dem, channel_mask, streams, original, nodata_value, paths=paths, fixed=kept,
                             cell_size=cell_sizes_m(dem_ds.GetGeoTransform(), dem_ds.GetProjection(), dem.shape[0]))
 
@@ -1433,7 +1509,7 @@ def smooth_and_burn_dem(
 def write_burned_dem(workspace: Workspace, dem: np.ndarray, nodata_value: float) -> None:
     """Write the burned DEM to workspace.fixed_dem, on workspace.assigned_dem's grid, as smooth_and_burn_dem does."""
     dem_ds: gdal.Dataset = gdal.Open(str(workspace.assigned_dem))
-    output_ds = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32, options=[f'COMPRESS={workspace.configs.compression}'])
+    output_ds: gdal.Dataset = gdal.GetDriverByName('GTiff').Create(workspace.fixed_dem, dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Float32, options=[f'COMPRESS={workspace.configs.compression}'])
     output_ds.WriteArray(dem)
     output_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     output_ds.SetProjection(dem_ds.GetProjection())
@@ -1442,7 +1518,7 @@ def write_burned_dem(workspace: Workspace, dem: np.ndarray, nodata_value: float)
 
 # How far below the filled DEM a line may be lowered so that the cell above drains into it rather than onto the ground
 # beside (see _run_lines_down_fill). On the water a DEM levels, it takes centimetres; allowed 2 m or more, lines down
-# steep valleys were pulled below the slopes beside them, and the Colorado test tile (N39W109) lost connections.
+# steep valleys were pulled below the slopes beside them.
 ROUTING_MAX_DROP_M = 1.0
 # How much lower each line cell is than the one above it, so the lines are the lowest way across the flats the fill
 # leaves: far more than the steps resolving flats adds (see _resolve_flats), far less than a DEM's precision
@@ -1457,10 +1533,7 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
     down the fill (see _run_lines_down_fill). ``paths`` and ``path_reaches`` are as burn_streams_into_dem gives them.
     Each line starts below all the reaches flowing into it, not only the largest: a tributary's line left below the
     river at its mouth would take the river's flow down itself. Below each where its line comes nearest the start, as
-    burn_linestring takes them: at a junction, its end, but a relocated line can run on past its junction. Below that
-    one's end, 2 km on and 34 m lower, the reach it flows into in Salt Lake City (n40w112) was cut to that level all
-    its length, up to 31 m below the ground, and the FLDPLN library, built on the filled DEM, took the cut for water:
-    the reach's 0.6 m deep water at the 2-year flow flooded the city 17 m deep.
+    burn_linestring takes them: at a junction, its end, but a relocated line can run on past its junction.
 
     The burn keeps a line on the water the DEM flattens, at the water's level, and a line can come to that water from
     below it, cut deeper upstream (toward lower ground beside it, or below a reach flowing into it). The water then
@@ -1468,15 +1541,15 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
     reach away. Run down the fill, the line is cut through the water only where the fill rises along it, and only to
     the level the pool spills at, and it is the lowest way across the pool. Lowered instead wherever the burned line
     rose, to its lowest point so far, a line carried that point down the whole network below it until the ground came
-    lower: on the flat south Florida tile (N26W081), 74% of the stream cells were lowered, by a median 0.5 m, 12% to 0 m
-    or below, and the FLDPLN library, built on the filled DEM, backfilled up the lowered channels.
+    lower.
     """
     valid = (dem != nodata_value) & np.isfinite(dem)
     routing = fill_depressions(dem, valid)
     routing[~valid] = nodata_value
-    lines = {}
+    lines: dict[int, list[np.ndarray]] = {}
     for (_, cells), (reach, _) in zip(paths, path_reaches):
         lines.setdefault(reach, []).append(cells)
+
     lines = {reach: np.concatenate(cells) for reach, cells in lines.items()}
     starts = [np.unique(np.concatenate([s, np.array([_nearest_cell(lines[f], cells[0], dem.shape[1])
                                                      for f in feeders if f in lines], np.int64)]))
@@ -1489,6 +1562,7 @@ def routing_dem(dem: np.ndarray, nodata_value: float, paths: list, path_reaches:
                          np.asarray(dx_by_row, np.float64), float(dy))
     if lowered is not None:
         lowered.append(np.unique(cells[routing.ravel()[cells] < fill]))
+
     return routing
 
 
@@ -1515,7 +1589,7 @@ def _run_lines_down_fill(values: np.ndarray, starts: np.ndarray, start_ends: np.
     that one, off the paths (see _drain_cap; ``dx_by_row`` is the cells' width on each row and ``dy`` their height, in
     metres), but no more than ``max_drop`` below the fill. A cell on two paths keeps the lower.
     """
-    nrows, ncols = values.shape
+    _, ncols = values.shape
     flat = values.ravel()
     on_path = np.zeros(values.shape, np.bool_)
     on_path.ravel()[cells] = True
@@ -1530,21 +1604,26 @@ def _run_lines_down_fill(values: np.ndarray, starts: np.ndarray, start_ends: np.
             if flat[s] != nodata_value and flat[s] < level:
                 level = flat[s]
                 above = s
+
         for k in range(first_cell, cell_ends[i]):
             cell = cells[k]
             if flat[cell] == nodata_value:
                 continue
+
             value = min(fill[k], level - step)
             if above >= 0:
                 cap = _drain_cap(values, on_path, above // ncols, above % ncols, level, cell // ncols, cell % ncols,
                                  dx_by_row, dy, nodata_value) - step
                 value = min(value, max(cap, fill[k] - max_drop))
+
             if done[cell]:
                 value = min(value, flat[cell])
+
             flat[cell] = value
             done[cell] = True
             level = value
             above = cell
+
         first_start, first_cell = start_ends[i], cell_ends[i]
 
 @njit(cache=True)
@@ -1562,6 +1641,7 @@ def _label_terraces(values: np.ndarray, use: np.ndarray, n_use: int) -> tuple[np
         for c0 in range(ncols):
             if not use[r0, c0] or labels[r0, c0]:
                 continue
+
             count += 1
             z = values[r0, c0]
             labels[r0, c0] = count
@@ -1577,6 +1657,7 @@ def _label_terraces(values: np.ndarray, use: np.ndarray, n_use: int) -> tuple[np
                             labels[nr, nc] = count
                             cells[n] = nr * ncols + nc
                             n += 1
+
     return labels, cells[:n], count
 
 @njit(cache=True)
@@ -1612,10 +1693,12 @@ def _distance_to_step(values: np.ndarray, labels: np.ndarray, cells: np.ndarray,
                     if 0 < step <= max_step and step < best:
                         best = step
                         other[i] = values[nr, nc]
+
         if best < np.inf:
             dist[i] = 0
             queue[tail] = i
             tail += 1
+
     head = 0
     while head < tail:
         i = queue[head]
@@ -1629,6 +1712,7 @@ def _distance_to_step(values: np.ndarray, labels: np.ndarray, cells: np.ndarray,
                     other[k] = other[i]
                     queue[tail] = k
                     tail += 1
+
     return dist, other
 
 @njit(cache=True)
@@ -1647,6 +1731,7 @@ def _distance_to_bank(cells: np.ndarray, index: np.ndarray) -> np.ndarray:
                     dist[i] = 1
                     queue[tail] = i
                     tail += 1
+
     head = 0
     while head < tail:
         i = queue[head]
@@ -1659,6 +1744,7 @@ def _distance_to_bank(cells: np.ndarray, index: np.ndarray) -> np.ndarray:
                     dist[k] = dist[i] + 1
                     queue[tail] = k
                     tail += 1
+
     return dist
 
 def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float, min_cells: int = 1,
@@ -1683,17 +1769,20 @@ def _ramp_terraces(values: np.ndarray, use: np.ndarray, max_step: float, min_cel
         small = np.bincount(terrace, minlength=count + 1)[terrace] < min_cells
         labels.ravel()[cells[small]] = 0
         cells, terrace = cells[~small], terrace[~small]
+
     if cells.size == 0:
         return cells, np.empty(0), np.empty(0)
+    
     index = np.full(values.shape, -1, np.int32)
     index.ravel()[cells] = np.arange(cells.size, dtype=np.int32)
-    along = []
+    along: list[np.ndarray] = []
     for steps, nearest in ((above, np.fmin), (below, np.fmax)):
         z = np.full(cells.size, np.nan)
         if steps is not None:
             k = index.ravel()[steps[0]]
             nearest.at(z, k[k >= 0], steps[1][k >= 0])  # the smallest step, where a cell has several
         along.append(z)
+
     up, higher = _distance_to_step(values, labels, cells, index, max_step, True, along[0])
     down, lower = _distance_to_step(values, labels, cells, index, max_step, False, along[1])
     bank = _distance_to_bank(cells, index).astype(np.float64)
@@ -1738,6 +1827,7 @@ def _path_steps(values: np.ndarray, paths: list) -> tuple[tuple[np.ndarray, np.n
     own = np.full(flat.size, -1, np.int32)
     for i, (_, cells) in enumerate(paths):
         own[cells] = i
+
     tops, under_tops, bottoms, over_bottoms = [], [], [], []
     for i, (starts, cells) in enumerate(paths):
         upper = np.concatenate([starts, cells[:-1]])
@@ -1749,6 +1839,7 @@ def _path_steps(values: np.ndarray, paths: list) -> tuple[tuple[np.ndarray, np.n
         mine = own[lower] == i
         bottoms.append(lower[mine])
         over_bottoms.append(flat[upper[mine]])
+
     above = (np.concatenate(bottoms), np.concatenate(over_bottoms).astype(np.float64))
     below = (np.concatenate(tops), np.concatenate(under_tops).astype(np.float64))
     return above, below
@@ -1795,6 +1886,7 @@ def smooth_burned_dem(
     original = dem if original is None else original.astype(np.float32, copy=False)
     if mask is None:
         mask = (original % step) == 0
+
     mask = mask.astype(bool)
     valid = np.isfinite(dem) & (dem != nodata_value)
 
@@ -1806,6 +1898,7 @@ def smooth_burned_dem(
         lines = (streams > 0) & valid & (dem % step == 0)
         if fixed is not None:
             lines &= ~np.asarray(fixed, bool)
+
         if paths:
             # Only the steps down the lines' own paths: lines that touch elsewhere (a tributary beside the river, a
             # bend come back on itself) aren't the next step down either one
@@ -1820,6 +1913,7 @@ def smooth_burned_dem(
     in_water[water_cells] = np.arange(water_cells.size, dtype=np.int32)
     k = in_water[line_cells]
     del in_water
+
     wet = k >= 0
     ramp = line.copy()
     line[wet] = np.minimum(line[wet], water[k[wet]] - centre_drop)
@@ -1845,6 +1939,7 @@ def smooth_burned_dem(
         _never_rise(out.ravel(), ramps.ravel(), np.concatenate(starts), np.cumsum([s.size for s in starts]),
                     np.concatenate(cells), np.cumsum([c.size for c in cells]),
                     np.zeros(0, np.bool_) if fixed is None else np.ascontiguousarray(fixed, np.bool_).ravel())
+        
     return out
 
 @njit(cache=True)
@@ -1863,12 +1958,14 @@ def _bank_levels(values: np.ndarray, changed: np.ndarray, dx_by_row: np.ndarray,
         for c0 in range(ncols):
             if not changed[r0, c0]:
                 continue
+
             z = values[r0, c0]
             slope = 0.0
             for r in range(max(r0 - 1, 0), min(r0 + 2, nrows)):
                 for c in range(max(c0 - 1, 0), min(c0 + 2, ncols)):
                     if changed[r, c] and values[r, c] < z:
                         slope = max(slope, (z - values[r, c]) / _distance(r0, c0, r, c, dx_by_row, dy))
+
             for r in range(max(r0 - 1, 0), min(r0 + 2, nrows)):
                 for c in range(max(c0 - 1, 0), min(c0 + 2, ncols)):
                     if not changed[r, c]:
@@ -1895,6 +1992,7 @@ def _never_rise(values: np.ndarray, ramps: np.ndarray, starts: np.ndarray, start
         level = np.inf
         for k in range(first_start, start_ends[i]):
             level = min(level, values[starts[k]])
+
         below = ramps[cells[first_cell]] - min(values[cells[first_cell]], level)
         for k in range(first_cell, cell_ends[i]):
             cell = cells[k]
@@ -1902,9 +2000,11 @@ def _never_rise(values: np.ndarray, ramps: np.ndarray, starts: np.ndarray, start
                 level = values[cell]
                 below = ramps[cell] - values[cell]
                 continue
+
             below = max(below, ramps[cell] - values[cell])
             level = min(level, ramps[cell] - below)
             values[cell] = level
+
         first_start, first_cell = start_ends[i], cell_ends[i]
 
 def _get_stream_raster(dem_ds: gdal.Dataset, streams_gdf: gpd.GeoDataFrame, id_col: str = 'LINKNO',
@@ -1919,12 +2019,13 @@ def _get_stream_raster(dem_ds: gdal.Dataset, streams_gdf: gpd.GeoDataFrame, id_c
     keys = [c for c in (order_col, area_col) if c and c in streams_gdf.columns]
     if keys:
         streams_gdf = streams_gdf.sort_values(keys, kind="stable", na_position="first")
-    mem_ds = gdal.GetDriverByName('MEM').Create('', dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Int32)
+
+    mem_ds: gdal.Dataset = gdal.GetDriverByName('MEM').Create('', dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Int32)
     mem_ds.SetGeoTransform(dem_ds.GetGeoTransform())
     mem_ds.SetProjection(dem_ds.GetProjection())
     ogr_ds, stream_layer = _in_memory_ogr_layer(streams_gdf, dem_ds.GetProjection(), values=streams_gdf[id_col])
     gdal.RasterizeLayer(mem_ds, [1], stream_layer, options=["ATTRIBUTE=value"])
-    ogr_ds = None
+    ogr_ds = None  # noqa: F841
     mem_ds.FlushCache()
     streams = mem_ds.ReadAsArray()
 
@@ -2014,6 +2115,7 @@ def burn_streams_into_dem(
             lines = [geom]
         else:
             raise ValueError(f"Unsupported geometry type: {geom.geom_type}")
+        
         for line in lines:
             path = burn_linestring(dem, streams, dem_ds, line, stream_id, G, streams_gdf, (dx_by_row, dy),
                                    nodata_value, upstream.get(stream_id, []), leveled, kept)
@@ -2040,13 +2142,16 @@ def _largest_upstream_reaches(G: nx.DiGraph, streams_gdf: gpd.GeoDataFrame, orde
         table = streams_gdf[keys].apply(pd.to_numeric, errors="coerce").fillna(-np.inf)
         table = table.groupby(level=0).max()
         sizes = dict(zip(table.index, table.itertuples(index=False, name=None)))
+
     upstream = {}
     for reach in G:
         reaches = list(G.predecessors(reach))
         if sizes and len(reaches) > 1:
             largest = max(sizes.get(r, ()) for r in reaches)
             reaches = [r for r in reaches if sizes.get(r, ()) == largest]
+
         upstream[reach] = reaches
+
     return upstream
 
 @njit(cache=True, nogil=True)
@@ -2068,6 +2173,7 @@ def nearest_stream_raster_pixel(
     for r in (start_row - 1, start_row, start_row + 1):
         if r < 0 or r >= nrows:
             continue
+
         for c in (start_col - 1, start_col, start_col + 1):
             if c < 0 or c >= ncols:
                 continue
@@ -2159,15 +2265,18 @@ def burn_linestring(
         d_last = min(last_point.distance(g) for g in geoms)
         if d_first != d_last:
             flip = d_last < d_first
+
     neighbours = [n for n in G.successors(linkno) if n in streams_gdf.index]
     if flip is None and neighbours:
         geom = _first_geometry(streams_gdf, neighbours[0])
         d_first, d_last = first_point.distance(geom), last_point.distance(geom)
         if d_first != d_last:
             flip = d_first < d_last
+
     if flip is None:
         # Fallback to using elevation to determine upstream/downstream if no upstream or downstream nodes exist.
         flip = bool(dem[row1, col1] < dem[row2, col2])
+
     if flip:
         coords = np.flipud(coords)
         col1, row1, col2, row2 = col2, row2, col1, row1  # Swap the coordinates as well
@@ -2177,6 +2286,7 @@ def burn_linestring(
     # Check if we have any upstream ids.
     if upstream_ids is None:
         upstream_ids = list(G.predecessors(linkno))
+
     dx_by_row, dy = np.asarray(cell_size[0], np.float64), float(cell_size[1])
     last_elevation = np.inf
     starts = []
@@ -2193,6 +2303,7 @@ def burn_linestring(
     path = _burn_cells(dem, streams, rows, cols, left, last_elevation, nodata_value, dx_by_row, dy)
     if kept is not None:
         kept[rows[left], cols[left]] = True
+
     return (np.array(starts, np.int64), path) if path.size > 1 else None
 
 def _first_geometry(streams_gdf: gpd.GeoDataFrame, stream_id):
@@ -2266,19 +2377,21 @@ def _line_cells(
                 for k in range(1, steps):
                     fr = last_row + (row - last_row) * k / steps
                     fc = last_col + (col - last_col) * k / steps
-                    r = int(math.floor(fr + 0.5))
-                    c = int(math.floor(fc + 0.5))
-                    for rr in (int(math.floor(fr)), int(math.ceil(fr))):
-                        for cc in (int(math.floor(fc)), int(math.ceil(fc))):
+                    r = math.floor(fr + 0.5)
+                    c = math.floor(fc + 0.5)
+                    for rr in (math.floor(fr), math.ceil(fr)):
+                        for cc in (math.floor(fc), math.ceil(fc)):
                             if 0 <= rr < nrows and 0 <= cc < ncols and streams[rr, cc] == linkno:
                                 r, c = rr, cc
                     if 0 <= r < nrows and 0 <= c < ncols and dem[r, c] != nodata_value:
                         rows.append(r)
                         cols.append(c)
+
             rows.append(row)
             cols.append(col)
             last_row = row
             last_col = col
+
     return np.array(rows, np.int64), np.array(cols, np.int64)
 
 
@@ -2321,8 +2434,7 @@ def _burn_cells(
         downstream_elev = dem[row2, col2]
 
         if not keep[k]:
-            if upstream_elev > last_elevation:
-                upstream_elev = last_elevation
+            upstream_elev = min(upstream_elev, last_elevation)
 
             if upstream_elev % 0.5 != 0:
                 upstream_elev = math.floor(upstream_elev * 2) / 2
@@ -2334,14 +2446,14 @@ def _burn_cells(
             # instead. Lowered to the lowest ground beside itself, a cell at the lip of a cliff was cut to the cliff's
             # foot, and the line stayed that deep downstream until the ground came down to it.
             cap = _drain_cap(dem, streams, row1, col1, upstream_elev, row2, col2, dx_by_row, dy, nodata_value)
-            if downstream_elev > cap:
-                downstream_elev = cap
+            downstream_elev = min(downstream_elev, cap)
             if downstream_elev > upstream_elev:
                 downstream_elev = upstream_elev
             elif downstream_elev % 0.5 != 0:
                 downstream_elev = math.floor(downstream_elev * 2) / 2
 
             dem[row2, col2] = downstream_elev
+
         last_elevation = downstream_elev
         if keep[k]:
             continue  # left as the DEM has it, and the ground around it too
@@ -2351,12 +2463,14 @@ def _burn_cells(
         drop = upstream_elev - downstream_elev
         if drop < 0:
             continue
+
         step = _distance(row1, col1, row2, col2, dx_by_row, dy)
         for r in range(max(row1 - 1, 0), min(row1 + 2, nrows)):
             for c in range(max(col1 - 1, 0), min(col1 + 2, ncols)):
                 if streams[r, c] > 0 or dem[r, c] == nodata_value or (r == row1 and c == col1) or \
                         (r == row2 and c == col2):
                     continue
+
                 distance = _distance(row1, col1, r, c, dx_by_row, dy)
                 if (upstream_elev - dem[r, c]) * step >= drop * distance:
                     dem[r, c] = upstream_elev - drop * distance / step + 0.5
@@ -2388,7 +2502,9 @@ def _drain_cap(dem: np.ndarray, streams: np.ndarray, row: int, col: int, level: 
         for c in range(max(col - 1, 0), min(col + 2, ncols)):
             if streams[r, c] > 0 or dem[r, c] == nodata_value or dem[r, c] >= level:
                 continue
+
             cap = min(cap, level - (level - dem[r, c]) * step / _distance(row, col, r, c, dx_by_row, dy))
+
     return cap
 
 # How far the D8 path may run outside a reach's cells before the reach is finished. A moved reach never leaves
@@ -2419,14 +2535,17 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
             code = flowdir[pixel]
             if code < 0 or code > 255:
                 break
+
             d_row = row_offsets[code]
             d_col = col_offsets[code]
             if d_row == 0 and d_col == 0:  # pit, outlet, or nodata
                 break
+
             row = pixel // ncols + d_row
             col = pixel % ncols + d_col
             if row < 0 or row >= nrows or col < 0 or col >= ncols:
                 break
+
             pixel = row * ncols + col
             j = np.searchsorted(cells, pixel)
             if j < n and cells[j] == pixel:
@@ -2445,6 +2564,7 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
     for root in range(n):
         if state[root] != 0:
             continue
+
         top = 0
         stack[0] = root
         state[root] = 1
@@ -2456,6 +2576,7 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
                 stack[top] = j
                 state[j] = 1
                 continue
+
             if j < 0 or state[j] == 1:  # end of the path, or a cycle across a flat
                 link[i] = -1
                 covered[i] = 1
@@ -2465,6 +2586,7 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
                 covered[i] = 1 + covered[j]
                 path_len[i] = gap[i] + path_len[j]
                 terminus[i] = terminus[j]
+
             state[i] = 2
             top -= 1
 
@@ -2472,6 +2594,7 @@ def _trace_reach(cells: np.ndarray, flowdir: np.ndarray, nrows: int, ncols: int,
     for i in range(1, n):
         if covered[i] > covered[head] or (covered[i] == covered[head] and path_len[i] > path_len[head]):
             head = i
+
     return cells[head], cells[terminus[head]], path_len[head] + 1
 
 def _create_stream_info_table(
@@ -2496,6 +2619,7 @@ def _create_stream_info_table(
 
     if flowdir is None:
         flowdir = gdal.Open(str(flow_direction_file)).ReadAsArray()
+        
     if flowdir.shape != streams_array.shape:
         raise ValueError(
             f"Flow direction raster {flow_direction_file} is {flowdir.shape} but the stream raster is "

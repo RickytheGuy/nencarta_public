@@ -1,10 +1,13 @@
 from pathlib import Path
 
+from nencarta import dem_cleaner
 from nencarta.logger import LOG
-from nencarta import DEM_Cleaner
-from nencarta.workspace import Workspace
+from nencarta.tasks.make_flow_file_from_reanalysis import (
+    _make_flood_flow_file_from_base_max_file,
+)
 from nencarta.tasks.run_models import _run_mapper, run_arc_for_initial_floodmap
-from nencarta.tasks.make_flow_file_from_reanalysis import _make_flood_flow_file_from_base_max_file
+from nencarta.workspace import Workspace
+
 
 def make_clean_dem(workspace: Workspace) -> Path:
     """
@@ -76,7 +79,7 @@ def make_clean_dem(workspace: Workspace) -> Path:
         streamlines = workspace.DEM_StrmShp
         stream_raster = workspace.STRM_File_Clean
 
-    DEM_Cleaner.DEM_Cleaner_Program(OutputID,
+    dem_cleaner.DEM_Cleaner_Program(OutputID,
                                     streamlines, 
                                     dem.parent, 
                                     [dem.name], 

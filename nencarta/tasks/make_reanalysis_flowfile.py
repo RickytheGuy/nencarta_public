@@ -1,25 +1,30 @@
 import io
-import os
 import json
+import os
 import shutil
-import weakref
 import tempfile
-from pathlib import Path
+import weakref
 from functools import cache
+from pathlib import Path
 
 import fsspec
-import requests
 import numpy as np
 import pandas as pd
+import requests
 import xarray as xr
 
-from nencarta.logger import LOG
-from nencarta.core.vector import Vector
-from nencarta.workspace import Workspace
+from nencarta._constants import (
+    GEOGLOWS_DAILY_URL,
+    GEOGLOWS_FDC_URL,
+    GEOGLOWS_RETURN_PERIODS_URL,
+    NWM_RP_URL,
+)
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.enumerations import StreamflowSource
+from nencarta.core.vector import Vector
 from nencarta.exceptions import NoStreamsFoundException
-from nencarta._constants import GEOGLOWS_RETURN_PERIODS_URL, GEOGLOWS_FDC_URL, GEOGLOWS_DAILY_URL, NWM_RP_URL
+from nencarta.logger import LOG
+from nencarta.workspace import Workspace
 
 # Exceedance probabilities (%) taken from the flow duration curve
 FDC_EXCEEDANCES = np.array([*range(0, 101, 5), 1], dtype=float)
@@ -50,6 +55,7 @@ def _table_to_dataset(df: pd.DataFrame, dim: str, id_field: str) -> xr.Dataset:
     id_col = "river_id" if "river_id" in df.columns else id_field
     if id_col not in df.columns:
         raise ValueError(f"The table has neither a 'river_id' nor a '{id_field}' column.")
+    
     prefix = "rp" if dim == "return_period" else "p_exceed_"
     columns = {}
     for col in df.columns:
@@ -58,6 +64,7 @@ def _table_to_dataset(df: pd.DataFrame, dim: str, id_field: str) -> xr.Dataset:
                 columns[col] = float(col[len(prefix):])
             except ValueError:
                 pass  # e.g. rp100_premium
+
     if not columns:
         raise ValueError(f"The table has no {prefix}<value> columns.")
 
@@ -84,6 +91,7 @@ def _open_flow_dataset(source: str, dim: str, id_field: str, storage_options_jso
             protocol = source.split("://", 1)[0]
             local_source = fsspec.open_local(f"simplecache::{source}", **{protocol: storage_options or {}},
                                              simplecache={"cache_storage": cache_dir})
+            
         ds = xr.open_dataset(local_source)
         if local_source != source:
             weakref.finalize(ds, shutil.rmtree, cache_dir, True)
@@ -96,9 +104,11 @@ def _open_flow_dataset(source: str, dim: str, id_field: str, storage_options_jso
 
     if "river_id" not in ds.dims and id_field in ds.dims:
         ds = ds.rename({id_field: "river_id"})
+
     for required in ("river_id", dim):
         if required not in ds.dims:
             raise ValueError(f"Streamflow dataset {source} has no '{required}' dimension; it has {list(ds.dims)}.")
+        
     return ds
 
 def _open_flows(source: str, dim: str, configs: NencartaConfig) -> xr.Dataset:
@@ -115,6 +125,7 @@ def _river_ids_in(ds: xr.Dataset, river_ids: np.ndarray, source: str, configs: N
     message = f"{len(missing)} of {len(river_ids)} river IDs in the domain are not in {source} (e.g. {missing[:5].tolist()})"
     if configs.raise_errors_if_river_ids_missing:
         raise MissingRiverIdsError(f"{message}. Set 'raise_errors_if_river_ids_missing' to False to drop them.")
+    
     LOG.warning(f"{message}; dropping them.")
     return river_ids[found]
 
@@ -131,6 +142,7 @@ def _return_period_flows(rp_ds: xr.Dataset, river_ids: np.ndarray, source: str, 
             f"Return period dataset {source} {problem}; "
             f"set 'return_period_variables' to some of {_variables_with_dims(rp_ds, 'return_period')}."
         )
+    
     rp_df = rp_ds[variables].sel(river_id=river_ids).to_dataframe().reset_index()
 
     # Where there are several variables, use the highest flow
@@ -167,6 +179,7 @@ def _fdc_flows(fdc_ds: xr.Dataset, river_ids: np.ndarray, source: str, configs: 
             variable = "hourly_annual"
         elif len(candidates) == 1:
             variable = candidates[0]
+
     if variable is None or variable not in fdc_ds.data_vars:
         problem = f"has no variable {variable!r}" if variable else f"has {'several' if candidates else 'no'} variables of river_id and p_exceed"
         raise ValueError(f"Flow duration curve dataset {source} {problem}; set 'fdc_variable' to one of {candidates}.")
@@ -293,8 +306,8 @@ def _get_nwm_rp(comids: list[int], nwm_api_key: str):
 def make_reanalysis_file(workspace: Workspace) -> Path:
     """
     Write the flow statistics of each reach in the domain (workspace.DEM_Reanalsyis_FlowFile): its return period
-    flows and, for GEOGLOWS with include_fdc, its flow duration curve flows, plus the "premium" high flows
-    (1.5 times the flow, plus 50 m3/s). Reaches whose baseflow is below q_baseflow_threshold are left out. When
+    flows and, for GEOGLOWS with include_fdc, its flow duration curve flows, plus the "premium" high flows. 
+    Reaches whose baseflow is below q_baseflow_threshold are left out. When
     reanalysis_file is given, it is used instead.
     """
     configs = workspace.configs

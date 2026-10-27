@@ -5,9 +5,10 @@ import numpy as np
 from numba import njit
 from osgeo import gdal, ogr
 
-from nencarta.logger import LOG
 from nencarta.core.raster import Raster
+from nencarta.logger import LOG
 from nencarta.workspace import Workspace
+
 
 @njit(cache=True)
 def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]:
@@ -24,6 +25,7 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
                 num_nonzero += 1
             else:
                 array[r, c] = 0
+
     RR = np.empty(num_nonzero, np.int64)
     CC = np.empty(num_nonzero, np.int64)
     k = 0
@@ -33,39 +35,31 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
                 RR[k] = r
                 CC[k] = c
                 k += 1
+
     first_pass = 0
     second_pass = 0
-    
-    for filterpass in range(2):
+    for _ in range(2):
         #First pass is just to get rid of single cells hanging out not doing anything
         p_count = 0
         p_percent = (num_nonzero+1)/100.0
         for x in range(num_nonzero):
             if x>=p_count*p_percent:
                 p_count = p_count + 1
+
             r=RR[x]
             c=CC[x]
             V = array[r,c]
             if V>0:
                 #Left and Right cells are zeros
-                if array[r,c+1]==0 and array[r,c-1]==0:
-                    #The bottom cells are all zeros as well, but there is a cell directly above that is legit
-                    if (array[r+1,c-1]+array[r+1,c]+array[r+1,c+1])==0 and array[r-1,c]>0:
-                        array[r,c] = 0
-                        first_pass += 1
-                    #The top cells are all zeros as well, but there is a cell directly below that is legit
-                    elif (array[r-1,c-1]+array[r-1,c]+array[r-1,c+1])==0 and array[r+1,c]>0:
-                        array[r,c] = 0
-                        first_pass += 1
+                #The bottom cells are all zeros as well, but there is a cell directly above that is legit
+                if array[r,c+1]==0 and array[r,c-1]==0 and ((array[r+1,c-1]+array[r+1,c]+array[r+1,c+1])==0 and array[r-1,c]>0 or (array[r-1,c-1]+array[r-1,c]+array[r-1,c+1])==0 and array[r+1,c]>0):
+                    array[r,c] = 0
+                    first_pass += 1
                 #top and bottom cells are zeros
-                if array[r,c]>0 and array[r+1,c]==0 and array[r-1,c]==0:
+                if array[r,c]>0 and array[r+1,c]==0 and array[r-1,c]==0 and ((array[r+1,c+1]+array[r,c+1]+array[r-1,c+1])==0 and array[r,c-1]>0 or (array[r+1,c-1]+array[r,c-1]+array[r-1,c-1])==0 and array[r,c+1]>0):
                     #All cells on the right are zero, but there is a cell to the left that is legit
-                    if (array[r+1,c+1]+array[r,c+1]+array[r-1,c+1])==0 and array[r,c-1]>0:
-                        array[r,c] = 0
-                        first_pass += 1
-                    elif (array[r+1,c-1]+array[r,c-1]+array[r-1,c-1])==0 and array[r,c+1]>0:
-                        array[r,c] = 0
-                        first_pass += 1
+                    array[r,c] = 0
+                    first_pass += 1
         
         #This pass is to remove all the redundant cells
         p_count = 0
@@ -73,6 +67,7 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
         for x in range(num_nonzero):
             if x>=p_count*p_percent:
                 p_count = p_count + 1
+                
             r=RR[x]
             c=CC[x]
             V = array[r,c]
@@ -89,10 +84,9 @@ def _clean_stream_raster_array(array: np.ndarray) -> tuple[np.ndarray, int, int]
                     if sum(array[r-1:r+1,c+2])==0:
                         array[r,c+1] = 0
                         second_pass += 1
-                elif array[r,c-1]==V and (array[r+1,c-1]==V or array[r-1,c-1]==V):
-                    if sum(array[r-1:r+1,c-2])==0:
-                            array[r,c-1] = 0
-                            second_pass += 1
+                elif array[r,c-1]==V and (array[r+1,c-1]==V or array[r-1,c-1]==V) and sum(array[r-1:r+1,c-2])==0:
+                    array[r,c-1] = 0
+                    second_pass += 1
 
     return array, first_pass, second_pass
 

@@ -1,20 +1,21 @@
 import subprocess
 from pathlib import Path
 
+from nencarta._constants import FLOODSPREADER_PATH
+from nencarta.core.configs import NencartaConfig
+from nencarta.core.enumerations import Mapper
+from nencarta.core.floodmapper_output import FloodMapperBulkOutput
+from nencarta.core.inspect_config import inspect_config
+from nencarta.core.model_config import ModelConfig
 from nencarta.core.raster import Raster
 from nencarta.logger import LOG
-from nencarta.workspace import Workspace
-from nencarta.core.enumerations import Mapper
-from nencarta.core.configs import NencartaConfig
-from nencarta._constants import FLOODSPREADER_PATH
-from nencarta.core.inspect_config import inspect_config
-from nencarta.core.floodmapper_output import FloodMapperBulkOutput
-from nencarta.core.model_config import ModelConfig
 from nencarta.tasks.move_streams import load_lake_array
+from nencarta.workspace import Workspace
+
 
 def _run_arc(config: Path, model_config: ModelConfig) -> None:
     """Run ARC on a config file."""
-    from arc import Arc # Lazy import helps load faster
+    from arc import Arc  # Lazy import helps load faster
     Arc(str(config), quiet=model_config.quiet).run()
 
 def _run_mapper(config_file: Path, model_config: ModelConfig) -> None:

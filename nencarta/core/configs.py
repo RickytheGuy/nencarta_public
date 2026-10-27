@@ -1,11 +1,11 @@
 import os
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime
-from collections.abc import Sequence
 
-from nencarta.logger import LOG
-from nencarta.core.defaults import DEFAULT_CONFIG, VALID_RETURN_PERIODS
+from nencarta.core.defaults import CONFIG_OPTIONS, DEFAULT_CONFIG, VALID_RETURN_PERIODS
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.logger import LOG
 
 # The reach ID and downstream reach ID attributes of each source's stream networks; a custom network's must be given
 STREAM_ID_FIELDS = {"GEOGLOWS": ("LINKNO", "DSLINKNO"), "NWM": ("COMID", "TOCOMID"), "CUSTOM": (None, None)}
@@ -21,9 +21,11 @@ def strip_quotes(text):
     """``text`` without the quotes around it, as a path copied from a file browser has; other values as they are."""
     if not isinstance(text, str):
         return text
+    
     text = text.strip()
     while len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
         text = text[1:-1].strip()
+
     return text
 
 def norm_or_none(path: str):
@@ -33,8 +35,23 @@ def norm_or_none(path: str):
 
 class NencartaConfig:
     """
-    One watershed's settings: a config dictionary (keys in core/defaults.py), checked, with defaults filled in for
-    missing keys and keys set to None.
+    One watershed's settings, checked, with the defaults filled in.
+
+    Making one checks the settings as a run does, without running anything. Each setting is then an attribute of
+    the same name, typed, with its default where the key was left out or set to None (``name`` is
+    ``watershed_name``). A key NenCarta doesn't know is ignored with a warning.
+
+    Parameters
+    ----------
+    config_dict : dict
+        The watershed's settings, by their keys in the configuration reference (`CONFIG_OPTIONS`).
+
+    Raises
+    ------
+    KeyError
+        When ``name``, ``output_dir``, a DEM or the streams are missing.
+    ValueError
+        When a setting is invalid, or two settings conflict.
     """
 
     def __init__(self, config_dict: dict):
@@ -46,12 +63,15 @@ class NencartaConfig:
         hour = self.get("forensic_forecast_hour")
         if hour is None or hour == "":
             return None
+        
         try:
             hour = int(hour)
         except (TypeError, ValueError):
             raise ValueError(f"Invalid forensic_forecast_hour: {hour}")
+        
         if hour not in range(24):
             raise ValueError(f"Invalid forensic_forecast_hour: {hour}. It must be between 0 and 23.")
+        
         return f"{hour:02d}"
 
     def validate_forecast_hours(self):
@@ -77,17 +97,22 @@ class NencartaConfig:
         """
         if self.streamflow_source != StreamflowSource.CUSTOM:
             return
+        
         name = f"Watershed '{self.watershed_name}'"
         if not self.stream_id_field or not self.downstream_id_field:
             raise ValueError(f"{name}: a custom 'streamflow_source' needs 'stream_id_field' and 'downstream_id_field'.")
+        
         if self.floodmap_mode == FloodMapMode.FORECAST:
             raise ValueError(f"{name}: forecasts come from GEOGLOWS or NWM; with a custom 'streamflow_source', map "
                              "'user_flow_files' or 'return_periods' instead.")
+        
         if self.reanalysis_file:
             return
+        
         if not self.return_period_file:
             raise ValueError(f"{name}: a custom 'streamflow_source' takes its flow statistics from 'reanalysis_file', "
                              "or from 'return_period_file' (and 'fdc_file' for p_exceed flows).")
+        
         fdc_fields = [field for field in (self.specified_bathyflow_field, self.specified_highflow_field)
                       if str(field).startswith("p_exceed")]
         if fdc_fields and not (self.fdc_file and self.include_fdc):
@@ -109,12 +134,14 @@ class NencartaConfig:
         date = self.get("forensic_forecast_date")
         if not date:
             return None
+        
         for date_format in ('%Y%m%d', '%Y-%m-%d %H:%M:%S %Z'):
             try:
                 datetime.strptime(date, date_format)
                 return date
             except ValueError:
                 pass
+
         raise ValueError(f"Invalid forensic_forecast_date format: {date}")
 
     def verify_required_keys(self):
@@ -123,8 +150,10 @@ class NencartaConfig:
         for key in required_keys:
             if key not in self.config_dict:
                 raise KeyError(f"Missing required key in watershed {self.get('name', 'unknown')}: {key}")
+            
         if not any(key in self.config_dict for key in ["dem", "source_dems", "dem_dir"]):
             raise KeyError(f"Watershed '{self.get('name', 'unknown')}' must have at least one of the following keys: 'dem', 'source_dems', or 'dem_dir'.")
+        
         if not any(key in self.config_dict for key in ["flowline", "source_flowlines"]):
             raise KeyError(f"Watershed '{self.get('name', 'unknown')}' must have at least one of the following keys: 'flowline', or 'source_flowlines'.")
 
@@ -166,10 +195,12 @@ class NencartaConfig:
         if bbox:
             if not isinstance(bbox, Sequence) or len(bbox) != 4:
                 raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has invalid 'bbox': {bbox}. Must be a sequence of four floats [minx, miny, maxx, maxy].")
+           
             try:
                 bbox = [float(coord) for coord in bbox]
             except ValueError:
                 raise ValueError(f"Watershed '{self.get('name', 'unknown')}' has non-numeric values in 'bbox': {bbox}. All coordinates must be convertible to float.")
+        
         return bbox
 
     def validate_return_periods(self):
@@ -178,6 +209,7 @@ class NencartaConfig:
         if return_periods and self.floodmap_mode == FloodMapMode.RETURN_PERIOD:
             if isinstance(return_periods, str) or not isinstance(return_periods, Sequence):
                 return_periods = [return_periods]
+
             try:
                 return_periods = [int(rp) for rp in return_periods]
             except ValueError:
@@ -189,13 +221,29 @@ class NencartaConfig:
 
         return return_periods
 
+    def validate_outlet_exchange(self) -> str:
+        """Return outlet_exchange, checked to be off, pass1 or pass2, with buffer and standard_step for the passes."""
+        mode = str(self.get("outlet_exchange") or "off").lower()
+        if mode not in CONFIG_OPTIONS["outlet_exchange"].choices:
+            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'outlet_exchange' must be one of "
+                             f"{list(CONFIG_OPTIONS['outlet_exchange'].choices)}, not {mode!r}.")
+        
+        if mode != "off" and not (self.get("buffer") and self.get("standard_step")):
+            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'outlet_exchange' {mode} needs 'buffer' (the "
+                             "neighbouring DEMs' water is where their buffers overlap this DEM) and 'standard_step' "
+                             "(which starts the outlets from it).")
+        
+        return mode
+
     def get(self, key: str, default=None):
         """Return a copy of a config value, or its default when it is missing or None."""
         if default is None and key in DEFAULT_CONFIG:
             default = DEFAULT_CONFIG[key]
+
         value = self.config_dict.get(key, default)
         if value is None and default is not None:
             return deepcopy(default)
+        
         return deepcopy(value)
 
     def get_path(self, key: str, default=None):
@@ -208,12 +256,14 @@ class NencartaConfig:
         num_workers = self.get("num_workers")
         if num_workers is None:
             return None
+        
         try:
             num_workers = int(num_workers)
             if num_workers < 1:
                 raise ValueError
         except (TypeError, ValueError):
             raise ValueError(f"Invalid 'num_workers' value: {num_workers}. Must be a positive integer.")
+        
         return num_workers
 
     def setup(self):
@@ -294,6 +344,10 @@ class NencartaConfig:
         self.valley_sections: bool = self.get("valley_sections")
         self.valley_dir_widths: float = self.get("valley_dir_widths")
         self.valley_dir_dist: int = self.get("valley_dir_dist")
+        self.drop_edge_sections: bool = self.get("drop_edge_sections")
+        self.edge_margin: float = self.get("edge_margin")
+        self.outlet_exchange: str = self.validate_outlet_exchange()
+        self.outlet_exchange_dir: str = self.get_path("outlet_exchange_dir")
         self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem")
         self.geoglows_vpu: str = self.get("geoglows_vpu")
         self.specified_bathyflow_field: str = self.get("specified_bathyflow_field")

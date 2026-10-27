@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 
-
 VALID_RETURN_PERIODS = (2, 5, 10, 25, 50, 100)
 
 # The flow columns of the reanalysis file nencarta builds
@@ -42,9 +41,21 @@ DEFAULT_FLOODMAP_ARGS = {
 @dataclass(frozen=True)
 class ConfigOption:
     """
-    One configuration key. ``kind`` is the type of its value: text, path, int, float, bool, dict, or a list of
-    text, paths, ints or floats (str_list, path_list, int_list, float_list). ``choices`` are its usual values.
+    One configuration key: its default, the type of its value, and what it does.
+
+    Parameters
+    ----------
+    default : object
+        The value a watershed gets when it leaves the key out or sets it to None.
+    kind : str
+        The type of its value: ``text``, ``path``, ``int``, ``float``, ``bool``, ``dict``, or a list of text,
+        paths, ints or floats (``str_list``, ``path_list``, ``int_list``, ``float_list``).
+    help : str
+        A short description, the help of its command line option.
+    choices : tuple
+        Its usual values, if it has a set of them.
     """
+
     default: object
     kind: str
     help: str
@@ -73,7 +84,7 @@ CONFIG_SECTIONS = {
         "use_warning_flags_to_download_dem": ConfigOption(False, "bool", "Download USGS DEMs into dem_dir where the "
                                                                          "GEOGLOWS forecast of forensic_forecast_date "
                                                                          "floods rivers in geoglows_vpu (CONUS only)."),
-        "geoglows_vpu": ConfigOption(None, "text", "GEOGLOWS VPU (e.g. 714) for use_warning_flags_to_download_dem."),
+        "geoglows_vpu": ConfigOption(None, "text", "GEOGLOWS V2 VPU (e.g. 714) for use_warning_flags_to_download_dem."),
     },
     "Streams": {
         "flowline": ConfigOption(None, "path", "Stream network file (shapefile, GeoPackage, GeoParquet, ...)."),
@@ -94,10 +105,10 @@ CONFIG_SECTIONS = {
         "lake_filter_json": ConfigOption(None, "path", "GEOGLOWS JSON of the reaches inside lakes. Those reaches are "
                                                        "left out."),
         "lakes": ConfigOption(None, "path", "Lake polygons. Lakes are kept out of burned channels and cut the moved "
-                                            "stream network. Put the sea in ocean."),
+                                            "stream network."),
         "ocean": ConfigOption(None, "path", "Ocean polygons, which the burned DEM has no data in (burn_streams): the "
                                             "streams end where they first reach the sea, and the reaches below are "
-                                            "left out. A DEM's cells at 0 m aren't taken for the sea."),
+                                            "left out."),
         "move_stream_network_to_thalweg": ConfigOption(False, "bool", "Move each reach onto the DEM's flow path. "
                                                                       "Required by Curve2Flood-FLDPLNpy."),
         "new_strm_threshold_km2": ConfigOption(1, "float", "Smallest drainage area (km2) of the DEM flow paths that "
@@ -212,9 +223,7 @@ CONFIG_SECTIONS = {
                                                      "standard-step method, instead of each cross section's normal "
                                                      "depth."),
         "valley_sections": ConfigOption(False, "bool", "Take ARC's overbank flow on lines out from each cross "
-                                                       "section's banks square to the valley, at the valley's slope: "
-                                                       "over a meandering river's floodplain, the water runs down the "
-                                                       "valley, not along the channel."),
+                                                       "section's banks square to the valley, at the valley's slope."),
         "valley_dir_widths": ConfigOption(16.0, "float", "How far along the stream, in channel widths either way, ARC "
                                                          "takes the valley's direction and the stream's sinuosity "
                                                          "over, for valley_sections: about a meander's length, which "
@@ -223,6 +232,23 @@ CONFIG_SECTIONS = {
                                                    "valley's direction and the stream's sinuosity over, for "
                                                    "valley_sections, where a reach has no banks to give its width "
                                                    "(or with valley_dir_widths 0). At least 2."),
+        "drop_edge_sections": ConfigOption(False, "bool", "Drop ARC's rating curves whose water, at their top flow, "
+                                                          "reaches the DEM's edge (or comes within edge_margin of "
+                                                          "it): the edge cuts their cross sections off, so tiles "
+                                                          "whose buffers overlap give the same cell different water, "
+                                                          "a seam where their maps meet."),
+        "edge_margin": ConfigOption(0.0, "float", "How close (m) the water's edge may come to the DEM's edge before "
+                                                  "drop_edge_sections drops the rating curve. 0 drops only those "
+                                                  "whose water reaches it."),
+        "outlet_exchange": ConfigOption("off", "text", "Start ARC's rivers that leave a buffered DEM from the water "
+                                                       "its neighbouring DEMs have there, instead of normal depth: "
+                                                       "pass1 rates only the reaches the neighbours need and writes "
+                                                       "their water to outlet_exchange_dir; pass2, once every DEM "
+                                                       "has done pass1, maps each DEM from its neighbours' water. "
+                                                       "Needs buffer and standard_step.",
+                                        ("off", "pass1", "pass2")),
+        "outlet_exchange_dir": ConfigOption(None, "path", "Folder the DEMs' outlet_exchange passes share. Empty: "
+                                                          "output_dir/outlet_exchange."),
         "bathy_args": ConfigOption(DEFAULT_BATHY_ARGS, "dict", "More ARC settings for the bathymetry run. Replaces "
                                                                "the whole default set."),
     },
@@ -306,5 +332,4 @@ CONFIG_SECTIONS = {
 }
 
 CONFIG_OPTIONS = {key: option for options in CONFIG_SECTIONS.values() for key, option in options.items()}
-
 DEFAULT_CONFIG = {key: option.default for key, option in CONFIG_OPTIONS.items()}

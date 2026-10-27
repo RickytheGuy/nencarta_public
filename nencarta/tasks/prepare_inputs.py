@@ -1,32 +1,36 @@
 
+from nencarta.core.enumerations import FloodMapMode
+from nencarta.core.model_config import ModelConfig
 from nencarta.tasks import (
-    assign_and_validate_dem,
     Create_BaseLine_Manning_n_File_ESA,
-    make_land_cover,
-    make_stream_geometry,
+    assign_and_validate_dem,
+    assign_user_flow_files,
     burn_streams_and_move_streams,
+    define_arc_configs,
     define_configs_for_dem_cleaning,
+    define_mapper_configs,
+    get_fist_inputs,
     make_clean_dem,
-    make_reanalysis_file,
-    make_stream_raster,
     make_flood_flow_file_from_base_max_file,
     make_flow_file_from_forecast,
-    assign_user_flow_files,
+    make_land_cover,
+    make_outlet_wse_file,
+    make_reanalysis_file,
     make_return_period_flow_file,
-    define_arc_configs,
-    define_mapper_configs,
+    make_stream_geometry,
+    make_stream_raster,
     make_water_mask,
     remove_old_forecast_files,
-    get_fist_inputs)
+)
 from nencarta.workspace import Workspace
-from nencarta.core.model_config import ModelConfig
-from nencarta.core.enumerations import FloodMapMode
+
 
 def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     """
     Make every input one DEM needs, in order: the DEM, Manning's n, land cover, streams, flow statistics, stream
-    raster, water mask, burned and moved streams, cleaned DEM, flow files, and the ARC and flood mapper configs.
-    Files that exist are reused unless overwrite. Returns the configs.
+    raster, water mask, burned and moved streams, cleaned DEM, flow files, and the ARC and flood mapper configs
+    (with outlet_exchange pass2, first the outlets' water from the neighbouring DEMs). Files that exist are reused
+    unless overwrite. Returns the configs.
     """
     DEM = workspace.assigned_dem
     configs = workspace.configs
@@ -66,6 +70,9 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     else:
         flow_files = []
 
+    if configs.outlet_exchange == "pass2":
+        make_outlet_wse_file(workspace)
+        
     arc_config = define_arc_configs(workspace)
 
     mapper_configs = []

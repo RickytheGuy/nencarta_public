@@ -10,25 +10,16 @@ hold across them, given the streams:
   (FABDEM, Copernicus, USGS 3DEP). On a DEM rounded more coarsely (GEDTM's 0.1 m, SRTM's whole metres) most of the
   land is flat too, and flatness says nothing. Only within ``flat_widths`` times the river's expected width (see
   below) of the stream, and always within ``flat_min_m``, as far as ``snap_m`` allows a stream to be drawn off its
-  water: FABDEM levels marshes and fields as well as water. In the Everglades (n26w081) the flat land anywhere within
-  the 1.5 km corridor made kilometre-wide bands along every marsh stream, half the water mask; within two widths it
-  is 0.6% of the land, and the FIM benchmark scores best (MCC +0.0011 over the corridor alone, against +0.0008 for
-  one width and +0.0007 for three, and -0.0004 with flat water only on the streams).
+  water: FABDEM levels marshes and fields as well as water.
 - Low ground by the stream: no more than ``rise_m`` above the river beside it, within ``widths`` of the river's
   expected width (``width_per_sqrt_km2`` metres per square root of the drainage area in km2) of the stream, along a
   river expected to be at least a cell wide. A narrower river's channel is its stream cells. Only on a DEM with no
   flat water by its streams (one rounded coarsely, or that leaves its water as rough as the land): a DEM that
   flattens its rivers' water leaves unflattened only those too narrow for it, and their low ground is the floodplain
-  beside them. The Jordan through Salt Lake City (n40w112, FABDEM) is about a cell wide but drains 9,400 km2, so
-  expected 107 m wide, and its low ground made a mask 200 to 300 m wide down its floodplain. On the FIM sites' FABDEM
-  the low ground added 83,000 cells to the flat water's 697,000, 2,700 of them the land cover's river water, and the
-  flat water alone finds that water better at 61 of 63 sites (F1 0.84 against 0.79 over all of them).
+  beside them.
 
 The river beside a cell is its nearest stream cell, whose level is the lowest of the DEM within ``snap_m`` of it (the
-stream may be drawn a cell or two off the water), averaged along the streams over ``smooth_m``. On the eight DEMs of the
-FIM sites the two together find ESA's river water along big rivers with a median F1 of 0.63 to 0.82 on six (0.33 on
-AW3D30, 0.20 on GEDTM), against 0.84 on FABDEM and Copernicus, nothing on USGS 3DEP and about 0.1 elsewhere for whole
-half metres alone.
+stream may be drawn a cell or two off the water), averaged along the streams over ``smooth_m``.
 """
 from __future__ import annotations
 
@@ -38,9 +29,6 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit
 from scipy.ndimage import label
-
-# Rows of the grid worked on at a time where every cell's nearest stream cell is used, so the temporary arrays stay small
-_CHUNK_ROWS = 512
 
 
 @dataclass
@@ -98,6 +86,7 @@ def _level_with_two_neighbours(dem: np.ndarray, valid: np.ndarray) -> np.ndarray
         for c0 in range(ncols):
             if not valid[r0, c0]:
                 continue
+
             # The cell itself counts too, so three in its 3 x 3 block (none if it is NaN, which equals nothing)
             z = dem[r0, c0]
             equal = 0
@@ -111,7 +100,9 @@ def _level_with_two_neighbours(dem: np.ndarray, valid: np.ndarray) -> np.ndarray
                     for c in range(max(c0 - 1, 0), min(c0 + 2, ncols)):
                         if dem[r, c] == z and valid[r, c]:
                             equal += 1
+
             out[r0, c0] = equal >= 3
+
     return out
 
 
@@ -123,11 +114,14 @@ def height_step(dem: np.ndarray, valid: np.ndarray, sample: int = 200_000) -> fl
     z = np.asarray(dem)[valid].astype(np.float32)
     if z.size > sample:
         z = z[np.random.default_rng(0).choice(z.size, sample, replace=False)]
+
     if z.size == 0:
         return 0.0
+    
     for step in (1.0, 0.1, 0.01, 0.001):
         if np.mean(np.float32(np.round(z.astype(np.float64) / step) * step) == z) >= 0.9:
             return step
+        
     return 0.0
 
 
@@ -189,6 +183,7 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     empty = np.zeros(dem.shape, bool)
     if not on_stream.any():
         return Channel(empty if flat_water else None, empty.copy() if channel else None)
+    
     cell = math.sqrt(dx_m * dy_m)
     flat = flat_cells(dem, valid, s.flat_min_cells) if height_step(dem, valid) <= s.max_flat_step_m else None
     if not channel and flat is None:
@@ -201,6 +196,7 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
     sampling = (dy_m, dx_m)
     nearest = nearest_cell(have, sampling)
     del have
+
     index = np.full(dem.shape, -1, np.int32)
     index[rows, cols] = np.arange(rows.size, dtype=np.int32)
     # The expected width of each stream cell's river, and how far from it flat water reaches
@@ -226,14 +222,17 @@ def river_channel(dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_
                       flat_reach, sampling[0], sampling[1], s.corridor_m, s.flat_rise_m, s.rise_m, s.widths, True,
                       water, low)
     del nearest, index
+
     if connected:
         water = touching(water, on_stream)
+
     # A DEM that flattens its rivers' water shows their channels by it, and the low ground by a river it left
     # unflattened is the floodplain of one too narrow for it (see the module)
     if water.any():
         whole = water.copy()
     else:
         whole = touching(low, on_stream) if connected else low
+
     return Channel(water if flat_water else None, whole)
 
 
@@ -256,6 +255,7 @@ def _beside_the_river(dem: np.ndarray, valid: np.ndarray, flat: np.ndarray, near
             is_flat = with_flat and flat[r, c]
             if not channel and not is_flat:
                 continue
+
             near = nearest[r, c]
             near_row = near // ncols
             near_col = near - near_row * ncols
@@ -267,9 +267,11 @@ def _beside_the_river(dem: np.ndarray, valid: np.ndarray, flat: np.ndarray, near
             if not channel:
                 water[r, c] = distance <= flat_reach[k] and rise <= flat_rise_m
                 continue
+
             corridor = valid[r, c] and distance <= corridor_m
             if is_flat:
                 water[r, c] = corridor and rise <= flat_rise_m and distance <= flat_reach[k]
+
             w = width[k]
             low[r, c] = corridor and rise <= rise_m and w > 0 and distance <= widths * w
 
@@ -296,6 +298,7 @@ def _within(nearest: np.ndarray, s0: float, s1: float, distance: float) -> np.nd
             d_row = float(near_row - r) * s0
             d_col = float(nearest[r, c] - near_row * ncols - c) * s1
             out[r, c] = np.sqrt(d_row * d_row + d_col * d_col) <= distance
+
     return out
 
 
@@ -326,24 +329,29 @@ def _feature_transform(feature: np.ndarray, s0: float, s1: float, out: np.ndarra
             if feature[r, c]:
                 above[c] = r
             out[r, c] = above[c]
+
     below = np.full(ncols, -1, np.int64)
     for r in range(nrows - 1, -1, -1):
         for c in range(ncols):
             if feature[r, c]:
                 below[c] = r
+
             up = out[r, c]
             if below[c] >= 0 and (up < 0 or r - up > below[c] - r):
                 out[r, c] = below[c]
+
     # Each row's columns, by the row of their nearest feature (-1 for none), and the columns on the envelope
     frow = np.empty(ncols, np.int64)
     g = np.empty(ncols, np.int64)
     for r in range(nrows):
         for c in range(ncols):
             frow[c] = out[r, c]
+
         last = -1
         for c in range(ncols):
             if frow[c] < 0:
                 continue
+
             tw = float(frow[c] - r) * s0
             w = 0.0 + tw * tw
             while last >= 1:
@@ -358,12 +366,15 @@ def _feature_transform(feature: np.ndarray, s0: float, s1: float, out: np.ndarra
                 if ab * v - b * u - a * w - a * b * ab <= 0.0:
                     break
                 last -= 1
+
             last += 1
             g[last] = c
+            
         if last < 0:
             for c in range(ncols):
                 out[r, c] = -1
             continue
+
         k = 0
         for c in range(ncols):
             t0 = float(frow[g[k]] - r) * s0
@@ -377,6 +388,7 @@ def _feature_transform(feature: np.ndarray, s0: float, s1: float, out: np.ndarra
                     break
                 here = after
                 k += 1
+
             out[r, c] = frow[g[k]] * ncols + g[k]
 
 
@@ -405,7 +417,7 @@ def _stream_levels(dem: np.ndarray, valid: np.ndarray, on_stream: np.ndarray, ce
     edges, truncated at 4 sigma) over the whole grid work it out, to the last bit: in the DEM's precision when that is
     single (see _smoothed_at), unless ``double``.
     """
-    k = max(int(round(s.snap_m / cell)), 1)
+    k = max(round(s.snap_m / cell), 1)
     rows, cols = np.nonzero(on_stream)
     lowest = _window_min(dem, valid, rows, cols, k)
     finite = np.isfinite(lowest)
@@ -473,8 +485,10 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
         for c in range(ncols):
             if weight[r, c]:
                 col_start[c + 1] += 1
+
     for c in range(ncols):
         col_start[c + 1] += col_start[c]
+
     col_rows = np.empty(col_start[ncols], np.int64)
     filled = col_start[:ncols].copy()
     for r in range(nrows):
@@ -482,6 +496,7 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
             if weight[r, c]:
                 col_rows[filled[c]] = r
                 filled[c] += 1
+
     # Each column's first weight cell not above the window of the cell at hand, and its first below it
     first = col_start[:ncols].copy()
     after = col_start[:ncols].copy()
@@ -496,8 +511,10 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
             if inside:
                 while first[col] < col_start[col + 1] and col_rows[first[col]] < r - half:
                     first[col] += 1
+
                 while after[col] < col_start[col + 1] and col_rows[after[col]] <= r + half:
                     after[col] += 1
+
                 lo, hi = first[col], after[col] - 1
                 # The pairs either side of the middle with a weight cell, from the outermost in
                 pairs = 0
@@ -515,6 +532,7 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
                         lo += 1
                     if d_below == d:
                         hi -= 1
+
                 if pairs < half:
                     v += 0.0  # as a skipped pair would have: -0.0 becomes 0.0
             else:
@@ -526,14 +544,19 @@ def _smoothed_at(values: np.ndarray, weight: np.ndarray, rows: np.ndarray, cols:
                     v += (np.float64(values[above, col]) + np.float64(values[below, col])) * kernel[half + jj]
                     w += ((1.0 if weight[above, col] else 0.0)
                           + (1.0 if weight[below, col] else 0.0)) * kernel[half + jj]
+                    
             down_v[j + half] = np.float64(np.float32(v)) if single else v
             down_w[j + half] = w
+
         total = down_v[half] * middle
         norm = down_w[half] * middle
         for jj in range(-half, 0):
             total += (down_v[half + jj] + down_v[half - jj]) * kernel[half + jj]
             norm += (down_w[half + jj] + down_w[half - jj]) * kernel[half + jj]
+
         if single:
             total = np.float64(np.float32(total))
+
         out[i] = total / max(norm, 1e-12)
+        
     return out

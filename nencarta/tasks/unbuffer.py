@@ -2,10 +2,11 @@ import os
 
 from osgeo import gdal
 
-from nencarta.logger import LOG
-from nencarta.core.raster import Raster
-from nencarta.workspace import Workspace
 from nencarta.core.floodmapper_output import FloodMapperBulkOutput
+from nencarta.core.raster import Raster
+from nencarta.logger import LOG
+from nencarta.workspace import Workspace
+
 
 def unbuffer_maps(floodmapper_output: FloodMapperBulkOutput, workspace: Workspace) -> None:
     """

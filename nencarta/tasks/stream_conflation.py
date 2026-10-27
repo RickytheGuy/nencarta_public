@@ -25,9 +25,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import shapely
 from numba import njit
 from osgeo import osr
@@ -51,6 +51,7 @@ def d8_offset_tables() -> tuple[np.ndarray, np.ndarray]:
     for code, (d_row, d_col) in D8_OFFSETS.items():
         row_offsets[code] = d_row
         col_offsets[code] = d_col
+
     return row_offsets, col_offsets
 
 
@@ -59,9 +60,7 @@ class ConflationSettings:
     """
     How the source network is matched onto the D8 network.
 
-    How far a source line can be from its river, and how far it can stray, are distances on the ground, so they
-    are in metres and mean the same on any DEM; a floor in cells keeps them above what a coarse DEM can resolve.
-    What D8 itself gets wrong -- its staircase paths, and how few cells make a path -- is in cells. The defaults
+    How far a source line can be from its river, and how far it can stray. The defaults
     suit the source streams burned into the DEM, where the D8 paths and the source lines rarely disagree by more
     than a cell or two.
     """
@@ -149,6 +148,7 @@ def cell_sizes_m(geotransform: tuple, projection: str, nrows: int) -> tuple[np.n
     """
     if geotransform[2] != 0 or geotransform[4] != 0:
         raise ValueError(f"Rotated grids are not supported: geotransform {geotransform}.")
+    
     srs = osr.SpatialReference()
     srs.ImportFromWkt(projection)
     if srs.IsGeographic():
@@ -158,6 +158,7 @@ def cell_sizes_m(geotransform: tuple, projection: str, nrows: int) -> tuple[np.n
         dx = np.abs(geotransform[1]) * metres_per_degree_lon
         dy = float(np.abs(geotransform[5]) * metres_per_degree_lat[nrows // 2])
         return dx.astype(np.float64), dy
+    
     metres_per_unit = srs.GetLinearUnits() if srs.IsProjected() else 1.0
     dx = np.full(nrows, abs(geotransform[1]) * metres_per_unit, np.float64)
     return dx, float(abs(geotransform[5]) * metres_per_unit)
@@ -175,17 +176,21 @@ def _downstream_cells(flowdir: np.ndarray, valid: np.ndarray, row_offsets: np.nd
         for col in range(ncols):
             if not valid[row, col]:
                 continue
+
             code = flowdir[row, col]
             if code < 0 or code > 255:
                 continue
+
             d_row = row_offsets[code]
             d_col = col_offsets[code]
             if d_row == 0 and d_col == 0:
                 continue
+
             to_row = row + d_row
             to_col = col + d_col
             if to_row < 0 or to_row >= nrows or to_col < 0 or to_col >= ncols or not valid[to_row, to_col]:
                 continue
+
             down[row * ncols + col] = to_row * ncols + to_col
 
 
@@ -202,9 +207,11 @@ def _accumulate(down: np.ndarray, cell_area_by_row: np.ndarray, ncols: int) -> t
         j = down[i]
         if j >= 0:
             pending[j] += 1
+
     area = np.empty(n, np.float32)
     for i in range(n):
         area[i] = cell_area_by_row[i // ncols]
+
     queue = np.empty(n, down.dtype)
     head = 0
     tail = 0
@@ -212,6 +219,7 @@ def _accumulate(down: np.ndarray, cell_area_by_row: np.ndarray, ncols: int) -> t
         if pending[i] == 0:
             queue[tail] = i
             tail += 1
+
     while head < tail:
         i = queue[head]
         head += 1
@@ -222,12 +230,14 @@ def _accumulate(down: np.ndarray, cell_area_by_row: np.ndarray, ncols: int) -> t
             if pending[j] == 0:
                 queue[tail] = j
                 tail += 1
+
     cut = 0
     if tail < n:
         for i in range(n):
             if pending[i] > 0 and down[i] >= 0:
                 down[i] = -1
                 cut += 1
+
     return area, cut
 
 
@@ -246,8 +256,10 @@ def _euler_tour(parent: np.ndarray, step: np.ndarray) -> tuple[np.ndarray, np.nd
         p = parent[k]
         if p >= 0:
             first_child[p + 1] += 1
+
     for k in range(m):
         first_child[k + 1] += first_child[k]
+
     children = np.empty(max(first_child[m], 1), np.int64)
     fill = first_child[:m].copy()
     for k in range(m):
@@ -265,6 +277,7 @@ def _euler_tour(parent: np.ndarray, step: np.ndarray) -> tuple[np.ndarray, np.nd
     for root in range(m):
         if parent[root] >= 0:
             continue
+
         stack[0] = root
         next_child[root] = first_child[root]
         tin[root] = clock
@@ -284,6 +297,7 @@ def _euler_tour(parent: np.ndarray, step: np.ndarray) -> tuple[np.ndarray, np.nd
             else:
                 tout[k] = clock - 1
                 top -= 1
+
     return tin, tout, to_root
 
 
@@ -296,9 +310,11 @@ def _step_lengths(cells: np.ndarray, down: np.ndarray, ncols: int, dx_m: np.ndar
         j = down[i]
         if j < 0:
             continue
+
         d_row = j // ncols - i // ncols
         d_col = j % ncols - i % ncols
         out[k] = math.sqrt((d_col * dx_m[i // ncols]) ** 2 + (d_row * dy_m) ** 2)
+
     return out
 
 
@@ -328,11 +344,13 @@ class FlowNetwork:
         flowdir = np.ascontiguousarray(flowdir)
         if flowdir.dtype.kind not in "iu":
             flowdir = flowdir.astype(np.int64)
+
         self.nrows, self.ncols = flowdir.shape
         self.geotransform = tuple(geotransform)
         self.projection = projection
         if valid is None:
             valid = (flowdir >= 0) & (flowdir <= 255)
+
         self.valid = np.ascontiguousarray(valid, dtype=np.bool_)
         self.dx_m, self.dy_m = cell_sizes_m(self.geotransform, projection, self.nrows)
         self.cell_size_m = float(math.sqrt(float(np.median(self.dx_m)) * self.dy_m))
@@ -345,6 +363,7 @@ class FlowNetwork:
         self.area_km2, cut = _accumulate(self.down, self.dx_m * self.dy_m / 1e6, self.ncols)
         if cut:
             LOG.warning(f"The flow direction raster has {cut} cells on flow cycles; they were cut from the network.")
+
         self.channel_cells = np.empty(0, np.int64)
 
     @classmethod
@@ -381,6 +400,7 @@ class FlowNetwork:
             amounts = np.full(cells.size, min_channel_area_km2, np.float32) if inflow_km2 is None else np.asarray(inflow_km2, np.float32)
             area = area.copy()
             _add_inflow(self.down, area, cells, amounts)
+
         self.channel_area_km2 = area
         self.channel_cells = np.flatnonzero((area >= min_channel_area_km2) & self.valid.ravel())
         # A raster's worth of ids: int32 when they fit, halving its memory
@@ -420,8 +440,10 @@ def _line_parts(geom) -> list:
     """The non-empty LineStrings of a (merged) line geometry."""
     if geom is None or geom.is_empty:
         return []
+    
     if geom.geom_type == "LineString":
         return [geom]
+    
     return [g for g in getattr(geom, "geoms", []) if g.geom_type == "LineString" and not g.is_empty and g.length > 0]
 
 
@@ -449,7 +471,9 @@ def _main_stem(parts: list, outlet_score) -> shapely.LineString:
             else:
                 nodes.append(xy)
                 found.append(len(nodes) - 1)
+
         part_nodes.append(tuple(found))
+
     scores = [outlet_score(shapely.Point(xy)) for xy in nodes]
     outlet = int(np.argmax(scores))
 
@@ -458,6 +482,7 @@ def _main_stem(parts: list, outlet_score) -> shapely.LineString:
     for i, (a, b) in enumerate(part_nodes):
         adjacent[a].append((i, b))
         adjacent[b].append((i, a))
+
     reach = {outlet: (0.0, [])}
     stack = [outlet]
     while stack:
@@ -467,6 +492,7 @@ def _main_stem(parts: list, outlet_score) -> shapely.LineString:
             if other not in reach:
                 reach[other] = (length + parts[i].length, path + [(i, node)])
                 stack.append(other)
+
     far = max(reach, key=lambda k: reach[k][0])
     path = reach[far][1]
     if not path:  # the outlet's piece touches no other: take the longest piece on its own
@@ -480,7 +506,9 @@ def _main_stem(parts: list, outlet_score) -> shapely.LineString:
         piece = np.asarray(parts[i].coords)[:, :2]
         if part_nodes[i][1] != downstream_node:
             piece = piece[::-1]
+
         coords.extend(piece if not coords else piece[1:])
+
     return shapely.LineString(coords)
 
 
@@ -496,11 +524,14 @@ def _break_cycles(ds: np.ndarray) -> int:
             state[node] = 1
             walk.append(node)
             node = ds[node]
+
         if node >= 0 and state[node] == 1:
             ds[walk[-1]] = -1
             broken += 1
+
         for visited in walk:
             state[visited] = 2
+
     return broken
 
 
@@ -547,6 +578,7 @@ def prepare_source_network(source_gdf: gpd.GeoDataFrame, id_col: str, ds_col: st
     upstream = [[] for _ in range(ids.size)]
     for i in np.flatnonzero(ds >= 0):
         upstream[ds[i]].append(i)
+
     gt = flow.geotransform
     grid = shapely.box(gt[0], gt[3] + flow.nrows * gt[5], gt[0] + flow.ncols * gt[1], gt[3])
     lines = np.empty(ids.size, dtype=object)
@@ -554,14 +586,16 @@ def prepare_source_network(source_gdf: gpd.GeoDataFrame, id_col: str, ds_col: st
         if len(pieces) == 1:
             lines[i] = pieces[0]
             continue
+
         if ds[i] >= 0:
             target = merged[ds[i]]
-            outlet_score = lambda point: -point.distance(target)
+            outlet_score = lambda point, target=target: -point.distance(target)
         elif upstream[i]:
             sources = shapely.union_all(merged[upstream[i]])
-            outlet_score = lambda point: point.distance(sources)
+            outlet_score = lambda point, sources=sources: point.distance(sources)
         else:
             outlet_score = lambda point: _area_near(flow, point)
+            
         lines[i] = _main_stem(pieces, outlet_score)
         if not lines[i].intersects(grid):
             on_grid = [part for piece in pieces for part in _line_parts(piece.intersection(grid))]
@@ -599,9 +633,11 @@ def _orient_downstream(lines: np.ndarray, ds: np.ndarray, flow: FlowNetwork) -> 
     upstream = [[] for _ in range(n)]
     for i in np.flatnonzero(has_ds):
         upstream[ds[i]].append(i)
+
     for i in np.flatnonzero(~decided):
         if not upstream[i]:
             continue
+
         ups = shapely.union_all(lines[upstream[i]])
         d_first = shapely.distance(first[i], ups)
         d_last = shapely.distance(last[i], ups)
@@ -620,25 +656,27 @@ def _orient_downstream(lines: np.ndarray, ds: np.ndarray, flow: FlowNetwork) -> 
     out = lines.copy()
     for i in np.flatnonzero(flip):
         out[i] = shapely.reverse(lines[i])
+
     return out
 
 
 def _on_valid_cell(flow: FlowNetwork, point) -> bool:
     gt = flow.geotransform
-    col = int(math.floor((point.x - gt[0]) / gt[1]))
-    row = int(math.floor((point.y - gt[3]) / gt[5]))
+    col = math.floor((point.x - gt[0]) / gt[1])
+    row = math.floor((point.y - gt[3]) / gt[5])
     return 0 <= row < flow.nrows and 0 <= col < flow.ncols and bool(flow.valid[row, col])
 
 
 def _area_near(flow: FlowNetwork, point, radius_cells: int = 2) -> float:
     """The largest drainage area on the DEM within a couple of cells of ``point``, or 0 if there is none."""
     gt = flow.geotransform
-    col = int(math.floor((point.x - gt[0]) / gt[1]))
-    row = int(math.floor((point.y - gt[3]) / gt[5]))
+    col = math.floor((point.x - gt[0]) / gt[1])
+    row = math.floor((point.y - gt[3]) / gt[5])
     r0, r1 = max(row - radius_cells, 0), min(row + radius_cells + 1, flow.nrows)
     c0, c1 = max(col - radius_cells, 0), min(col + radius_cells + 1, flow.ncols)
     if r0 >= r1 or c0 >= c1:
         return 0.0
+    
     window = flow.area_km2.reshape(flow.nrows, flow.ncols)[r0:r1, c0:c1]
     valid = flow.valid[r0:r1, c0:c1]
     return float(window[valid].max()) if valid.any() else 0.0
@@ -662,7 +700,9 @@ def _resample(xs: np.ndarray, ys: np.ndarray, offsets: np.ndarray, spacing: floa
         length = 0.0
         for v in range(offsets[i] + 1, offsets[i + 1]):
             length += math.hypot(xs[v] - xs[v - 1], ys[v] - ys[v - 1])
-        total += int(math.floor(length / spacing)) + 2
+
+        total += math.floor(length / spacing) + 2
+
     out_x = np.empty(total, np.float64)
     out_y = np.empty(total, np.float64)
     along = np.empty(total, np.float64)
@@ -685,13 +725,17 @@ def _resample(xs: np.ndarray, ys: np.ndarray, offsets: np.ndarray, spacing: floa
                 along[k] = next_at
                 k += 1
                 next_at += spacing
+
             travelled += seg
+
         if travelled > along[k - 1] + 1e-9 or k - out_offsets[i] == 1:
             out_x[k] = xs[stop - 1]
             out_y[k] = ys[stop - 1]
             along[k] = travelled
             k += 1
+
         out_offsets[i + 1] = k
+
     return out_x[:k], out_y[:k], along[:k], out_offsets
 
 
@@ -711,21 +755,24 @@ def _find_candidates(rows_f: np.ndarray, cols_f: np.ndarray, usable: np.ndarray,
     for s in range(n):
         if not usable[s]:
             continue
+
         rf = rows_f[s]
         cf = cols_f[s]
-        r_mid = min(max(int(math.floor(rf)), 0), nrows - 1)
-        c_mid = int(math.floor(cf))
-        reach_r = int(math.ceil(radius_m[s] / dy_m))
-        reach_c = int(math.ceil(radius_m[s] / dx_m[r_mid]))
+        r_mid = min(max(math.floor(rf), 0), nrows - 1)
+        c_mid = math.floor(cf)
+        reach_r = math.ceil(radius_m[s] / dy_m)
+        reach_c = math.ceil(radius_m[s] / dx_m[r_mid])
         for r in range(max(r_mid - reach_r, 0), min(r_mid + reach_r + 1, nrows)):
             for c in range(max(c_mid - reach_c, 0), min(c_mid + reach_c + 1, ncols)):
                 cell = r * ncols + c
                 k = channel_id[cell]
                 if k < 0 or excluded[cell] or area[cell] < min_area[s] or area[cell] > max_area[s]:
                     continue
+
                 d = math.sqrt(((c + 0.5 - cf) * dx_m[r]) ** 2 + ((r + 0.5 - rf) * dy_m) ** 2)
                 if d > radius_m[s]:
                     continue
+
                 m = count[s]
                 if m < k_max:
                     pos = m
@@ -734,12 +781,15 @@ def _find_candidates(rows_f: np.ndarray, cols_f: np.ndarray, usable: np.ndarray,
                     pos = k_max - 1
                 else:
                     continue
+
                 while pos > 0 and cand_dist[s, pos - 1] > d:
                     cand[s, pos] = cand[s, pos - 1]
                     cand_dist[s, pos] = cand_dist[s, pos - 1]
                     pos -= 1
+
                 cand[s, pos] = k
                 cand_dist[s, pos] = d
+
     return cand, cand_dist, count
 
 
@@ -774,29 +824,34 @@ def _align_run(a: int, b: int, along: np.ndarray, cand: np.ndarray, cand_dist: n
                 pp = ii - g
                 if pp < 0:
                     break
+
                 p = a + pp
                 expected = along[i] - along[p]
                 for q in range(count[p]):
                     sq = score[pp, q]
                     if sq <= 0.0:
                         continue
+
                     kq = cand[p, q]
                     if not (tin[kj] <= tin[kq] and tin[kq] <= tout[kj]):
                         continue
+
                     excess = abs(to_outlet[kq] - to_outlet[kj] - expected) - slack
-                    if excess < 0.0:
-                        excess = 0.0
+                    excess = max(excess, 0.0)
                     s = sq - excess / beta - (g - 1) * gap_penalty
                     if s > top:
                         top = s
                         arg = pp * k_max + q
+
             score[ii, j] = top + fit
             back[ii, j] = arg
             if score[ii, j] > best:
                 best = score[ii, j]
                 best_state = ii * k_max + j
+
     if best_state < 0:
         return 0.0, -1, -1, -1, -1, 0
+    
     last_sample = best_state // k_max
     last_cell = cand[a + last_sample, best_state % k_max]
     state = best_state
@@ -809,6 +864,7 @@ def _align_run(a: int, b: int, along: np.ndarray, cand: np.ndarray, cand_dist: n
         first_sample = ii
         first_cell = cand[a + ii, state % k_max]
         state = back[ii, state % k_max]
+
     return best, a + first_sample, a + last_sample, first_cell, last_cell, matched
 
 
@@ -831,11 +887,14 @@ def _align_reaches(sample_offsets: np.ndarray, usable: np.ndarray, along: np.nda
         while s < stop:
             while s < stop and not usable[s]:
                 s += 1
+
             run_start = s
             while s < stop and usable[s]:
                 s += 1
+
             if s == run_start:
                 continue
+
             res = _align_run(run_start, s, along, cand, cand_dist, count, tin, tout, to_outlet, sigma, beta,
                              slack, max_gap, gap_penalty)
             if res[0] > score[r]:
@@ -845,6 +904,7 @@ def _align_reaches(sample_offsets: np.ndarray, usable: np.ndarray, along: np.nda
                 first_cell[r] = res[3]
                 last_cell[r] = res[4]
                 matched[r] = res[5]
+
     return score, first_sample, last_sample, first_cell, last_cell, matched
 
 
@@ -876,18 +936,22 @@ def _matched_cells(start: np.ndarray, end: np.ndarray, down: np.ndarray) -> tupl
     for r in range(start.size):
         if start[r] < 0:
             continue
+
         cell = start[r]
         while True:
             total += 1
             if cell == end[r] or down[cell] < 0:
                 break
+
             cell = down[cell]
+
     owner_cell = np.empty(total, np.int64)
     owner = np.empty(total, np.int64)
     k = 0
     for r in range(start.size):
         if start[r] < 0:
             continue
+
         cell = start[r]
         while True:
             owner_cell[k] = cell
@@ -895,7 +959,9 @@ def _matched_cells(start: np.ndarray, end: np.ndarray, down: np.ndarray) -> tupl
             k += 1
             if cell == end[r] or down[cell] < 0:
                 break
+
             cell = down[cell]
+
     order = np.argsort(owner_cell, kind="mergesort")
     return owner_cell[order], owner[order]
 
@@ -927,6 +993,7 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
         u = feeder[r]
         if u < 0 or start[u] < 0:
             continue
+
         base = to_outlet[channel_id[end[u]]]
         cell = down[end[u]]
         k = 0
@@ -936,6 +1003,7 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
             travelled = base - to_outlet[channel_id[cell]]
             if travelled > max_reconnect_m:
                 break
+
             lo = np.searchsorted(owner_cell, cell)
             other = False
             while lo < total and owner_cell[lo] == cell:
@@ -948,12 +1016,15 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
                         found = 2
                 elif x != u:
                     other = True
+
             if found:
                 break
+
             crossed = crossed or other
             path[k] = cell
             k += 1
             cell = down[cell]
+
         if found == 1 and k > 0 and (crossed or base - to_outlet[channel_id[path[k - 1]]] > max_extension_m):
             start[r] = path[0]
             changed += 1
@@ -963,6 +1034,7 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
             first = start[r]
             while first != cell and not _is_downstream(ctin, ctout, channel_id[first], channel_id[start[u]]):
                 first = down[first]
+
             if first != start[r]:
                 start[r] = first
                 changed += 1
@@ -970,6 +1042,7 @@ def _reconnect(start: np.ndarray, end: np.ndarray, feeder: np.ndarray, down: np.
             start[r] = path[0]
             end[r] = path[k - 1]
             changed += 1
+
     return changed
 
 
@@ -995,20 +1068,25 @@ def _extend_ends(start: np.ndarray, end: np.ndarray, down: np.ndarray, channel_i
     for r in range(n):
         if start[r] < 0:
             continue
+
         # The matched path, cut at the first stop cell
         cell = start[r]
         if stop_mask[cell]:
             continue
+
         last = cell
         while cell != end[r]:
             nxt = down[cell]
             if nxt < 0 or stop_mask[nxt]:
                 break
+
             cell = nxt
             last = cell
+
         claim_end[r] = last
         if last != end[r]:
             continue
+
         # Past the matched end
         base = to_outlet[channel_id[last]]
         reach_m = max(max_extension_m, unmatched_m[r])
@@ -1018,6 +1096,7 @@ def _extend_ends(start: np.ndarray, end: np.ndarray, down: np.ndarray, channel_i
             travelled = base - to_outlet[channel_id[cell]]
             if travelled > reach_m:
                 break
+
             lo = np.searchsorted(owner_cell, cell)
             hit = False
             joined = False
@@ -1026,15 +1105,19 @@ def _extend_ends(start: np.ndarray, end: np.ndarray, down: np.ndarray, channel_i
                 lo += 1
                 if x == r:
                     continue
+
                 hit = True
                 if _related(r, x, ds, stin, stout) or travelled <= snap_m:
                     joined = True
+
             if hit:
                 if joined:
                     claim_end[r] = prev
                 break
+
             prev = cell
             cell = down[cell]
+
     return claim_end
 
 
@@ -1066,17 +1149,20 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
     for r in range(n):
         if claim_end[r] < 0:
             continue
+
         cell = start[r]
         while True:
             total += 1
             if cell == claim_end[r] or down[cell] < 0:
                 break
             cell = down[cell]
+
     cells = np.empty(total, np.int64)
     k = 0
     for r in range(n):
         if claim_end[r] < 0:
             continue
+
         cell = start[r]
         while True:
             cells[k] = cell
@@ -1084,6 +1170,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
             if cell == claim_end[r] or down[cell] < 0:
                 break
             cell = down[cell]
+
     cells = np.unique(cells)
     m = cells.size
 
@@ -1097,12 +1184,15 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
             if j < m and cells[j] == d:
                 downstream_index[u] = j
                 pending[j] += 1
+
     first_up = np.zeros(m + 1, np.int64)
     for u in range(m):
         if downstream_index[u] >= 0:
             first_up[downstream_index[u] + 1] += 1
+
     for u in range(m):
         first_up[u + 1] += first_up[u]
+
     ups = np.empty(max(first_up[m], 1), np.int64)
     fill = first_up[:m].copy()
     for u in range(m):
@@ -1110,6 +1200,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
         if j >= 0:
             ups[fill[j]] = u
             fill[j] += 1
+
     starters = np.empty(n, np.int64)
     starter_cell = np.empty(n, np.int64)
     n_starters = 0
@@ -1118,6 +1209,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
             starters[n_starters] = r
             starter_cell[n_starters] = np.searchsorted(cells, start[r])
             n_starters += 1
+
     by_cell = np.argsort(starter_cell[:n_starters], kind="mergesort")
     starters = starters[:n_starters][by_cell]
     starter_cell = starter_cell[:n_starters][by_cell]
@@ -1135,6 +1227,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
         if pending[u] == 0:
             queue[tail] = u
             tail += 1
+
     candidates = np.empty(n + 8, np.int64)
     while head < tail:
         u = queue[head]
@@ -1148,6 +1241,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
             if r >= 0 and alive[r] and last[r] == cells[v] and cells[v] != claim_end[r]:
                 candidates[c] = r
                 c += 1
+
         # Reaches whose match starts here
         lo = np.searchsorted(starter_cell, u)
         while lo < n_starters and starter_cell[lo] == u:
@@ -1169,9 +1263,11 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
                     if not _is_downstream(stin, stout, x, candidates[j]):
                         ok = False
                         break
+
                 if ok:
                     winner = x
                     break
+
             # 2. Reaches that all drain into one source reach start it here, if its match lies further down
             #    this path
             if winner < 0:
@@ -1181,6 +1277,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
                     if ds[candidates[i]] != d:
                         same = False
                         break
+                    
                 if same and claim_end[d] >= 0 and not started[d] and channel_id[cell] >= 0 \
                         and channel_id[start[d]] >= 0:
                     cd = channel_id[start[d]]
@@ -1194,18 +1291,22 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
                             if walk < 0:
                                 covered = False
                                 break
+                            
                             j = np.searchsorted(cells, walk)
                             if j >= m or cells[j] != walk:
                                 covered = False
                                 break
+
                         if covered:
                             winner = d
+
             # 3. Otherwise the larger river carries on
             if winner < 0:
                 winner = candidates[0]
                 for i in range(1, c):
                     if _outranks(candidates[i], winner, order, area, score):
                         winner = candidates[i]
+
             for i in range(c):
                 if candidates[i] != winner:
                     alive[candidates[i]] = False
@@ -1224,6 +1325,7 @@ def _paint(start: np.ndarray, claim_end: np.ndarray, down: np.ndarray, channel_i
             if pending[j] == 0:
                 queue[tail] = j
                 tail += 1
+
     return cells, label, first, last
 
 
@@ -1272,6 +1374,7 @@ def conflate_to_flow_directions(
     settings = settings or ConflationSettings()
     if flow is None:
         flow = FlowNetwork(flowdir, geotransform, projection, valid_mask)
+
     nrows, ncols = flow.nrows, flow.ncols
     out_columns = [c for c in source_gdf.columns if c != source_gdf.geometry.name]
 
@@ -1286,6 +1389,7 @@ def conflate_to_flow_directions(
     n = source.ids.size
     if n == 0:
         return empty_result()
+    
     if source.ids.max() > np.iinfo(np.int32).max:
         raise ValueError(f"Stream ids up to {source.ids.max()} do not fit the stream raster's 32-bit cells.")
 
@@ -1356,6 +1460,7 @@ def conflate_to_flow_directions(
                                         backward):
             whole[loose] = np.where(backward_better, behind, ahead)[loose]
         flipped[loose] = backward_better[loose]
+
     placed = matched > 0
     matched_fraction = np.where(placed, _matched_fraction(first_sample, last_sample, matched, usable_length), 0.0)
     start = np.where(placed, flow.channel_cells[np.maximum(first_cid, 0)], -1)
@@ -1376,7 +1481,9 @@ def conflate_to_flow_directions(
         reconnected += changed
         if not changed:
             break
+
         feeder = _main_feeders(start >= 0, source, reach_area)
+
     placed = start >= 0
 
     snap_m = max(settings.snap_m, settings.min_snap_cells * flow.cell_size_m)
@@ -1409,6 +1516,7 @@ def conflate_to_flow_directions(
                 new_cells.append(stub)
                 new_labels.append(np.full(stub.size, r, np.int64))
                 stubs += 1
+
         cells, label = np.concatenate(new_cells), np.concatenate(new_labels)
         has_cells = np.bincount(label[label >= 0], minlength=n) > 0
         lost = source.ids[(usable_length > 0) & ~has_cells]
@@ -1421,6 +1529,7 @@ def conflate_to_flow_directions(
     outlets = 0
     if lake_mask is not None and dem is not None:
         drawn, outlets = _below_outlets(cells, label, drawn, flow, stop, dem, settings)
+
     raster = np.zeros(nrows * ncols, np.int32)
     raster[cells[drawn]] = source.ids[label[drawn]]
     raster = raster.reshape(nrows, ncols)
@@ -1447,9 +1556,11 @@ def _main_feeders(placed: np.ndarray, source: SourceNetwork, area: np.ndarray) -
         r = source.ds[u]
         if area[u] < 0.5 * area[r]:
             continue
+
         x = feeder[r]
         if x < 0 or (source.order[u], area[u]) > (source.order[x], area[x]):
             feeder[r] = u
+
     return feeder
 
 
@@ -1464,12 +1575,14 @@ def _unmatched_below(sample_offsets: np.ndarray, usable: np.ndarray, last_sample
     for r in range(n):
         if last_sample[r] < 0:
             continue
+
         a, b = int(sample_offsets[r]), int(sample_offsets[r + 1])
         if flipped[r]:
             # Position p of the reversed samples is sample a + b - 1 - p: those past it are the ones before that
             out[r] = usable[a:a + b - 1 - int(last_sample[r])].sum()
         else:
             out[r] = usable[int(last_sample[r]) + 1:b].sum()
+
     return out
 
 
@@ -1519,10 +1632,12 @@ def _inflow_cells(sample_offsets: np.ndarray, usable: np.ndarray, cell_of_sample
         ok = np.flatnonzero(usable[a:b])
         if not ok.size or ok[0] == 0:
             continue
+
         candidates = cell_of_sample[a + ok]
         cell = next((c for c in candidates[:max_candidates] if _runs_inward(flow, int(c))), candidates[0])
         reaches.append(r)
         cells.append(_river_at_edge(flow, int(cell), dem, stop))
+
     return np.asarray(reaches, np.int64), np.asarray(cells, np.int64)
 
 
@@ -1540,6 +1655,7 @@ def _river_at_edge(flow: FlowNetwork, cell: int, dem: np.ndarray | None = None, 
     """
     if not _on_edge(flow, cell):
         return cell
+    
     ncols, valid = flow.ncols, flow.valid.ravel()
 
     def open_edge(c: int) -> bool:
@@ -1551,16 +1667,18 @@ def _river_at_edge(flow: FlowNetwork, cell: int, dem: np.ndarray | None = None, 
             if below < 0 or not open_edge(below):
                 break
             cell = below
+
         return cell
+    
     row, col = divmod(cell, ncols)
     best, best_key = cell, (dem[cell], 0)
     for r in range(max(row - max_cells, 0), min(row + max_cells + 1, flow.nrows)):
         for c in range(max(col - max_cells, 0), min(col + max_cells + 1, ncols)):
             other = r * ncols + c
             key = (dem[other], (r - row) ** 2 + (c - col) ** 2)
-            if other != cell and np.isfinite(key[0]) and key < best_key and open_edge(other) \
-                    and _runs_inward(flow, other):
+            if other != cell and np.isfinite(key[0]) and key < best_key and open_edge(other) and _runs_inward(flow, other):
                 best, best_key = other, key
+
     return best
 
 
@@ -1569,6 +1687,7 @@ def _on_edge(flow: FlowNetwork, cell: int) -> bool:
     row, col = divmod(cell, flow.ncols)
     if min(row, col, flow.nrows - 1 - row, flow.ncols - 1 - col) == 0:
         return True
+    
     return not flow.valid[row - 1:row + 2, col - 1:col + 2].all()
 
 
@@ -1581,9 +1700,11 @@ def _runs_inward(flow: FlowNetwork, cell: int, min_run: int = 10, depth: int = 2
         row, col = divmod(cell, flow.ncols)
         if step >= min_run and min(row, col, flow.nrows - 1 - row, flow.ncols - 1 - col) >= depth:
             return True
+        
         cell = flow.down[cell]
         if cell < 0:
             return False
+        
     return True
 
 
@@ -1591,6 +1712,7 @@ def _approximate_areas(source: SourceNetwork, flow: FlowNetwork) -> np.ndarray:
     """Drainage area at each reach's downstream end, read off the DEM when the source network has none."""
     if (source.area > 0).all():
         return np.zeros(source.ids.size)
+    
     ends = shapely.points([g.coords[-1] for g in source.geometry])
     return np.array([_area_near(flow, p) for p in ends], np.float64)
 
@@ -1611,6 +1733,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
     short = np.flatnonzero((counts > 0) & (counts < min_cells))
     if short.size == 0:
         return cells, label
+    
     down, ncols, nrows = flow.down, flow.ncols, flow.nrows
     cells, label = list(cells.tolist()), list(label.tolist())
     index = {c: i for i, c in enumerate(cells)}
@@ -1653,6 +1776,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                     nb = r_ * ncols + c_
                     if down[nb] == cell:
                         found.extend(x for x in ends.get(nb, ()) if x != r)
+
         return sorted(found)
 
     def above(cell: int, x: int) -> int:
@@ -1665,6 +1789,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                     nb = r_ * ncols + c_
                     if down[nb] == cell and owner(nb) == x:
                         return nb
+                    
         return -1
 
     # Upstream first, so that a short reach below another short reach finds it already settled
@@ -1676,6 +1801,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                 set_last(r, below)
                 counts[r] += 1
                 continue
+
             donors = [x for x in feeders(int(first[r]), r) if counts[x] > min_cells]
             if donors:
                 x = max(donors, key=rank)
@@ -1685,6 +1811,7 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                 counts[x] -= 1
                 counts[r] += 1
                 continue
+
             d = owner(below) if below >= 0 else -1
             if d >= 0 and first[d] == below and counts[d] > min_cells and not feeders(below, r):
                 give(below, r)
@@ -1693,9 +1820,12 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
                 counts[d] -= 1
                 counts[r] += 1
                 continue
+
             break
+
         if counts[r] >= min_cells:
             continue
+
         heirs = [x for x in feeders(int(first[r]), r) if counts[x] >= min_cells]
         heir = max(heirs, key=rank) if heirs else -1
         cell = int(first[r])
@@ -1703,13 +1833,17 @@ def _lengthen_short_reaches(cells: np.ndarray, label: np.ndarray, first: np.ndar
             give(cell, heir)
             if cell == last[r]:
                 break
+
             cell = int(down[cell])
+
         if heir >= 0:
             set_last(heir, int(last[r]))
             counts[heir] += counts[r]
+
         first[r] = -1
         set_last(r, -1)
         counts[r] = 0
+
     return np.asarray(cells, np.int64), np.asarray(label, np.int64)
 
 
@@ -1725,24 +1859,27 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
     """
     if rows_f.size == 0:
         return np.empty(0, np.int64)
-    reach_r = int(math.ceil(radius_m / dy_m))
-    reach_c = int(math.ceil(radius_m / dx_m.min()))
-    r0 = max(int(math.floor(rows_f.min())) - reach_r, 0)
-    r1 = min(int(math.floor(rows_f.max())) + reach_r + 1, nrows)
-    c0 = max(int(math.floor(cols_f.min())) - reach_c, 0)
-    c1 = min(int(math.floor(cols_f.max())) + reach_c + 1, ncols)
+    
+    reach_r = math.ceil(radius_m / dy_m)
+    reach_c = math.ceil(radius_m / dx_m.min())
+    r0 = max(math.floor(rows_f.min()) - reach_r, 0)
+    r1 = min(math.floor(rows_f.max()) + reach_r + 1, nrows)
+    c0 = max(math.floor(cols_f.min()) - reach_c, 0)
+    c1 = min(math.floor(cols_f.max()) + reach_c + 1, ncols)
     if r0 >= r1 or c0 >= c1:
         return np.empty(0, np.int64)
+    
     near = np.zeros((r1 - r0, c1 - c0), np.bool_)
     for s in range(rows_f.size):
-        r_mid = min(max(int(math.floor(rows_f[s])), 0), nrows - 1)
-        sr = int(math.ceil(radius_m / dy_m))
-        sc = int(math.ceil(radius_m / dx_m[r_mid]))
+        r_mid = min(max(math.floor(rows_f[s]), 0), nrows - 1)
+        sr = math.ceil(radius_m / dy_m)
+        sc = math.ceil(radius_m / dx_m[r_mid])
         for r in range(max(r_mid - sr, r0), min(r_mid + sr + 1, r1)):
-            for c in range(max(int(math.floor(cols_f[s])) - sc, c0), min(int(math.floor(cols_f[s])) + sc + 1, c1)):
+            for c in range(max(math.floor(cols_f[s]) - sc, c0), min(math.floor(cols_f[s]) + sc + 1, c1)):
                 d = math.sqrt(((c + 0.5 - cols_f[s]) * dx_m[r]) ** 2 + ((r + 0.5 - rows_f[s]) * dy_m) ** 2)
                 if d <= radius_m:
                     near[r - r0, c - c0] = True
+
     found = 0
     for r in range(r1 - r0):
         for c in range(c1 - c0):
@@ -1750,6 +1887,7 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
                 cell = (r + r0) * ncols + c + c0
                 if owner[cell] < 0 and open_cell[cell]:
                     found += 1
+
     candidates = np.empty(found, np.int64)
     k = 0
     for r in range(r1 - r0):
@@ -1759,6 +1897,7 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
                 if owner[cell] < 0 and open_cell[cell]:
                     candidates[k] = cell
                     k += 1
+
     by_area = np.argsort(-area[candidates], kind="mergesort")
     path = np.empty(max(max_cells, 2), np.int64)
     for i in by_area:
@@ -1773,8 +1912,10 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
             path[n] = nxt
             n += 1
             cell = nxt
+
         if n >= 2:
             return path[:n].copy()
+        
         # One cell: start from the free cell draining the most into it
         row = x // ncols
         col = x % ncols
@@ -1787,11 +1928,13 @@ def _stub_cells(rows_f: np.ndarray, cols_f: np.ndarray, radius_m: float, owner: 
                     nb = rr * ncols + cc
                     if down[nb] == x and owner[nb] < 0 and open_cell[nb] and (best < 0 or area[nb] > area[best]):
                         best = nb
+
         if best >= 0:
             out = np.empty(2, np.int64)
             out[0] = best
             out[1] = x
             return out
+        
     return np.empty(0, np.int64)
 
 
@@ -1812,6 +1955,7 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
     drawn = labelled.copy()
     if not labelled.any():
         return drawn
+    
     nrows, ncols, down = flow.nrows, flow.ncols, flow.down
     owner = np.full(nrows * ncols, -1, np.int32)  # reach indices: a raster's worth, int32 halves it
     owner[cells[labelled]] = label[labelled]
@@ -1831,12 +1975,14 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         c, o = flow.channel_id[cell], flow.channel_id[other]
         if c >= 0:
             return bool(o >= 0 and flow.tin[o] <= flow.tin[c] <= flow.tout[o])
+        
         for _ in range(max_walk):
             cell = down[cell]
             if cell < 0:
                 return False
             if cell == other:
                 return True
+            
         return False
 
     def beside(cell: int, r: int) -> bool:
@@ -1849,6 +1995,7 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
                 x = owner[nb]
                 if x >= 0 and x != r and _outranks(x, r, source.order, area, score) and not downstream_of(cell, nb):
                     return True
+                
         return False
 
     def above(cell: int, r: int) -> int:
@@ -1860,6 +2007,7 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
                 nb = rr * ncols + cc
                 if down[nb] == cell and owner[nb] == r:
                     return nb
+                
         return -1
 
     # The larger reaches first, so that a reach beside one that ends sooner is only cut beside what is left of it
@@ -1869,12 +2017,15 @@ def _drawn_cells(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         while cell >= 0 and beside(cell, r):
             run.append(cell)
             cell = above(cell, r)
+
         if len(run) < min_beside:
             continue
+
         cut = min(len(run) - 1, counts[r] - min_cells)
         for cell in run[:max(cut, 0)]:
             owner[cell] = -1
             drawn[position[cell]] = False
+
     return drawn
 
 
@@ -1899,10 +2050,11 @@ def _below_outlets(cells: np.ndarray, label: np.ndarray, drawn: np.ndarray, flow
     labelled = drawn & (label >= 0)
     if not labelled.any():
         return drawn, 0
+    
     nrows, ncols, down = flow.nrows, flow.ncols, flow.down
     lake_2d = lake.reshape(nrows, ncols)
     near = max(int(settings.outlet_lake_cells), 0)
-    window = max(int(round(settings.max_outlet_m / flow.cell_size_m)), settings.min_outlet_cells, 1)
+    window = max(round(settings.max_outlet_m / flow.cell_size_m), settings.min_outlet_cells, 1)
     tail = max(int(settings.outlet_tailwater_cells), 0)
     min_cells = max(settings.min_reach_cells, 2)
 
@@ -1927,15 +2079,18 @@ def _below_outlets(cells: np.ndarray, label: np.ndarray, drawn: np.ndarray, flow
     for cell, r in zip(reach_cells[heads].tolist(), reach_label[heads].tolist()):
         if head_count[r] != 1 or joined[cell]:
             continue
+
         row, col = divmod(cell, ncols)
         if not lake_2d[max(row - near, 0):row + near + 1, max(col - near, 0):col + near + 1].any():
             continue
+
         path = [cell]
         while len(path) <= window + tail:
             nxt = int(down[path[-1]])
             if nxt < 0 or owner[nxt] != r:
                 break
             path.append(nxt)
+
         z = dem[path]
         steps = z[:-1] - z[1:]
         # The outlet ends at the first reach joining this one, if that comes sooner
@@ -1944,16 +2099,21 @@ def _below_outlets(cells: np.ndarray, label: np.ndarray, drawn: np.ndarray, flow
             if joined[path[k]]:
                 limit = k
                 break
+
         drops = np.flatnonzero(steps[:limit] >= settings.outlet_drop_m)
         if not drops.size:
             continue
+
         foot = int(drops[-1]) + 1
         if (steps[foot:foot + tail] >= settings.outlet_drop_m).any() or counts[r] - foot < min_cells:
             continue
+
         for c in path[:foot]:
             owner[c] = -1
             drawn[position[c]] = False
+
         moved += 1
+
     return drawn, moved
 
 
@@ -1973,6 +2133,7 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
     if not labelled.any():
         columns = [c for c in source_gdf.columns if c != source_gdf.geometry.name]
         return gpd.GeoDataFrame(columns=columns + ["geometry"], geometry="geometry", crs=source_gdf.crs)
+    
     reach_cells = cells[labelled]
     reach_label = label[labelled]
     # Order each reach's cells from upstream to downstream, by how far each is from the reach's last cell
@@ -1998,6 +2159,7 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         x = cell_label.get(downstream, -1) if downstream >= 0 else -1
         if x < 0 or x == reaches[k]:
             continue
+
         into[k] = row_of[x]
         near_end[k] = cell_to_end[downstream] <= end_m
 
@@ -2008,8 +2170,10 @@ def _reach_lines(cells: np.ndarray, label: np.ndarray, flow: FlowNetwork, source
         hop, ds_row = k, into[k]
         while ds_row >= 0 and near_end[hop] and not _is_downstream(source.tin, source.tout, reaches[ds_row], r):
             hop, ds_row = ds_row, into[ds_row]
+
         ds_id = int(source.ids[reaches[ds_row]]) if ds_row >= 0 else -1
         rows.append((int(source.ids[r]), ds_id, shapely.linestrings(xy[a:b][reach_drawn[a:b]])))
+
     out = pd.DataFrame(rows, columns=[id_col, "__ds", "geometry"])
 
     attributes = source_gdf.drop(columns=[source_gdf.geometry.name]).copy()
@@ -2034,6 +2198,7 @@ def _to_reach_end(cells: np.ndarray, label: np.ndarray, down: np.ndarray, ncols:
     for i in range(m):
         if out[i] >= 0.0:
             continue
+
         k = 0
         j = i
         while True:
@@ -2045,13 +2210,18 @@ def _to_reach_end(cells: np.ndarray, label: np.ndarray, down: np.ndarray, ncols:
                 p = np.searchsorted(sorted_cells, nxt)
                 if p < m and sorted_cells[p] == nxt and label[order[p]] == label[j]:
                     below = order[p]
+
             if below < 0:
                 out[j] = 0.0
                 break
+
             if out[below] >= 0.0:
                 out[j] = out[below] + step[j]
                 break
+
             j = below
+
         for t in range(k - 2, -1, -1):
             out[walk[t]] = out[walk[t + 1]] + step[walk[t]]
+            
     return out

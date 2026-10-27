@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from nencarta.core.enumerations import FloodMapMode
 from nencarta.core.model_config import ModelConfig
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
-from nencarta.core.enumerations import FloodMapMode
+
 
 def get_fist_inputs(workspace: Workspace, flow_file: Path) -> list[tuple]:
     """
