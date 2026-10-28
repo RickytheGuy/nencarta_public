@@ -3,8 +3,22 @@ from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime
 
-from nencarta.core.defaults import CONFIG_OPTIONS, DEFAULT_CONFIG, VALID_RETURN_PERIODS
+from nencarta.core.defaults import (
+    CONFIG_OPTIONS,
+    DEFAULT_ARC_ARGS,
+    DEFAULT_CONFIG,
+    DEFAULT_CURVE2FLOOD_ARGS,
+    DEFAULT_FLDPLN_LIBRARY_ARGS,
+    MOVED_KEYS,
+    VALID_RETURN_PERIODS,
+)
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
+from nencarta.core.model_args import (
+    check_arc_args,
+    check_curve2flood_args,
+    check_fldpln_library_args,
+    merge_args,
+)
 from nencarta.logger import LOG
 
 # The reach ID and downstream reach ID attributes of each source's stream networks; a custom network's must be given
@@ -16,6 +30,16 @@ NWM_FORECAST_HOURS = {
     StreamflowSource.NWM_MEDIUM_RANGE: ("00", "06", "12", "18"),
     StreamflowSource.NWM_LONG_RANGE: ("00",),
 }
+
+# The old names of arc_args and curve2flood_args
+RENAMED_KEYS = {"bathy_args": "arc_args", "floodmap_args": "curve2flood_args"}
+# bathy_args replaced nencarta's whole set of these ARC settings, but for two it fell back on, and held three of
+# Curve2Flood's keys besides: TopWidthPlausibleLimit, the set-depth floods' (now depth_mask_distance), and two that
+# changed nothing
+_OLD_BATHY_ARC_KEYS = {"vdt_database_numiterations", "bathy_trap_h", "degree_manip", "degree_interval",
+                       "low_spot_range", "gen_dir_dist", "gen_slope_dist", "stream_slope_method"}
+_OLD_BATHY_FALLBACKS = {"VDT_Database_NumIterations": 30, "Bathy_Trap_H": 0.2}
+_OLD_BATHY_UNUSED = {"tw_multfact", "make_output_gpkg"}
 
 def strip_quotes(text):
     """``text`` without the quotes around it, as a path copied from a file browser has; other values as they are."""
@@ -159,9 +183,74 @@ class NencartaConfig:
 
     def warn_about_unknown_keys(self):
         """Warn about keys nencarta doesn't use, such as misspelt or retired ones."""
-        unknown = sorted(set(self.config_dict) - set(DEFAULT_CONFIG))
+        unknown = sorted(set(self.config_dict) - set(DEFAULT_CONFIG) - set(MOVED_KEYS) - set(RENAMED_KEYS))
         if unknown:
             LOG.warning(f"Watershed '{self.watershed_name}': ignoring unknown keys {unknown}.")
+
+    def reject_moved_keys(self):
+        """Stop at the options that are now the models' own settings, naming where each went."""
+        moved = [key for key in MOVED_KEYS if self.config_dict.get(key) is not None]
+        if moved:
+            raise ValueError(f"Watershed '{self.watershed_name}': these settings are now ARC's and Curve2Flood's "
+                             "own, given in arc_args, curve2flood_args and fldpln_library_args: "
+                             + "; ".join(f"'{key}' is {MOVED_KEYS[key]}" for key in moved) + ".")
+
+    def _given_dict(self, key: str) -> dict:
+        given = self.config_dict.get(key)
+        if given is None:
+            return {}
+        
+        if not isinstance(given, dict):
+            raise TypeError(f"Watershed '{self.watershed_name}': '{key}' must be a dictionary of settings.")
+        
+        return given
+
+    def set_model_args(self):
+        """
+        Set arc_args, curve2flood_args and fldpln_library_args, each given set merged over nencarta's starting values
+        and checked by its model, and the few of their settings nencarta reads itself. bathy_args and floodmap_args
+        are their old names, which the new ones are merged over when both are given: bathy_args keeps its old meaning,
+        the whole set but for VDT_Database_NumIterations and Bathy_Trap_H.
+        """
+        name = self.watershed_name
+        arc_given, arc_start = self._given_dict("arc_args"), DEFAULT_ARC_ARGS
+        if self.config_dict.get("bathy_args") is not None:
+            LOG.warning(f"Watershed '{name}': 'bathy_args' is now 'arc_args', with ARC's settings alone.")
+            old = {}
+            for key, value in self._given_dict("bathy_args").items():
+                if key.lower() == "topwidthplausiblelimit":
+                    if self.config_dict.get("depth_mask_distance") is None:
+                        self.depth_mask_distance = float(value)
+                elif key.lower() in _OLD_BATHY_UNUSED:
+                    LOG.warning(f"Watershed '{name}': {key} in bathy_args changed nothing; leaving it out.")
+                else:
+                    old[key] = value
+            arc_given = merge_args(old, arc_given)
+            arc_start = {**{key: value for key, value in DEFAULT_ARC_ARGS.items()
+                            if key.lower() not in _OLD_BATHY_ARC_KEYS}, **_OLD_BATHY_FALLBACKS}
+
+        curve2flood_given = self._given_dict("curve2flood_args")
+        if self.config_dict.get("floodmap_args") is not None:
+            LOG.warning(f"Watershed '{name}': 'floodmap_args' is now 'curve2flood_args'.")
+            curve2flood_given = merge_args(self._given_dict("floodmap_args"), curve2flood_given)
+        fldpln_given = self._given_dict("fldpln_library_args")
+
+        self.arc_args: dict = merge_args(arc_start, arc_given)
+        self.curve2flood_args: dict = merge_args(DEFAULT_CURVE2FLOOD_ARGS, curve2flood_given)
+        self.fldpln_library_args: dict = merge_args(DEFAULT_FLDPLN_LIBRARY_ARGS, fldpln_given)
+        try:
+            arc = check_arc_args(self.arc_args, arc_given)
+            curve2flood = check_curve2flood_args(self.curve2flood_args, curve2flood_given)
+            check_fldpln_library_args(self.fldpln_library_args)
+        except ValueError as exc:
+            raise ValueError(f"Watershed '{name}': {exc}") from None
+
+        # The settings nencarta reads itself
+        self.standard_step: bool = arc.get("standard_step", False)
+        self.bathy_use_banks: bool = arc.get("bathy_use_banks", False)
+        self.uses_depth_power_law: bool = arc.get("coefficient_depth") is not None
+        self.flood_waterlc_and_strm_cells: bool = curve2flood.get("flood_waterlc_and_strm_cells", False)
+        self.flood_bathy_mask: bool = curve2flood.get("flood_bathy_mask", False)
 
     def warn_if_multiple_primary_dems(self):
         """Warn when both dem and dem_dir are given."""
@@ -222,18 +311,32 @@ class NencartaConfig:
         return return_periods
 
     def validate_outlet_exchange(self) -> str:
-        """Return outlet_exchange, checked to be off, pass1 or pass2, with buffer and standard_step for the passes."""
+        """Return outlet_exchange, checked to be off, pass1 or pass2, with buffer and ARC's standard step for the
+        passes."""
         mode = str(self.get("outlet_exchange") or "off").lower()
         if mode not in CONFIG_OPTIONS["outlet_exchange"].choices:
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'outlet_exchange' must be one of "
                              f"{list(CONFIG_OPTIONS['outlet_exchange'].choices)}, not {mode!r}.")
-        
-        if mode != "off" and not (self.get("buffer") and self.get("standard_step")):
+
+        if mode != "off" and not (self.get("buffer") and self.standard_step):
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'outlet_exchange' {mode} needs 'buffer' (the "
-                             "neighbouring DEMs' water is where their buffers overlap this DEM) and 'standard_step' "
-                             "(which starts the outlets from it).")
+                             "neighbouring DEMs' water is where their buffers overlap this DEM) and Standard_Step in "
+                             "'arc_args' (which starts the outlets from it).")
         
         return mode
+
+    def validate_dem_flattens_rivers(self) -> bool | None:
+        """Return dem_flattens_rivers as True (yes), False (no) or None (auto); true and false are taken too."""
+        value = self.get("dem_flattens_rivers")
+        if isinstance(value, bool):
+            return value
+
+        choice = str(value).strip().lower()
+        if choice not in CONFIG_OPTIONS["dem_flattens_rivers"].choices:
+            raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'dem_flattens_rivers' must be one of "
+                             f"{list(CONFIG_OPTIONS['dem_flattens_rivers'].choices)}, true or false, not {value!r}.")
+
+        return {"auto": None, "yes": True, "no": False}[choice]
 
     def get(self, key: str, default=None):
         """Return a copy of a config value, or its default when it is missing or None."""
@@ -270,6 +373,7 @@ class NencartaConfig:
         """Check the config and set its values as attributes."""
         self.verify_required_keys()
         self.watershed_name: str = self.get("name")
+        self.reject_moved_keys()
         self.warn_about_unknown_keys()
         self.warn_if_multiple_primary_dems()
 
@@ -287,8 +391,10 @@ class NencartaConfig:
 
         self.use_specified_depth_for_bathy_mask: bool = self.get("use_specified_depth_for_bathy_mask")
         self.specify_depths_for_bathy_mask: list[float] = self.get("specify_depths_for_bathy_mask")
+        self.depth_mask_distance: float = float(self.get("depth_mask_distance"))
         self.clean_dem: bool = self.get("clean_dem")
         self.validate_specified_depths()
+        self.set_model_args()
 
         self.floodmap_mode, self.user_flow_files = self.validate_user_floodmaps()
         self.return_periods = self.validate_return_periods()
@@ -332,20 +438,9 @@ class NencartaConfig:
         if self.file_names is not None and not isinstance(self.file_names, dict):
             raise ValueError(f"Watershed '{self.get('name', 'unknown')}': 'file_names' must be a dictionary of file to name.")
         self.disable_bathymetry: bool = self.get("disable_bathymetry")
-        self.bathy_use_banks: bool = self.get("bathy_use_banks")
-        self.flood_waterlc_and_strm_cells: bool = self.get("flood_waterlc_and_strm_cells")
-        self.flood_bathy_mask: bool = self.get("flood_bathy_mask")
         self.land_watervalue: int = self.get("land_watervalue")
         self.overwrite: bool = self.get("overwrite")
         self.age_of_forecast_days: int = self.get("age_of_forecast_days")
-        self.find_banks_based_on_landcover: bool = self.get("find_banks_based_on_landcover")
-        self.create_reach_average_curve_file: bool = self.get("create_reach_average_curve_file")
-        self.standard_step: bool = self.get("standard_step")
-        self.valley_sections: bool = self.get("valley_sections")
-        self.valley_dir_widths: float = self.get("valley_dir_widths")
-        self.valley_dir_dist: int = self.get("valley_dir_dist")
-        self.drop_edge_sections: bool = self.get("drop_edge_sections")
-        self.edge_margin: float = self.get("edge_margin")
         self.outlet_exchange: str = self.validate_outlet_exchange()
         self.outlet_exchange_dir: str = self.get_path("outlet_exchange_dir")
         self.use_warning_flags_to_download_dem: bool = self.get("use_warning_flags_to_download_dem")
@@ -370,8 +465,6 @@ class NencartaConfig:
         self.make_representative_cross_section_file: bool = self.get("make_representative_cross_section_file")
         self.vdt_file_extension: str = self.get("vdt_file_extension")
         self.mannings_text_file: str = self.get("mannings_text_file")
-        self.bathy_args: dict = self.get("bathy_args")
-        self.floodmap_args: dict = self.get("floodmap_args")
         self.make_depth_maps: bool = self.get("make_depth_maps")
         self.make_velocity_maps: bool = self.get("make_velocity_maps")
         self.make_wse_maps: bool = self.get("make_wse_maps")
@@ -401,43 +494,24 @@ class NencartaConfig:
         self.fdc_variable: str | None = self.get("fdc_variable")
         self.reanalysis_storage_options: dict | None = self.get("reanalysis_storage_options")
         self.raise_errors_if_river_ids_missing: bool = self.get("raise_errors_if_river_ids_missing")
-        self.fldpln_dh: float = self.get("fldpln_dh")
-        self.fldpln_min_depth: float = self.get("fldpln_min_depth")
-        self.fldpln_min_flood_depth: float = self.get("fldpln_min_flood_depth")
-        self.fldpln_max_depth: float = self.get("fldpln_max_depth")
-        self.fldpln_spill_decay: float = self.get("fldpln_spill_decay")
-        self.fldpln_max_cells_per_segment: int | None = self.get("fldpln_max_cells_per_segment")
-        self.fldpln_keep_spilling: bool = self.get("fldpln_keep_spilling")
-        self.fldpln_parallel: bool = self.get("fldpln_parallel")
-        self.fldpln_solver: str = self.get("fldpln_solver")
-        if self.fldpln_max_cells_per_segment is not None and self.fldpln_solver != "exact":
-            LOG.warning(f"Watershed '{self.watershed_name}': 'fldpln_max_cells_per_segment' needs the exact FLDPLN "
-                        f"solver; ignoring it with the {self.fldpln_solver} solver.")
-            self.fldpln_max_cells_per_segment = None
         self.project_to_utm: bool = self.get("project_to_utm")
         self.burn_streams: bool = self.get("burn_streams")
         if self.ocean and not self.burn_streams:
             LOG.warning(f"Watershed '{self.watershed_name}': 'ocean' is used only with 'burn_streams'; ignoring it.")
         self.relocate_misplaced_streams: bool = self.get("relocate_misplaced_streams")
-        self.use_power_laws_for_bathymetry: bool = self.get("use_power_laws_for_bathymetry")
         self.area_m2_field: str = self.get("area_m2_field")
         self.area_km2_field: str = self.get("area_km2_field")
         self.num_workers = self.get_num_workers()
-        self.slope_low_percentile: int = int(self.get("slope_low_percentile"))
-        self.slope_high_percentile: int = int(self.get("slope_high_percentile"))
-        self.coefficient_depth = self.get("coefficient_depth")
-        self.coefficient_width = self.get("coefficient_width")
-        self.exponent_depth = self.get("exponent_depth")
-        self.exponent_width = self.get("exponent_width")
         self.use_dem_derived_channel_mask: bool = self.get("use_dem_derived_channel_mask")
+        self.dem_flattens_rivers: bool | None = self.validate_dem_flattens_rivers()
         self.drop_multilinestrings: bool = self.get("drop_multilinestrings")
         self.minimize_output_files: bool = self.get("minimize_output_files")
 
         self.validate_custom_source()
 
-        if self.parallel and self.fldpln_parallel:
-            LOG.error("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
-            raise ValueError("Both 'parallel' and 'fldpln_parallel' are set to True. Please set only one of these options to True.")
+        if self.parallel and self.fldpln_library_args.get("parallel"):
+            raise ValueError(f"Watershed '{self.watershed_name}': 'parallel' maps the DEMs in processes of their own, "
+                             "so fldpln_library_args can't build the FLDPLN library in parallel too.")
 
         if not self.make_vdt and not self.make_curvefile:
             raise ValueError(f"Watershed '{self.watershed_name}': the flood maps need ARC's VDT database or curve file, "
@@ -445,10 +519,6 @@ class NencartaConfig:
         if not self.make_vdt and self.mapper.is_curve2flood_fldpln_mapper():
             raise ValueError(f"Watershed '{self.watershed_name}': the Curve2Flood-FLDPLNpy mapper needs ARC's VDT "
                              "database, so 'make_vdt' must be True.")
-
-        if self.use_power_laws_for_bathymetry and not all([self.coefficient_depth, self.coefficient_width, self.exponent_depth, self.exponent_width]):
-            LOG.error("When 'use_power_laws_for_bathymetry' is True, all of 'coefficient_depth', 'coefficient_width', 'exponent_depth', and 'exponent_width' must be provided.")
-            raise ValueError("When 'use_power_laws_for_bathymetry' is True, all of 'coefficient_depth', 'coefficient_width', 'exponent_depth', and 'exponent_width' must be provided.")
 
     def __repr__(self):
         return f"NencartaConfig(name={self.watershed_name}, output_dir={self.output_dir})"

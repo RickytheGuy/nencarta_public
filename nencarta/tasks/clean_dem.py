@@ -2,10 +2,11 @@ from pathlib import Path
 
 from nencarta import dem_cleaner
 from nencarta.logger import LOG
+from nencarta.tasks.make_bathy_water_mask import flood_streams_to_depth
 from nencarta.tasks.make_flow_file_from_reanalysis import (
     _make_flood_flow_file_from_base_max_file,
 )
-from nencarta.tasks.run_models import _run_mapper, run_arc_for_initial_floodmap
+from nencarta.tasks.run_models import run_arc_for_initial_floodmap
 from nencarta.workspace import Workspace
 
 
@@ -45,9 +46,11 @@ def make_clean_dem(workspace: Workspace) -> Path:
         LOG.info(f"{workspace.Curve_File_Initial} exists and we aren't making it again...")
 
     if configs.use_specified_depth_for_bathy_mask:
-        LOG.info(f"Executing Curve2Flood using {workspace.ARC_FileName_for_DEM_Cleaner}")
-        _run_mapper(workspace.ARC_FileName_for_DEM_Cleaner, configs)
-        initial_flood_map = workspace.FloodMapFile_Initial
+        # On the DEM the cleaner's ARC run had
+        dem = workspace.fixed_dem if configs.burn_streams else workspace.assigned_dem
+        initial_flood_map = flood_streams_to_depth(workspace, dem, configs.specify_depths_for_bathy_mask[0],
+                                                   workspace.FloodMapFile_Initial,
+                                                   workspace.Mapper_FileName_InitialFlood)
         if not initial_flood_map.exists():
             raise FileNotFoundError(f"The flood mapper did not make the DEM cleaner's initial flood map, {initial_flood_map}.")
     else:

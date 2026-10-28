@@ -6,14 +6,13 @@ import pyogrio
 import yaml
 
 from nencarta.core.configs import NencartaConfig
-from nencarta.core.defaults import (
-    DEFAULT_BATHY_ARGS,
-    DEFAULT_CONFIG,
-    DEFAULT_FLOODMAP_ARGS,
-)
 from nencarta.core.enumerations import FloodMapMode, Mapper
+from nencarta.core.model_args import get_arg, merge_args
 from nencarta.logger import LOG
 from nencarta.workspace import Workspace
+
+# ARC's drainage-area power law keys, which nencarta gives their field (see _drainage_area_power_laws)
+_POWER_LAW_KEYS = ("coefficient_width", "exponent_width", "coefficient_depth", "exponent_depth")
 
 
 def _arc_inputs(dem: Path,
@@ -24,27 +23,35 @@ def _arc_inputs(dem: Path,
                 river_id: str,
                 highflow_field: str,
                 baseflow_field: str,
-                bathy_args: dict,
+                land_watervalue: int,
                 include_baseflow: bool = True,
                 ):
-    """The input section of an ARC config, with the ARC settings found in ``bathy_args``."""
+    """The input section of an ARC config."""
     params = {
         "#ARC_Inputs": "",
         "DEM_File": dem,
         "Stream_File": stream_raster,
         "LU_Raster_SameRes": land_cover,
         "LU_Manning_n": mannings_n_file,
+        # The land cover's water, for the banks with FindBanksBasedOnLandCover
+        "LC_Water_Value": land_watervalue,
         "Flow_File": reanalysis_flow_file,
         "Flow_File_ID": river_id,
     }
     if include_baseflow:
         params["Flow_File_BF"] = baseflow_field
     params["Flow_File_QMax"] = highflow_field
-    params["Spatial_Units"] = "deg"
-
-    params.update(bathy_args)
 
     return params
+
+
+def _with_arc_args(params: dict, configs: NencartaConfig, stream_vector: Path, power_laws: bool = True) -> dict:
+    """An ARC config's ``params`` with arc_args after them, and their power laws given their drainage area field (see
+    _drainage_area_power_laws), or left out without ``power_laws``."""
+    params = merge_args({**params, "# arc_args": ""}, configs.arc_args)
+    laws = _drainage_area_power_laws(configs, stream_vector) if power_laws else \
+        dict.fromkeys(_POWER_LAW_KEYS)
+    return merge_args(params, laws)
 
 def _vector_columns(path: Path) -> set[str] | None:
     """The attribute columns of a stream file, or None if it isn't there yet."""
@@ -59,34 +66,23 @@ def _vector_columns(path: Path) -> set[str] | None:
         return None
 
 
-def _valley_sections(configs) -> dict:
-    """ARC's Valley_Sections and its windows, Valley_Dir_Widths and Valley_Dir_Dist, when valley_sections is on: the
-    overbanks' flow on lines out from each cross section's banks square to the valley, at the valley's slope."""
-    if not configs.valley_sections:
-        return {}
-    return {"Valley_Sections": True, "Valley_Dir_Widths": float(configs.valley_dir_widths),
-            "Valley_Dir_Dist": int(configs.valley_dir_dist)}
-
-
-def _edge_sections(configs) -> dict:
-    """ARC's Drop_Edge_Sections and its Edge_Margin, when drop_edge_sections is on: no rating curve whose water, at its
-    top flow, reaches the DEM's edge, which cuts its cross section off and makes overlapping tiles disagree."""
-    if not configs.drop_edge_sections:
-        return {}
-    return {"Drop_Edge_Sections": True, "Edge_Margin": float(configs.edge_margin)}
-
-
 def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> dict:
     """
-    ARC's drainage-area power laws, from the area in km2: always the width's, and the depth's too with
-    use_power_laws_for_bathymetry. ARC sizes with the width's the channels whose banks the water mask, the land cover
-    and the DEM don't show: a single cell as wide as the law says, where that's narrower than a cell. Without it, on a
-    flat valley floor, ARC found banks at a few of a creek's cross sections, hundreds of metres to kilometres apart.
+    arc_args' drainage-area power laws, given the field of the area in km2: the width's (nencarta's by default), and
+    the depth's when arc_args give coefficient_depth and exponent_depth. ARC sizes with the width's the channels whose
+    banks the water mask, the land cover and the DEM don't show: a single cell as wide as the law says, where that's
+    narrower than a cell. Without it, on a flat valley floor, ARC found banks at a few of a creek's cross sections,
+    hundreds of metres to kilometres apart.
 
     The area is area_km2_field's, which nencarta adds to the stream lines (tasks.make_stream_geometry). A stream file
     made before it did has only area_m2_field: the coefficients are then scaled to take m2, which gives the same
-    widths and depths. Without either field, ARC gets no power laws.
+    widths and depths. Without either field, ARC gets no power laws: their keys are None, to drop them.
     """
+    laws = {key: get_arg(configs.arc_args, key) for key in _POWER_LAW_KEYS}
+    laws = {key: value for key, value in laws.items() if value is not None}
+    if not laws:
+        return {}
+
     field, scale = configs.area_km2_field, 1.0
     columns = _vector_columns(stream_vector)
     if columns is not None and field not in columns:
@@ -94,20 +90,15 @@ def _drainage_area_power_laws(configs: NencartaConfig, stream_vector: Path) -> d
             field, scale = configs.area_m2_field, 1e-6
         else:
             LOG.warning(f"The stream lines {stream_vector} have no drainage area ({configs.area_km2_field} or "
-                        f"{configs.area_m2_field}), so ARC gets no width power law.")
-            return {}
-        
-    exponent_width = configs.exponent_width or DEFAULT_CONFIG["exponent_width"]
-    params = {"drainage_area_field": field,
-              "coefficient_width": (configs.coefficient_width or DEFAULT_CONFIG["coefficient_width"])
-              * scale ** exponent_width,
-              "exponent_width": exponent_width}
-    
-    if configs.use_power_laws_for_bathymetry:
-        exponent_depth = configs.exponent_depth or DEFAULT_CONFIG["exponent_depth"]
-        params["coefficient_depth"] = (configs.coefficient_depth or DEFAULT_CONFIG["coefficient_depth"]) \
-            * scale ** exponent_depth
-        params["exponent_depth"] = exponent_depth
+                        f"{configs.area_m2_field}), so ARC gets no power laws.")
+            return dict.fromkeys(_POWER_LAW_KEYS)
+
+    params = {"drainage_area_field": field}
+    for kind in ("width", "depth"):
+        coefficient, exponent = laws.get(f"coefficient_{kind}"), laws.get(f"exponent_{kind}")
+        if coefficient is not None and exponent is not None:
+            params[f"coefficient_{kind}"] = float(coefficient) * scale ** float(exponent)
+            params[f"exponent_{kind}"] = float(exponent)
 
     return params
 
@@ -120,7 +111,6 @@ def _fldpln_inputs(workspace: Workspace):
         "Flow_Direction_File": workspace.flowdir,
         "Stream_Info_File": workspace.stream_info_file,
         "FLDPLN_Library": workspace.fldpln_library,
-        "FLDPLN_Min_Flood_Depth": workspace.configs.fldpln_min_flood_depth,
     }
     output[""] = ""
     return output
@@ -189,10 +179,8 @@ def flood_map_paths(workspace: Workspace, postfix: str) -> dict[str, Path]:
             "OutWSE": path('ARC_FloodWSE', 'tif'), "OutDEP": path('ARC_FloodDepth', 'tif')}
                 
 def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
-    """
-    Write the config of the DEM cleaner's ARC run (initial rating curves) and, with
-    use_specified_depth_for_bathy_mask, of its initial flood map at the first specified depth.
-    """
+    """Write the config of the DEM cleaner's ARC run (initial rating curves): nencarta's files and fields, and
+    arc_args. Its outline, with use_specified_depth_for_bathy_mask, is Curve2Flood's (see clean_dem)."""
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
     workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
     workspace.flood_folder.mkdir(parents=True, exist_ok=True)
@@ -223,47 +211,24 @@ def define_configs_for_dem_cleaning(workspace: Workspace) -> Path:
         river_id="COMID",
         highflow_field=configs.specified_highflow_field,
         baseflow_field=configs.specified_bathyflow_field,
-        bathy_args=configs.bathy_args,
+        land_watervalue=configs.land_watervalue,
         include_baseflow=True,
     )
-    
+    params["StrmShp_File"] = streamlines
     params["reach_id"] = configs.stream_id_field
     params["downstream_reach_id"] = configs.downstream_id_field
-    if configs.standard_step:
-        params["Standard_Step"] = True
-        
-    params.update(_valley_sections(configs))
-    params.update(_edge_sections(configs))
-    params.update(_drainage_area_power_laws(configs, streamlines))
 
     params["#VDT_Output_File_and_CurveFile"] = ""
-    params["VDT_Database_NumIterations"] = configs.bathy_args.get("VDT_Database_NumIterations", DEFAULT_BATHY_ARGS["VDT_Database_NumIterations"])
     params["Print_VDT_Database"] = workspace.VDT_File_Initial
     params["Print_Curve_File"] = workspace.Curve_File_Initial
-    params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
 
-    params["#Mapper Input Data"] = ""
-    params["StrmShp_File"] = streamlines
-    params["Comid_Flow_File"] = workspace.COMID_Q_File
-    params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
-    params["Bathy_Use_Banks"] = configs.bathy_use_banks
-    if configs.flood_waterlc_and_strm_cells:
-        params["Flood_WaterLC_and_STRM_Cells"] = True
-        params["LAND_WaterValue"] = configs.land_watervalue
-    if configs.find_banks_based_on_landcover:
-        params["FindBanksBasedOnLandCover"] = True
-    if configs.use_specified_depth_for_bathy_mask:
-        params["OutFLD"] = workspace.FloodMapFile_Initial
-        params["OutSHP"] = workspace.FloodMapFile_Initial_SHP
-        params["FloodSpreader_SpecifyDepth"] = configs.specify_depths_for_bathy_mask[0]
-
-    _write_config(workspace.ARC_FileName_for_DEM_Cleaner, params)
+    _write_config(workspace.ARC_FileName_for_DEM_Cleaner, _with_arc_args(params, configs, streamlines))
     return workspace.ARC_FileName_for_DEM_Cleaner
 
 def define_arc_configs(workspace: Workspace,) -> Path:
     """
-    Write the config of ARC's main run (rating curves and bathymetry), which the flood mapper also reads to put the
-    bathymetry into the DEM. Without bathymetry, nothing is rewritten if ARC's outputs exist.
+    Write the config of ARC's main run (rating curves and bathymetry): nencarta's files and fields, and arc_args.
+    Without bathymetry, nothing is rewritten if ARC's outputs exist.
     """
     workspace.ARC_Folder.mkdir(parents=True, exist_ok=True)
     workspace.VDT_Folder.mkdir(parents=True, exist_ok=True)
@@ -291,12 +256,11 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         river_id="COMID",
         highflow_field=configs.specified_highflow_field,
         baseflow_field=configs.specified_bathyflow_field,
-        bathy_args=configs.bathy_args,
+        land_watervalue=configs.land_watervalue,
         include_baseflow=not configs.disable_bathymetry,
     )
-    
+
     params["# VDT_Output_File_and_CurveFile"] = ""
-    params["VDT_Database_NumIterations"] = configs.bathy_args.get("VDT_Database_NumIterations", DEFAULT_BATHY_ARGS["VDT_Database_NumIterations"])
     if configs.make_vdt:
         params["Print_VDT_Database"] = workspace.VDT_File_Bathy
     if configs.make_curvefile:
@@ -310,64 +274,52 @@ def define_arc_configs(workspace: Workspace,) -> Path:
         params["Build_Representative_Cross_Section"] = True
         params["Representative_Cross_Section_File"] = workspace.Representative_Cross_Section_File
 
-    params["Reach_Average_Curve_File"] = configs.create_reach_average_curve_file
     params["StrmShp_File"] = stream_vector
-    params["Slope_Low_Percentile"] = configs.slope_low_percentile
-    params["Slope_High_Percentile"] = configs.slope_high_percentile
-    if configs.standard_step:
-        # ARC links the cross sections down the stream network, so it needs each reach's id and the one below it
-        params["Standard_Step"] = True
+    if configs.standard_step or not configs.disable_bathymetry:
+        # ARC links the cross sections down the stream network for the standard step and the bathymetry, so it needs
+        # each reach's id and the one below it
         params["reach_id"] = configs.stream_id_field
         params["downstream_reach_id"] = configs.downstream_id_field
-    params.update(_valley_sections(configs))
-    params.update(_edge_sections(configs))
+
     if configs.outlet_exchange == "pass2" and workspace.outlet_wse_file.exists():
         # The neighbouring DEMs' water where the rivers leave this one, to start them from (tasks/outlet_exchange.py)
         params["Outlet_WSE_File"] = workspace.outlet_wse_file
 
     if not configs.disable_bathymetry:
-        params["reach_id"] = configs.stream_id_field
-        params["downstream_reach_id"] = configs.downstream_id_field
-        params.update(_drainage_area_power_laws(configs, stream_vector))
-
-        params["# Mapper Input Data"] = ""
-        params["Comid_Flow_File"] = workspace.COMID_Q_File
-        # The flood mapper's bathymetry run maps no flood: it burns ARC_Bathy into the DEM as it is (FS_Bathy). So its
-        # mapper, TW_MultFact, TopWidthPlausibleLimit and FloodSpreader_SpecifyDepth change nothing.
-        params["mapper"] = configs.mapper if not configs.mapper.is_curve2flood_fldpln_mapper() else Mapper.CURVE2FLOOD_KERNEL_WEIGHTED
-        params["TW_MultFact"] = configs.bathy_args.get("TW_MultFact", DEFAULT_FLOODMAP_ARGS["TW_MultFact"])
-        params["TopWidthPlausibleLimit"] = configs.bathy_args.get("TopWidthPlausibleLimit", DEFAULT_FLOODMAP_ARGS["TopWidthPlausibleLimit"])
-        if not configs.bathy_args.get("Make_Output_GPKG", DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"]):
-            params["Make_Output_GPKG"] = False
-
-        # With the set depth, ARC finds the banks without the water mask; with the water mask, its water's end is
-        # each cross section's banks
-        if configs.use_specified_depth_for_bathy_mask:
-            params["FloodSpreader_SpecifyDepth"] = configs.specify_depths_for_bathy_mask[-1]
-        else:
-            if not workspace.bathy_water_mask:
-                raise ValueError("Bathy water mask is required when not using specified depth for bathy mask.")
-            params["BathyWaterMask"] = workspace.bathy_water_mask
-
         params["# Bathymetry_Information"] = ""
-        params["Bathy_Trap_H"] = configs.bathy_args.get("Bathy_Trap_H", DEFAULT_BATHY_ARGS["Bathy_Trap_H"])
-        params["Bathy_Use_Banks"] = configs.bathy_use_banks
-
-        if configs.flood_waterlc_and_strm_cells:
-            params["Flood_WaterLC_and_STRM_Cells"] = True
-            params["LAND_WaterValue"] = configs.land_watervalue
-        if configs.find_banks_based_on_landcover:
-            params["FindBanksBasedOnLandCover"] = True
-
+        # ARC puts each cross section's banks where its water mask's water ends: the streams flooded to a set depth
+        # (make_depth_mask) with use_specified_depth_for_bathy_mask, otherwise the streams and the water at the
+        # river's level beside them (make_water_mask)
+        params["BathyWaterMask"] = workspace.depth_mask if configs.use_specified_depth_for_bathy_mask \
+            else workspace.bathy_water_mask
         workspace.bathy_file_folder.mkdir(parents=True, exist_ok=True)
         params["BATHY_Out_File"] = workspace.ARC_BathyFile
-        params["AROutBATHY"] = workspace.ARC_BathyFile
-        params["FSOutBATHY"] = workspace.FS_BathyFile
-    
+
+    # ARC's power laws carve the bathymetry's channels
+    params = _with_arc_args(params, configs, stream_vector, power_laws=not configs.disable_bathymetry)
     LOG.info(f"Writing ARC config to {workspace.ARC_FileName_Bathy}.")
     _write_config(workspace.ARC_FileName_Bathy, params)
-    
+
     return workspace.ARC_FileName_Bathy
+
+
+def define_mapper_bathymetry_config(workspace: Workspace) -> Path | None:
+    """
+    Write the config of the flood mapper's run that burns ARC's bathymetry into the DEM the flood maps are made on
+    (FS_Bathy), as ARC estimated it (Bathy_Use_Banks says how). It maps no flood. None without bathymetry.
+    """
+    configs = workspace.configs
+    if configs.disable_bathymetry:
+        return None
+
+    _write_config(workspace.Mapper_FileName_Bathy, {
+        "# Curve2Flood_Inputs": "",
+        "DEM_File": workspace.model_dem,
+        "BATHY_Out_File": workspace.ARC_BathyFile,
+        "Bathy_Use_Banks": configs.bathy_use_banks,
+        "FSOutBATHY": workspace.FS_BathyFile,
+    })
+    return workspace.Mapper_FileName_Bathy
 
 def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     """
@@ -381,7 +333,6 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     # Curve2Flood reads the stream raster only with Set_Depth, Manning's n only for velocity, and the stream lines
     # only to allow the GeoPackage; FloodSpreader gets them all
     curve2flood = configs.mapper.is_curve2flood_mapper()
-    make_gpkg = configs.floodmap_args.get('Make_Output_GPKG', DEFAULT_FLOODMAP_ARGS["Make_Output_GPKG"])
     params = {'#ARC_Inputs': ''}
     params["DEM_File"] = workspace.model_dem if configs.disable_bathymetry else workspace.FS_BathyFile
     if not curve2flood:
@@ -403,15 +354,13 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
     params["mapper"] = configs.mapper
     if configs.mapper.is_curve2flood_fldpln_mapper():
         params.update(_fldpln_inputs(workspace))
-    params["TW_MultFact"] = configs.floodmap_args.get("TW_MultFact", DEFAULT_FLOODMAP_ARGS["TW_MultFact"])
-    params["TopWidthPlausibleLimit"] = configs.floodmap_args.get("TopWidthPlausibleLimit", DEFAULT_FLOODMAP_ARGS["TopWidthPlausibleLimit"])
 
+    # The files curve2flood_args' Flood_WaterLC_and_STRM_Cells (and the velocity) and Flood_Bathy_Mask need
     if configs.flood_waterlc_and_strm_cells or configs.make_velocity_maps:
-        params["Flood_WaterLC_and_STRM_Cells"] = configs.flood_waterlc_and_strm_cells
         params["LU_Raster_SameRes"] = workspace.LAND_File
         params["LAND_WaterValue"] = configs.land_watervalue
+        
     if configs.flood_bathy_mask:
-        params["Flood_Bathy_Mask"] = True
         params["BathyWaterMask"] = workspace.bathy_water_mask
 
     if configs.floodmap_mode == FloodMapMode.FORECAST:
@@ -439,7 +388,6 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
 
     flood_maps = flood_map_paths(workspace, postfix)
     params["OutFLD"] = flood_maps["OutFLD"]
-    params["Make_Output_GPKG"] = make_gpkg
 
     if configs.make_velocity_maps:
         params["OutVEL"] = flood_maps["OutVEL"]
@@ -451,5 +399,5 @@ def define_mapper_configs(workspace: Workspace, flow_file: Path) -> Path:
         params["OutDEP"] = flood_maps["OutDEP"]
 
     LOG.info(f"Writing Mapper config to {config_path}.")
-    _write_config(config_path, params)
+    _write_config(config_path, merge_args({**params, "# curve2flood_args": ""}, configs.curve2flood_args))
     return config_path

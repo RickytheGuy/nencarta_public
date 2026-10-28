@@ -8,9 +8,11 @@ from nencarta.tasks import (
     burn_streams_and_move_streams,
     define_arc_configs,
     define_configs_for_dem_cleaning,
+    define_mapper_bathymetry_config,
     define_mapper_configs,
     get_fist_inputs,
     make_clean_dem,
+    make_depth_mask,
     make_flood_flow_file_from_base_max_file,
     make_flow_file_from_forecast,
     make_land_cover,
@@ -29,8 +31,9 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     """
     Make every input one DEM needs, in order: the DEM, Manning's n, land cover, streams, flow statistics, stream
     raster, water mask, burned and moved streams, cleaned DEM, flow files, and the ARC and flood mapper configs
-    (with outlet_exchange pass2, first the outlets' water from the neighbouring DEMs). Files that exist are reused
-    unless overwrite. Returns the configs.
+    (with use_specified_depth_for_bathy_mask, first ARC's water mask, the streams flooded to a set depth; with
+    outlet_exchange pass2, the outlets' water from the neighbouring DEMs). Files that exist are reused unless
+    overwrite. Returns the configs.
     """
     DEM = workspace.assigned_dem
     configs = workspace.configs
@@ -70,10 +73,15 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
     else:
         flow_files = []
 
+    if configs.use_specified_depth_for_bathy_mask and not configs.disable_bathymetry:
+        # On the DEM ARC runs on, so after the burn and the DEM cleaner
+        make_depth_mask(workspace)
+
     if configs.outlet_exchange == "pass2":
         make_outlet_wse_file(workspace)
-        
+
     arc_config = define_arc_configs(workspace)
+    bathy_mapper_config = define_mapper_bathymetry_config(workspace)
 
     mapper_configs = []
     fist_inputs = []
@@ -84,7 +92,8 @@ def prepare_inputs_for_dem(workspace: Workspace) -> ModelConfig:
 
     return ModelConfig(
         arc_config,
-        mapper_configs, 
+        mapper_configs,
         fist_inputs,
         configs.mapper,
-        configs.quiet)
+        configs.quiet,
+        bathy_mapper_config=bathy_mapper_config)

@@ -4,19 +4,22 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from curve2flood import remove_cells_not_connected
+from curve2flood import Curve2Flood_MainFunction, remove_cells_not_connected
 from numba import njit
 from osgeo import gdal
 
+from nencarta.core.enumerations import Mapper
 from nencarta.core.raster import Raster
 from nencarta.core.vector import Vector
 from nencarta.logger import LOG
 from nencarta.tasks.channel_detection import (
+    ChannelSettings,
     _feature_distance,
     flood_patches,
     nearest_cell,
     river_channel,
 )
+from nencarta.tasks.configs import _write_config
 from nencarta.tasks.stream_conflation import cell_sizes_m
 from nencarta.workspace import Workspace
 
@@ -45,18 +48,23 @@ def reach_areas_km2(streams_gdf: gpd.GeoDataFrame | pd.DataFrame, configs) -> di
     return dict(zip(ids[keep].astype(np.int64).tolist(), area[keep].astype(float).tolist()))
 
 
-def dem_channel(dem_raster, dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_km2: dict,
-                connected: bool = True, flat_water: bool = True, channel: bool = True):
+def dem_channel(dem_raster: Raster | gdal.Dataset, dem: np.ndarray, valid: np.ndarray, streams: np.ndarray, area_km2: dict,
+                connected: bool = True, flat_water: bool = True, channel: bool = True,
+                flattens_rivers: bool | None = None):
     """
     The channel the DEM shows along ``streams`` (see channel_detection.river_channel, which skips ``flat_water`` or
-    ``channel`` when told to), on the grid of ``dem_raster`` (a Raster, or a gdal.Dataset).
+    ``channel`` when told to), on the grid of ``dem_raster`` (a Raster, or a gdal.Dataset). ``flattens_rivers``
+    says whether the DEM flattens every river wide enough to show (None: its flat water says, see
+    channel_detection.flattens_its_rivers).
     """
     if isinstance(dem_raster, gdal.Dataset):
         geotransform, projection = dem_raster.GetGeoTransform(), dem_raster.GetProjection()
     else:
         geotransform, projection = dem_raster.geotransform, dem_raster.projection
+
     dx, dy = cell_sizes_m(geotransform, projection, dem.shape[0])
-    return river_channel(dem, valid, streams, area_km2, float(np.median(dx)), dy, connected=connected,
+    return river_channel(dem, valid, streams, area_km2, float(np.median(dx)), dy,
+                         ChannelSettings(flattens_rivers=flattens_rivers), connected=connected,
                          flat_water=flat_water, channel=channel)
 
 
@@ -209,8 +217,9 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
     The bathymetry water mask for ``streams`` (reach ids, 0 off them, draining ``area_km2`` by id) on ``dem_raster``
     (before the burn): the stream cells and the water beside them at about the river's level (see
     near_the_rivers_level), in patches touching a stream cell. The water is the land cover's, and with
-    use_dem_derived_channel_mask also the channel the DEM shows (see channel_detection), where the imagery saw the
-    river elsewhere. The ocean is left out: the burned DEM has no data there (see load_ocean_array).
+    use_dem_derived_channel_mask also the channel the DEM shows (see channel_detection, told by dem_flattens_rivers
+    whether the DEM flattens its rivers), where the imagery saw the river elsewhere. The ocean is left out: the burned
+    DEM has no data there (see load_ocean_array).
 
     The water in a lake (see load_lake_array) is the lake's, whatever its level: no stream runs in a lake the network
     is cut at (FLDPLN's), and the river nearest a reservoir's water by its dam is the one below the dam, metres lower.
@@ -235,7 +244,8 @@ def water_mask(workspace: Workspace, dem_raster: Raster, streams: np.ndarray, ar
             valid &= dem != dem_raster.nodata_value
         if ocean is not None:
             valid &= ~ocean
-        water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}, flat_water=False).channel
+        water |= dem_channel(dem_raster, dem, valid, streams, area_km2 or {}, flat_water=False,
+                             flattens_rivers=configs.dem_flattens_rivers).channel
     if ocean is not None:
         water &= ~ocean
     lakes = load_lake_array(workspace, dem_raster)
@@ -328,3 +338,49 @@ def make_water_mask(workspace: Workspace) -> Path:
     )
 
     return workspace.bathy_water_mask
+
+
+def flood_streams_to_depth(workspace: Workspace, dem: Path, depth: float, flood_map: Path, config: Path) -> Path:
+    """
+    Flood the streams ARC runs on to ``depth`` on ``dem`` with Curve2Flood, writing ``flood_map``, and its input file
+    ``config``. Each stream cell's water surface is its height plus the depth; each cell takes the average of the stream
+    cells' water surfaces within depth_mask_distance of it, weighted by one over the distance squared, and the cells
+    below it, in patches touching a stream, are flooded.
+    """
+    configs = workspace.configs
+    stream_raster = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
+    LOG.info(f"Flooding the streams {depth} m deep...")
+    flood_map.parent.mkdir(parents=True, exist_ok=True)
+    _write_config(config, {
+        "# Curve2Flood_Inputs": "",
+        "DEM_File": dem,
+        "Stream_File": stream_raster,
+        # The FLDPLN mapper can't flood to a set depth
+        "mapper": Mapper.CURVE2FLOOD_KERNEL_WEIGHTED,
+        "Set_Depth": depth,
+        "TopWidthPlausibleLimit": configs.depth_mask_distance,
+        "OutFLD": flood_map,
+        "Make_Output_GPKG": False,
+    })
+    Curve2Flood_MainFunction(str(config), quiet=configs.quiet)
+    return flood_map
+
+
+def make_depth_mask(workspace: Workspace) -> Path | None:
+    """
+    Write ARC's water mask for use_specified_depth_for_bathy_mask (workspace.depth_mask): the streams ARC runs on,
+    flooded to the last of specify_depths_for_bathy_mask on the DEM ARC runs on (see flood_streams_to_depth). ARC puts
+    the banks where its water ends. Its Curve2Flood input file is workspace.Depth_Mask_Config.
+    """
+    configs = workspace.configs
+    if workspace.depth_mask.exists() and not configs.overwrite:
+        LOG.info(f"{workspace.depth_mask} already exists and we aren't making it again...")
+        return workspace.depth_mask
+
+    stream_raster = workspace.new_stream_raster if configs.move_stream_network_to_thalweg else workspace.STRM_File_Clean
+    # make_stream_raster() makes no stream raster when there are no streams in the domain
+    if not stream_raster.exists() and not configs.raise_errors_if_nothing_in_domain:
+        return None
+
+    return flood_streams_to_depth(workspace, workspace.model_dem, configs.specify_depths_for_bathy_mask[-1],
+                                  workspace.depth_mask, workspace.Depth_Mask_Config)

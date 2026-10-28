@@ -4,6 +4,7 @@ from .clean_dem import make_clean_dem
 from .configs import (
     define_arc_configs,
     define_configs_for_dem_cleaning,
+    define_mapper_bathymetry_config,
     define_mapper_configs,
 )
 from .consequences import run_consequences
@@ -15,7 +16,7 @@ from .flow_files import (
     make_return_period_flow_file,
     remove_old_forecast_files,
 )
-from .make_bathy_water_mask import make_water_mask
+from .make_bathy_water_mask import make_depth_mask, make_water_mask
 from .make_flow_file_from_reanalysis import make_flood_flow_file_from_base_max_file
 from .make_land_cover import make_land_cover
 from .make_reanalysis_flowfile import make_reanalysis_file
@@ -40,9 +41,11 @@ __all__ = [
     "burn_streams_and_move_streams",
     "define_arc_configs",
     "define_configs_for_dem_cleaning",
+    "define_mapper_bathymetry_config",
     "define_mapper_configs",
     "get_fist_inputs",
     "make_clean_dem",
+    "make_depth_mask",
     "make_flood_flow_file_from_base_max_file",
     "make_flow_file_from_forecast",
     "make_land_cover",

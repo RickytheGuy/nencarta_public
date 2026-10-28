@@ -3,6 +3,8 @@ The NenCarta GUI: a form with a field for every config key (see core/defaults.py
 and shows its log. Field values are remembered between sessions.
 """
 # built-in imports
+import dataclasses
+import inspect
 import io
 import json
 import logging
@@ -49,9 +51,10 @@ from PyQt5.QtWidgets import (
 from nencarta.core.configs import NencartaConfig, strip_quotes
 from nencarta.core.defaults import (
     CONFIG_OPTIONS,
-    DEFAULT_BATHY_ARGS,
+    DEFAULT_ARC_ARGS,
     DEFAULT_CONFIG,
-    DEFAULT_FLOODMAP_ARGS,
+    DEFAULT_CURVE2FLOOD_ARGS,
+    DEFAULT_FLDPLN_LIBRARY_ARGS,
     FLOW_FIELD_OPTIONS,
     VALID_RETURN_PERIODS,
 )
@@ -77,18 +80,28 @@ FLOODMAP_MODE_LABELS = {
 # Choices the form makes that aren't config keys themselves: they pick which of the keys it sends
 DEM_MODES = {"file": "A DEM file", "folder": "A folder of DEMs", "bbox": "Cut from source DEMs to a bounding box"}
 FLOWLINE_MODES = {"file": "One stream network file", "many": "Search several stream network files"}
-WATER_MASK_MODES = {"depth": "The streams flooded to set depths (ARC finds the banks without the water mask)",
-                    "water": "Water mask computed from the DEM (ARC finds the banks with the water mask)"}
+WATER_MASK_MODES = {"depth": "The streams flooded to set depths",
+                    "water": "The streams and the water beside them at the river's level"}
 MANNINGS_MODES = {"default": "NenCarta's table, for ESA WorldCover", "file": "My own table"}
 
 SLOPE_METHODS = ("local_average_corrected", "local_average", "reach_average", "end_points", "local_fit")
 
-# The ARC and Curve2Flood arguments with fields of their own; the rest of bathy_args and floodmap_args go in tables
-BATHY_ARG_FIELDS = ("Gen_Dir_Dist", "Degree_Manip", "Degree_Interval", "Low_Spot_Range", "Bathy_Trap_H",
-                    "Stream_Slope_Method", "Gen_Slope_Dist", "VDT_Database_NumIterations")
-FLOODMAP_ARG_FIELDS = ("TW_MultFact", "TopWidthPlausibleLimit", "Make_Output_GPKG")
-ARG_FIELDS = {"bathy_args": BATHY_ARG_FIELDS, "floodmap_args": FLOODMAP_ARG_FIELDS}
-ARG_DEFAULTS = {"bathy_args": DEFAULT_BATHY_ARGS, "floodmap_args": DEFAULT_FLOODMAP_ARGS}
+# The ARC and Curve2Flood settings and FLDPLN library arguments with fields of their own; the rest of arc_args,
+# curve2flood_args and fldpln_library_args go in tables
+ARC_ARG_FIELDS = ("Gen_Dir_Dist", "Degree_Manip", "Degree_Interval", "Low_Spot_Range", "Bathy_Trap_H",
+                  "FindBanksBasedOnLandCover", "Bathy_Use_Banks", "coefficient_depth", "exponent_depth",
+                  "coefficient_width", "exponent_width", "Stream_Slope_Method", "Gen_Slope_Dist",
+                  "Slope_Low_Percentile", "Slope_High_Percentile", "Standard_Step", "Valley_Sections",
+                  "Valley_Dir_Widths", "Valley_Dir_Dist", "Drop_Edge_Sections", "Edge_Margin",
+                  "Reach_Average_Curve_File", "VDT_Database_NumIterations")
+CURVE2FLOOD_ARG_FIELDS = ("FLDPLN_Min_Flood_Depth", "Flood_WaterLC_and_STRM_Cells", "Flood_Bathy_Mask", "TW_MultFact",
+                          "TopWidthPlausibleLimit", "Make_Output_GPKG")
+FLDPLN_LIBRARY_ARG_FIELDS = ("solver", "dh", "iterative_spill", "parallel", "fldmn", "fldmx", "spill_decay",
+                             "max_cells_per_segment")
+ARG_FIELDS = {"arc_args": ARC_ARG_FIELDS, "curve2flood_args": CURVE2FLOOD_ARG_FIELDS,
+              "fldpln_library_args": FLDPLN_LIBRARY_ARG_FIELDS}
+ARG_DEFAULTS = {"arc_args": DEFAULT_ARC_ARGS, "curve2flood_args": DEFAULT_CURVE2FLOOD_ARGS,
+                "fldpln_library_args": DEFAULT_FLDPLN_LIBRARY_ARGS}
 # Arguments neither ARC nor Curve2Flood reads any more, dropped from the tables the form remembered. ARC's cross
 # sections reach as far as their water needs, so X_Section_Dist sets nothing.
 RETIRED_ARGS = {"Str_Limit_Val", "FS_ADJUST_FLOW_BY_FRACTION", "X_Section_Dist"}
@@ -120,62 +133,69 @@ UNDERLYING_NAMES = {
     "minimize_output_files": "minimize_output_files",
     "new_strm_threshold_km2": "new_strm_threshold_km2",
     "use_dem_derived_channel_mask": "use_dem_derived_channel_mask",
+    "dem_flattens_rivers": "dem_flattens_rivers",
     "drop_multilinestrings": "drop_multilinestrings",
     "q_baseflow_threshold": "q_baseflow_threshold",
     "land_cover_cache": "land_cover_cache",
     "land_watervalue": "LAND_WaterValue",
     "use_specified_depth_for_bathy_mask": "use_specified_depth_for_bathy_mask",
     "specify_depths_for_bathy_mask": "specify_depths_for_bathy_mask",
+    "depth_mask_distance": "depth_mask_distance",
     # ARC
-    "bathy_args.Gen_Dir_Dist": "Gen_Dir_Dist",
-    "bathy_args.Degree_Manip": "Degree_Manip",
-    "bathy_args.Degree_Interval": "Degree_Interval",
-    "bathy_args.Low_Spot_Range": "Low_Spot_Range",
+    "arc_args.Gen_Dir_Dist": "Gen_Dir_Dist",
+    "arc_args.Degree_Manip": "Degree_Manip",
+    "arc_args.Degree_Interval": "Degree_Interval",
+    "arc_args.Low_Spot_Range": "Low_Spot_Range",
     "disable_bathymetry": "disable_bathymetry off",
-    "bathy_args.Bathy_Trap_H": "Bathy_Trap_H",
-    "find_banks_based_on_landcover": "FindBanksBasedOnLandCover",
-    "bathy_use_banks": "Bathy_Use_Banks",
-    "use_power_laws_for_bathymetry": "use_power_laws_for_bathymetry",
-    "bathy_args.Stream_Slope_Method": "Stream_Slope_Method",
-    "bathy_args.Gen_Slope_Dist": "Gen_Slope_Dist",
-    "slope_low_percentile": "Slope_Low_Percentile",
-    "slope_high_percentile": "Slope_High_Percentile",
+    "arc_args.Bathy_Trap_H": "Bathy_Trap_H",
+    "arc_args.FindBanksBasedOnLandCover": "FindBanksBasedOnLandCover",
+    "arc_args.Bathy_Use_Banks": "Bathy_Use_Banks",
+    "arc_args.coefficient_depth": "coefficient_depth",
+    "arc_args.exponent_depth": "exponent_depth",
+    "arc_args.coefficient_width": "coefficient_width",
+    "arc_args.exponent_width": "exponent_width",
+    "arc_args.Stream_Slope_Method": "Stream_Slope_Method",
+    "arc_args.Gen_Slope_Dist": "Gen_Slope_Dist",
+    "arc_args.Slope_Low_Percentile": "Slope_Low_Percentile",
+    "arc_args.Slope_High_Percentile": "Slope_High_Percentile",
     "mannings_mode": "LU_Manning_n",
     "mannings_text_file": "mannings_text_file",
-    "standard_step": "Standard_Step",
-    "valley_sections": "Valley_Sections",
-    "valley_dir_widths": "Valley_Dir_Widths",
-    "valley_dir_dist": "Valley_Dir_Dist",
-    "drop_edge_sections": "Drop_Edge_Sections",
-    "edge_margin": "Edge_Margin",
-    "bathy_args": "bathy_args",
+    "arc_args.Standard_Step": "Standard_Step",
+    "arc_args.Valley_Sections": "Valley_Sections",
+    "arc_args.Valley_Dir_Widths": "Valley_Dir_Widths",
+    "arc_args.Valley_Dir_Dist": "Valley_Dir_Dist",
+    "arc_args.Drop_Edge_Sections": "Drop_Edge_Sections",
+    "arc_args.Edge_Margin": "Edge_Margin",
+    "arc_args": "arc_args",
     "make_curvefile": "Print_Curve_File",
-    "create_reach_average_curve_file": "Reach_Average_Curve_File",
+    "arc_args.Reach_Average_Curve_File": "Reach_Average_Curve_File",
     "make_vdt": "Print_VDT_Database",
-    "bathy_args.VDT_Database_NumIterations": "VDT_Database_NumIterations",
+    "arc_args.VDT_Database_NumIterations": "VDT_Database_NumIterations",
     "make_ap_database": "Print_AP_Database",
     "vdt_file_extension": "vdt_file_extension",
     "make_cross_section_file": "XS_Out_File",
     "make_representative_cross_section_file": "Build_Representative_Cross_Section",
     # Mapping
     "use_parquet": "use_parquet",
-    "fldpln_dh": "fldpln_dh",
-    "fldpln_keep_spilling": "fldpln_keep_spilling",
-    "fldpln_parallel": "fldpln_parallel",
-    "fldpln_min_depth": "fldpln_min_depth",
-    "fldpln_min_flood_depth": "FLDPLN_Min_Flood_Depth",
-    "fldpln_max_depth": "fldpln_max_depth",
-    "fldpln_spill_decay": "fldpln_spill_decay",
-    "fldpln_max_cells_per_segment": "fldpln_max_cells_per_segment",
-    "flood_waterlc_and_strm_cells": "Flood_WaterLC_and_STRM_Cells",
-    "flood_bathy_mask": "Flood_Bathy_Mask",
-    "floodmap_args.TW_MultFact": "TW_MultFact",
-    "floodmap_args.TopWidthPlausibleLimit": "TopWidthPlausibleLimit",
-    "floodmap_args": "floodmap_args",
+    "fldpln_library_args.solver": "solver",
+    "fldpln_library_args.dh": "dh",
+    "fldpln_library_args.iterative_spill": "iterative_spill",
+    "fldpln_library_args.parallel": "parallel",
+    "fldpln_library_args.fldmn": "fldmn",
+    "fldpln_library_args.fldmx": "fldmx",
+    "fldpln_library_args.spill_decay": "spill_decay",
+    "fldpln_library_args.max_cells_per_segment": "max_cells_per_segment",
+    "fldpln_library_args": "fldpln_library_args",
+    "curve2flood_args.FLDPLN_Min_Flood_Depth": "FLDPLN_Min_Flood_Depth",
+    "curve2flood_args.Flood_WaterLC_and_STRM_Cells": "Flood_WaterLC_and_STRM_Cells",
+    "curve2flood_args.Flood_Bathy_Mask": "Flood_Bathy_Mask",
+    "curve2flood_args.TW_MultFact": "TW_MultFact",
+    "curve2flood_args.TopWidthPlausibleLimit": "TopWidthPlausibleLimit",
+    "curve2flood_args": "curve2flood_args",
     "make_depth_maps": "OutDEP",
     "make_velocity_maps": "OutVEL",
     "make_wse_maps": "OutWSE",
-    "floodmap_args.Make_Output_GPKG": "Make_Output_GPKG",
+    "curve2flood_args.Make_Output_GPKG": "Make_Output_GPKG",
     "floodmap_identifier": "floodmap_identifier",
     # FIST, Go Consequences
     "make_fist_inputs": "make_fist_inputs",
@@ -193,7 +213,7 @@ UNDERLYING_NAMES = {
 }
 # The same for the options of a choice: (row name, option) -> setting
 UNDERLYING_CHOICE_NAMES = {
-    ("use_specified_depth_for_bathy_mask", "depth"): "FloodSpreader_SpecifyDepth",
+    ("use_specified_depth_for_bathy_mask", "depth"): "Set_Depth",
     ("use_specified_depth_for_bathy_mask", "water"): "BathyWaterMask",
 }
 
@@ -316,7 +336,7 @@ class WorkerThread(QThread):
     Runs process_watershed in the background, sending its log and printed text to ``log_signal`` (a LogRelay's
     message, which must outlive the run; by default its own log_signal) and any error to the window.
     """
-    finished_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal()
     log_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
 
@@ -951,7 +971,7 @@ class FloodSimulationGUI(QMainWindow):
         self.resize(1320, 860)
         self.input_fields = {}   # config key (and watershed_name for name) -> widget
         self.field_parsers = {}  # config key -> how its widget's value is read
-        self.arg_fields = {}     # (bathy_args or floodmap_args, argument) -> (widget, parser)
+        self.arg_fields = {}     # (arc_args, curve2flood_args or fldpln_library_args, setting) -> (widget, parser)
         self.choices = {}        # the form's own choices (DEM source, ...) -> widget
         self.rows = {}           # row name -> its widgets, to show or hide
         self.rules = []          # (row names, whether to show them)
@@ -1179,9 +1199,14 @@ class FloodSimulationGUI(QMainWindow):
         widget.setObjectName("WarningNote" if warning else "Note")
         return self._place(layout, name, None, widget)
 
-    def _add_arg(self, layout, dict_key, arg, label, parser="float", items=None, tooltip=None):
-        """A field for one argument of ``dict_key`` (bathy_args or floodmap_args)."""
-        value = self._saved_args[dict_key].get(arg, ARG_DEFAULTS[dict_key].get(arg, ""))
+    def _add_arg(self, layout, dict_key, arg, label, parser="float", items=None, tooltip=None, placeholder=None):
+        """A field for one setting of ``dict_key`` (arc_args, curve2flood_args or fldpln_library_args): the one the
+        form remembered, else nencarta's starting value, else the model's default."""
+        value = self._saved_args[dict_key].get(arg, ARG_DEFAULTS[dict_key].get(arg))
+        if value is None:
+            value = _model_default(dict_key, arg)
+        if value is None:
+            value = ""
         if parser == "bool":
             widget = QCheckBox(label)
             widget.setChecked(_parse_scalar(value) is True)
@@ -1192,6 +1217,8 @@ class FloodSimulationGUI(QMainWindow):
             widget.setCurrentText(str(value))
         else:
             widget = QLineEdit(_format_setting_value(value))
+            if placeholder:
+                widget.setPlaceholderText(placeholder)
         self.arg_fields[(dict_key, arg)] = (widget, parser)
         return self._place(layout, f"{dict_key}.{arg}", label, widget, tooltip)
 
@@ -1339,6 +1366,11 @@ class FloodSimulationGUI(QMainWindow):
         self._add_checkbox(group, "use_dem_derived_channel_mask",
                            "Find the channel the DEM shows: smooth the water it flattens, don't burn lines on it, "
                            "and add the channel to the water mask", _default("use_dem_derived_channel_mask"))
+        self._add_combo(group, "dem_flattens_rivers", "The DEM flattens every river wide enough to show",
+                        CONFIG_OPTIONS["dem_flattens_rivers"].choices, default=_default("dem_flattens_rivers"),
+                        tooltip="yes for FABDEM and Copernicus: the low ground by a river they left unflattened is "
+                                "floodplain, not channel. no for USGS 3DEP, which flattens only some of its water. "
+                                "auto: yes when the flat water by the streams is mostly at whole half metres.")
         self._add_checkbox(group, "drop_multilinestrings", "Leave out reaches drawn in pieces (multilinestrings)",
                            _default("drop_multilinestrings"))
         self._add_line(group, "q_baseflow_threshold", "Leave out reaches whose baseflow is below (m³/s)", "",
@@ -1357,9 +1389,11 @@ class FloodSimulationGUI(QMainWindow):
         moving = lambda: self._on("move_stream_network_to_thalweg")
         self.show_when(moving, "relocate_misplaced_streams", "minimize_output_files", "new_strm_threshold_km2")
         self.show_when(lambda: self._on("burn_streams"), "use_dem_derived_channel_mask")
+        self.show_when(lambda: self._on("burn_streams") and self._on("use_dem_derived_channel_mask"),
+                       "dem_flattens_rivers")
         self.show_when(lambda: self.choices["filter_by_order"].isChecked(), "StrmOrder_Lower", "StrmOrder_Upper")
         self._indent("relocate_misplaced_streams", "minimize_output_files", "new_strm_threshold_km2",
-                     "use_dem_derived_channel_mask", "StrmOrder_Lower", "StrmOrder_Upper")
+                     "use_dem_derived_channel_mask", "dem_flattens_rivers", "StrmOrder_Lower", "StrmOrder_Upper")
 
         group = self._make_group(tab, "Lakes and Ocean")
         self._add_note(group, "lakes_note", "Use one of these for lakes. With the Curve2Flood-FLDPLNpy mapper, use the lake polygons.")
@@ -1379,77 +1413,80 @@ class FloodSimulationGUI(QMainWindow):
         self._indent("land_cover_cache")
 
         group = self._make_group(tab, "Water Mask")
-        self._add_choice(group, "use_specified_depth_for_bathy_mask", "The DEM cleaner's channel outline",
+        self._add_choice(group, "use_specified_depth_for_bathy_mask",
+                         "ARC's water mask, whose edge gives the banks and the DEM cleaner's outline",
                          WATER_MASK_MODES, _saved_water_mask_mode(), config_key=True)
         depths = DepthsWidget(_setting_list("specify_depths_for_bathy_mask", _default("specify_depths_for_bathy_mask")))
         self._add_row(group, "Flood depths", depths, "specify_depths_for_bathy_mask", "depths")
+        self._add_line(group, "depth_mask_distance", "Distance the stream cells' water surfaces are averaged over (m)",
+                       _default("depth_mask_distance"), parser="float")
         self.show_when(lambda: self.choices["use_specified_depth_for_bathy_mask"].value() == "depth",
-                       "specify_depths_for_bathy_mask")
+                       "specify_depths_for_bathy_mask", "depth_mask_distance")
 
     def _add_arc_tab(self):
         tab = self._make_tab("ARC")
 
         group = self._make_group(tab, "Cross Sections")
-        self._add_arg(group, "bathy_args", "Gen_Dir_Dist", "Cells either side to fit the stream's direction to",
+        self._add_arg(group, "arc_args", "Gen_Dir_Dist", "Cells either side to fit the stream's direction to",
                       "int", tooltip="How many cells each way around a stream cell to fit the stream's direction to "
                                      "(Gen_Dir_Dist).")
-        self._add_arg(group, "bathy_args", "Degree_Manip", "Angle range to search for the narrowest section (°)",
+        self._add_arg(group, "arc_args", "Degree_Manip", "Angle range to search for the narrowest section (°)",
                       "float", tooltip="The range of angles to turn the cross section through to find where the "
                                        "valley is narrowest, half each way. 0, or under twice the step, turns the "
                                        "search off (Degree_Manip).")
-        self._add_arg(group, "bathy_args", "Degree_Interval", "Angle step (°)", "float",
+        self._add_arg(group, "arc_args", "Degree_Interval", "Angle step (°)", "float",
                       tooltip="The step between those angles (Degree_Interval).")
-        self._add_arg(group, "bathy_args", "Low_Spot_Range", "Points either side to look for lower ground", "int",
+        self._add_arg(group, "arc_args", "Low_Spot_Range", "Points either side to look for lower ground", "int",
                       tooltip="How many points either side of the stream cell to look along the cross section for "
                               "lower ground; the cross section moves to the lowest. 0 turns this off "
                               "(Low_Spot_Range).")
         self._add_note(group, "low_spot_warning", "With the Curve2Flood-FLDPLNpy mapper, keep this at 0: moving the "
                                                   "cross sections off the stream cells takes the rating curves off "
                                                   "the streams FLDPLN floods from.", warning=True)
-        self.show_when(lambda: self._is_fldpln() and self._arg_number("bathy_args", "Low_Spot_Range") > 0,
+        self.show_when(lambda: self._is_fldpln() and self._arg_number("arc_args", "Low_Spot_Range") > 0,
                        "low_spot_warning")
 
         group = self._make_group(tab, "Bathymetry")
         self._add_checkbox(group, "disable_bathymetry", "Carve bathymetry into the DEM", _default("disable_bathymetry"),
                            inverted=True, tooltip="Estimate the channel below the DEM's water surface (or banks) and "
                                                   "carve it in. Off: map floods on the DEM as it is.")
-        self._add_arg(group, "bathy_args", "Bathy_Trap_H", "Share of the top width each sloping side takes (0-0.5)",
+        self._add_arg(group, "arc_args", "Bathy_Trap_H", "Share of the top width each sloping side takes (0-0.5)",
                       "float", tooltip="0 is a rectangle, 0.5 a triangle (Bathy_Trap_H).")
-        self._add_checkbox(group, "find_banks_based_on_landcover", "Find the banks where the land cover's water ends",
-                           _default("find_banks_based_on_landcover"))
-        self._add_checkbox(group, "bathy_use_banks",
-                           "Rebuild the channel below its banks (bankfull), instead of below the DEM's water surface",
-                           _default("bathy_use_banks"))
-        self._add_checkbox(group, "use_power_laws_for_bathymetry",
-                           "Size the channel from its drainage area (power laws) instead of from its flow",
-                           _default("use_power_laws_for_bathymetry"))
-        self._add_line(group, "coefficient_depth", "Depth coefficient", _default("coefficient_depth"), parser="float")
-        self._add_line(group, "exponent_depth", "Depth exponent", _default("exponent_depth"), parser="float")
-        self._add_line(group, "coefficient_width", "Width coefficient", _default("coefficient_width"), parser="float")
-        self._add_line(group, "exponent_width", "Width exponent", _default("exponent_width"), parser="float")
+        self._add_arg(group, "arc_args", "FindBanksBasedOnLandCover", "Find the banks where the land cover's water ends",
+                      "bool")
+        self._add_arg(group, "arc_args", "Bathy_Use_Banks",
+                      "Rebuild the channel below its banks (bankfull), instead of below the DEM's water surface",
+                      "bool")
+        self._add_arg(group, "arc_args", "coefficient_width", "Width coefficient (power law of the area in km²)",
+                      "float", tooltip="For the channels whose banks the water doesn't show (coefficient_width).")
+        self._add_arg(group, "arc_args", "exponent_width", "Width exponent", "float")
+        self._add_toggle(group, "depth_power_law",
+                         "Size the channel's depth from its drainage area (power law) instead of from its flow",
+                         _saved_toggle("depth_power_law", False))
+        self._add_arg(group, "arc_args", "coefficient_depth", "Depth coefficient", "float", placeholder="e.g. 0.27")
+        self._add_arg(group, "arc_args", "exponent_depth", "Depth exponent", "float", placeholder="e.g. 0.21")
         bathymetry = lambda: self._on("disable_bathymetry")  # ticked when it carves bathymetry
-        self.show_when(bathymetry, "bathy_args.Bathy_Trap_H", "find_banks_based_on_landcover", "bathy_use_banks",
-                       "use_power_laws_for_bathymetry")
-        self.show_when(lambda: bathymetry() and self._on("use_power_laws_for_bathymetry"), "coefficient_depth",
-                       "exponent_depth", "coefficient_width", "exponent_width")
-        self._indent("bathy_args.Bathy_Trap_H", "find_banks_based_on_landcover", "bathy_use_banks",
-                     "use_power_laws_for_bathymetry", "coefficient_depth", "exponent_depth", "coefficient_width",
-                     "exponent_width")
+        self.show_when(bathymetry, "arc_args.Bathy_Trap_H", "arc_args.FindBanksBasedOnLandCover",
+                       "arc_args.Bathy_Use_Banks", "arc_args.coefficient_width", "arc_args.exponent_width",
+                       "depth_power_law")
+        self.show_when(lambda: bathymetry() and self.choices["depth_power_law"].isChecked(),
+                       "arc_args.coefficient_depth", "arc_args.exponent_depth")
+        self._indent("arc_args.Bathy_Trap_H", "arc_args.FindBanksBasedOnLandCover", "arc_args.Bathy_Use_Banks",
+                     "arc_args.coefficient_width", "arc_args.exponent_width", "depth_power_law",
+                     "arc_args.coefficient_depth", "arc_args.exponent_depth")
 
         group = self._make_group(tab, "Slope")
-        self._add_arg(group, "bathy_args", "Stream_Slope_Method", "Slope method", "text", items=SLOPE_METHODS,
+        self._add_arg(group, "arc_args", "Stream_Slope_Method", "Slope method", "text", items=SLOPE_METHODS,
                       tooltip="How each stream cell's slope is measured (Stream_Slope_Method; see ARC's docs).")
-        self._add_arg(group, "bathy_args", "Gen_Slope_Dist", "Cells either side the slope is measured over", "int",
+        self._add_arg(group, "arc_args", "Gen_Slope_Dist", "Cells either side the slope is measured over", "int",
                       tooltip="Gen_Slope_Dist. local_fit fits a line to the 2 x this + 1 cells nearest each "
                               "stream cell; end_points doesn't use it.")
-        self._add_line(group, "slope_low_percentile", "Lowest slope percentile", _default("slope_low_percentile"),
-                       parser="int")
-        self._add_line(group, "slope_high_percentile", "Highest slope percentile", _default("slope_high_percentile"),
-                       parser="int")
-        slope_method = lambda: self.arg_fields[("bathy_args", "Stream_Slope_Method")][0].currentText()
-        self.show_when(lambda: slope_method() != "end_points", "bathy_args.Gen_Slope_Dist")
+        self._add_arg(group, "arc_args", "Slope_Low_Percentile", "Lowest slope percentile", "int")
+        self._add_arg(group, "arc_args", "Slope_High_Percentile", "Highest slope percentile", "int")
+        slope_method = lambda: self.arg_fields[("arc_args", "Stream_Slope_Method")][0].currentText()
+        self.show_when(lambda: slope_method() != "end_points", "arc_args.Gen_Slope_Dist")
         self.show_when(lambda: slope_method() in ("local_average_corrected", "reach_average"),
-                       "slope_low_percentile", "slope_high_percentile")
+                       "arc_args.Slope_Low_Percentile", "arc_args.Slope_High_Percentile")
 
         group = self._make_group(tab, "Manning's n")
         self._add_choice(group, "mannings_mode", "Manning's n of each land cover class", MANNINGS_MODES,
@@ -1460,24 +1497,23 @@ class FloodSimulationGUI(QMainWindow):
         self.show_when(lambda: self.choices["mannings_mode"].value() == "file", "mannings_text_file")
 
         group = self._make_group(tab, "Advanced")
-        self._add_checkbox(group, "standard_step", "Link the water surfaces along the stream network by the "
-                                                   "standard step", _default("standard_step"))
-        self._add_checkbox(group, "valley_sections", "Use a seperate cross section orientation for overbank flow",
-                           _default("valley_sections"))
-        self._add_line(group, "valley_dir_widths", "Channel widths along the stream either way for the valley's "
-                                                   "direction", _default("valley_dir_widths"), parser="float")
-        self._add_spin(group, "valley_dir_dist", "Cells either way, where a reach has no banks",
-                       _default("valley_dir_dist"), minimum=2)
-        self.show_when(lambda: self._on("valley_sections"), "valley_dir_widths", "valley_dir_dist")
-        self._indent("valley_dir_widths", "valley_dir_dist")
-        self._add_checkbox(group, "drop_edge_sections", "Drop rating curves whose water reaches the DEM's edge",
-                           _default("drop_edge_sections"),
-                           tooltip="The edge cuts their cross sections off, so tiles whose buffers overlap give the "
-                                   "same cell different water, a seam where their maps meet.")
-        self._add_line(group, "edge_margin", "Distance from the edge that counts as reaching it (m)",
-                       _default("edge_margin"), parser="float")
-        self.show_when(lambda: self._on("drop_edge_sections"), "edge_margin")
-        self._indent("edge_margin")
+        self._add_arg(group, "arc_args", "Standard_Step", "Link the water surfaces along the stream network by the "
+                                                          "standard step", "bool")
+        self._add_arg(group, "arc_args", "Valley_Sections", "Use a seperate cross section orientation for overbank "
+                                                            "flow", "bool")
+        self._add_arg(group, "arc_args", "Valley_Dir_Widths", "Channel widths along the stream either way for the "
+                                                              "valley's direction", "float")
+        self._add_arg(group, "arc_args", "Valley_Dir_Dist", "Cells either way, where a reach has no banks", "int")
+        self.show_when(lambda: self._arg_on("arc_args", "Valley_Sections"), "arc_args.Valley_Dir_Widths",
+                       "arc_args.Valley_Dir_Dist")
+        self._indent("arc_args.Valley_Dir_Widths", "arc_args.Valley_Dir_Dist")
+        self._add_arg(group, "arc_args", "Drop_Edge_Sections", "Drop rating curves whose water reaches the DEM's edge",
+                      "bool", tooltip="The edge cuts their cross sections off, so tiles whose buffers overlap give "
+                                      "the same cell different water, a seam where their maps meet.")
+        self._add_arg(group, "arc_args", "Edge_Margin", "Distance from the edge that counts as reaching it (m)",
+                      "float")
+        self.show_when(lambda: self._arg_on("arc_args", "Drop_Edge_Sections"), "arc_args.Edge_Margin")
+        self._indent("arc_args.Edge_Margin")
         self._add_combo(group, "outlet_exchange", "Start rivers leaving the DEM from the neighbouring DEMs' water",
                         CONFIG_OPTIONS["outlet_exchange"].choices, default=_default("outlet_exchange"),
                         tooltip="off maps as usual. pass1 rates only the reaches the neighbours need and writes their "
@@ -1486,16 +1522,16 @@ class FloodSimulationGUI(QMainWindow):
         self._add_path(group, "outlet_exchange_dir", "Folder the DEMs' passes share", "", mode="directory")
         self.show_when(lambda: self.input_fields["outlet_exchange"].currentText() != "off", "outlet_exchange_dir")
         self._indent("outlet_exchange_dir")
-        self._add_arg_table(group, "bathy_args", "More ARC arguments",
-                            "Other ARC settings, by their names in ARC's input file, such as shallow_factor, "
-                            "deep_factor, k_decay or slope_adjustment_factor.")
+        self._add_arg_table(group, "arc_args", "More ARC settings",
+                            "Other ARC settings, by their keys in ARC's input file (see ARC's docs), such as "
+                            "shallow_factor, deep_factor, k_decay or slope_adjustment_factor.")
 
         group = self._make_group(tab, "Outputs")
         self._add_checkbox(group, "make_curvefile", "Make the curve file", _default("make_curvefile"))
-        self._add_checkbox(group, "create_reach_average_curve_file", "One rating curve per reach, not per stream cell",
-                           _default("create_reach_average_curve_file"))
+        self._add_arg(group, "arc_args", "Reach_Average_Curve_File", "One rating curve per reach, not per stream cell",
+                      "bool")
         self._add_checkbox(group, "make_vdt", "Make the VDT database", _default("make_vdt"))
-        self._add_arg(group, "bathy_args", "VDT_Database_NumIterations", "Flows in each rating curve", "int",
+        self._add_arg(group, "arc_args", "VDT_Database_NumIterations", "Flows in each rating curve", "int",
                       tooltip="VDT_Database_NumIterations.")
         self._add_checkbox(group, "make_ap_database", "Make the AP database", _default("make_ap_database"))
         self._add_combo(group, "vdt_file_extension", "VDT and AP database file type", ["txt", "csv", "parquet"],
@@ -1504,10 +1540,10 @@ class FloodSimulationGUI(QMainWindow):
                            _default("make_cross_section_file"))
         self._add_checkbox(group, "make_representative_cross_section_file", "Make representative cross sections",
                            _default("make_representative_cross_section_file"))
-        self.show_when(lambda: self._on("make_curvefile"), "create_reach_average_curve_file")
-        self.show_when(lambda: self._on("make_vdt"), "bathy_args.VDT_Database_NumIterations")
+        self.show_when(lambda: self._on("make_curvefile"), "arc_args.Reach_Average_Curve_File")
+        self.show_when(lambda: self._on("make_vdt"), "arc_args.VDT_Database_NumIterations")
         self.show_when(lambda: self._on("make_vdt") or self._on("make_ap_database"), "vdt_file_extension")
-        self._indent("create_reach_average_curve_file", "bathy_args.VDT_Database_NumIterations")
+        self._indent("arc_args.Reach_Average_Curve_File", "arc_args.VDT_Database_NumIterations")
 
     def _add_mapping_tab(self):
         tab = self._make_tab("Mapping")
@@ -1515,49 +1551,54 @@ class FloodSimulationGUI(QMainWindow):
         group = self._make_group(tab, "Mapper")
         self._add_combo(group, "mapper", "Mapper", Mapper.list_names(), default=_default("mapper"))
         self._add_checkbox(group, "use_parquet", "Write the FLDPLN stream info table as Parquet", _default("use_parquet"))
-        self._add_combo(group, "fldpln_solver", "FLDPLN solver", CONFIG_OPTIONS["fldpln_solver"].choices,
-                        default=_default("fldpln_solver"))
-        self._add_line(group, "fldpln_dh", "Depth step (m)", _default("fldpln_dh"), parser="float")
-        self._add_checkbox(group, "fldpln_keep_spilling", "Keep routing water that spills over low divides",
-                           _default("fldpln_keep_spilling"))
-        self._add_checkbox(group, "fldpln_parallel", "Build the FLDPLN library with several processes",
-                           _default("fldpln_parallel"))
-        self._add_line(group, "fldpln_min_depth", "Least depth a spill stops at (m)",
-                       _default("fldpln_min_depth"), parser="float")
-        self._add_line(group, "fldpln_min_flood_depth", "Shallowest water that floods a cell in the flood map (m)",
-                       _default("fldpln_min_flood_depth"), parser="float")
-        self._add_line(group, "fldpln_max_depth", "Deepest flood the library covers (m)", _default("fldpln_max_depth"),
-                       parser="float")
-        self._add_line(group, "fldpln_spill_decay", "Head a spill loses per cell (m)",
-                       _default("fldpln_spill_decay"), parser="float")
-        self._add_line(group, "fldpln_max_cells_per_segment", "Most cells one segment may flood", "", parser="int",
-                       placeholder="Optional")
-        self._add_checkbox(group, "flood_waterlc_and_strm_cells", "Flood the land cover's water and the stream cells",
-                           _default("flood_waterlc_and_strm_cells"))
-        self._add_checkbox(group, "flood_bathy_mask", "Flood the bathymetry water mask", _default("flood_bathy_mask"))
-        self._add_arg(group, "floodmap_args", "TW_MultFact", "Top width multiplier", "float",
+        self._add_arg(group, "fldpln_library_args", "solver", "FLDPLN solver", "text", items=("iterative", "exact"),
+                      tooltip="Curve2Flood's build_fldpln_library: iterative steps up by the depth step and spills "
+                              "once per step; exact spills as far as the water can run downhill.")
+        self._add_arg(group, "fldpln_library_args", "dh", "Depth step (m)", "float")
+        self._add_arg(group, "fldpln_library_args", "iterative_spill", "Keep routing water that spills over low divides",
+                      "bool")
+        self._add_arg(group, "fldpln_library_args", "parallel", "Build the FLDPLN library with several processes",
+                      "bool")
+        self._add_arg(group, "fldpln_library_args", "fldmn", "Least depth a spill stops at (m)", "float")
+        self._add_arg(group, "curve2flood_args", "FLDPLN_Min_Flood_Depth",
+                      "Shallowest water that floods a cell in the flood map (m)", "float")
+        self._add_arg(group, "fldpln_library_args", "fldmx", "Deepest flood the library covers (m)", "float")
+        self._add_arg(group, "fldpln_library_args", "spill_decay", "Head a spill loses per cell (m)", "float")
+        self._add_arg(group, "fldpln_library_args", "max_cells_per_segment", "Most cells one segment may flood", "int",
+                      placeholder="Optional")
+        self._add_arg_table(group, "fldpln_library_args", "More FLDPLN library arguments",
+                            "Other arguments of Curve2Flood's build_fldpln_library (see Curve2Flood's docs).")
+        self._add_arg(group, "curve2flood_args", "Flood_WaterLC_and_STRM_Cells",
+                      "Flood the land cover's water and the stream cells", "bool")
+        self._add_arg(group, "curve2flood_args", "Flood_Bathy_Mask", "Flood the bathymetry water mask", "bool")
+        self._add_arg(group, "curve2flood_args", "TW_MultFact", "Top width multiplier", "float",
                       tooltip="Multiplies every top width (TW_MultFact).")
-        self._add_arg(group, "floodmap_args", "TopWidthPlausibleLimit", "Widest top width believed (m)", "float",
+        self._add_arg(group, "curve2flood_args", "TopWidthPlausibleLimit", "Widest top width believed (m)", "float",
                       tooltip="TopWidthPlausibleLimit.")
-        self._add_arg_table(group, "floodmap_args", "More Curve2Flood arguments",
-                            "Other Curve2Flood settings for the flood maps, by their names in its input file.")
+        self._add_arg_table(group, "curve2flood_args", "More Curve2Flood settings",
+                            "Other Curve2Flood settings for the flood maps, by their keys in its input file (see "
+                            "Curve2Flood's docs).")
         fldpln = self._is_fldpln
-        solver = lambda: self.input_fields["fldpln_solver"].currentText()
-        self.show_when(fldpln, "use_parquet", "fldpln_solver", "fldpln_parallel", "fldpln_min_flood_depth",
-                       "fldpln_max_depth", "fldpln_spill_decay")
-        self.show_when(lambda: fldpln() and solver() == "iterative", "fldpln_dh", "fldpln_keep_spilling",
-                       "fldpln_min_depth")
-        self.show_when(lambda: fldpln() and solver() == "exact", "fldpln_max_cells_per_segment")
-        self.show_when(lambda: not fldpln(), "floodmap_args.TW_MultFact", "floodmap_args.TopWidthPlausibleLimit")
-        self._indent("use_parquet", "fldpln_solver", "fldpln_dh", "fldpln_keep_spilling", "fldpln_parallel",
-                     "fldpln_min_depth", "fldpln_min_flood_depth", "fldpln_max_depth", "fldpln_spill_decay",
-                     "fldpln_max_cells_per_segment")
+        solver = lambda: self.arg_fields[("fldpln_library_args", "solver")][0].currentText()
+        self.show_when(fldpln, "use_parquet", "fldpln_library_args.solver", "fldpln_library_args.parallel",
+                       "curve2flood_args.FLDPLN_Min_Flood_Depth", "fldpln_library_args.fldmx",
+                       "fldpln_library_args.spill_decay", "fldpln_library_args")
+        self.show_when(lambda: fldpln() and solver() == "iterative", "fldpln_library_args.dh",
+                       "fldpln_library_args.iterative_spill", "fldpln_library_args.fldmn")
+        self.show_when(lambda: fldpln() and solver() == "exact", "fldpln_library_args.max_cells_per_segment")
+        self.show_when(lambda: not fldpln(), "curve2flood_args.TW_MultFact", "curve2flood_args.TopWidthPlausibleLimit")
+        self._indent("use_parquet", "fldpln_library_args.solver", "fldpln_library_args.dh",
+                     "fldpln_library_args.iterative_spill", "fldpln_library_args.parallel", "fldpln_library_args.fldmn",
+                     "curve2flood_args.FLDPLN_Min_Flood_Depth", "fldpln_library_args.fldmx",
+                     "fldpln_library_args.spill_decay", "fldpln_library_args.max_cells_per_segment",
+                     "fldpln_library_args")
 
         group = self._make_group(tab, "Outputs")
         self._add_checkbox(group, "make_depth_maps", "Make depth maps", _default("make_depth_maps"))
         self._add_checkbox(group, "make_velocity_maps", "Make velocity maps", _default("make_velocity_maps"))
         self._add_checkbox(group, "make_wse_maps", "Make water surface elevation maps", _default("make_wse_maps"))
-        self._add_arg(group, "floodmap_args", "Make_Output_GPKG", "Also write the flood extents as GeoPackages", "bool")
+        self._add_arg(group, "curve2flood_args", "Make_Output_GPKG", "Also write the flood extents as GeoPackages",
+                      "bool")
         self._add_line(group, "floodmap_identifier", "Text added to the flood maps' names", _default("floodmap_identifier"))
 
     def _add_fist_tab(self):
@@ -1645,6 +1686,9 @@ class FloodSimulationGUI(QMainWindow):
         except ValueError:
             return 0.0
 
+    def _arg_on(self, dict_key, arg):
+        return self.arg_fields[(dict_key, arg)][0].isChecked()
+
     def _connect_changes(self):
         """Refresh what the form shows, and its previews, whenever a field changes."""
         widgets = list(self.input_fields.values()) + list(self.choices.values()) + \
@@ -1726,8 +1770,11 @@ class FloodSimulationGUI(QMainWindow):
                 if owner != dict_key or f"{owner}.{arg}" in self.hidden:
                     continue
                 value = _parse_value(widget, parser)
-                if value is not None and value != "":
-                    args[arg] = value
+                # Left out at the model's own default, where nencarta has no value of its own for it
+                if value is None or value == "" or \
+                        (arg not in ARG_DEFAULTS[dict_key] and value == _model_default(dict_key, arg)):
+                    continue
+                args[arg] = value
             params[dict_key] = args
 
         params["name"] = params.pop("watershed_name")
@@ -1767,7 +1814,7 @@ class FloodSimulationGUI(QMainWindow):
         NencartaConfig(dict(params))
 
         warnings = []
-        if self._is_fldpln() and self._arg_number("bathy_args", "Low_Spot_Range") > 0:
+        if self._is_fldpln() and self._arg_number("arc_args", "Low_Spot_Range") > 0:
             warnings.append("Low_Spot_Range is above 0 with the Curve2Flood-FLDPLNpy mapper: its cross sections "
                             "can move off the stream cells FLDPLN floods from.")
         return warnings
@@ -2013,6 +2060,24 @@ def _parse_value(widget, parser, strict=True):
         if strict:
             raise ValueError(f"'{value}' is not a number.")
     return value
+
+
+def _model_default(dict_key, arg):
+    """The model's own default for one of its settings, ARC's or Curve2Flood's (by its input-file key) or
+    build_fldpln_library's argument; None if it has none."""
+    if dict_key == "fldpln_library_args":
+        from curve2flood import build_fldpln_library
+
+        parameter = inspect.signature(build_fldpln_library).parameters.get(arg)
+        return None if parameter is None or parameter.default is inspect.Parameter.empty else parameter.default
+
+    if dict_key == "arc_args":
+        from arc.config import Configs as Settings
+    else:
+        from curve2flood.config import Config as Settings
+        
+    field = next((field for field in dataclasses.fields(Settings) if field.name == arg.lower()), None)
+    return None if field is None or field.default is dataclasses.MISSING else field.default
 
 
 def _saved_dict(key, default):

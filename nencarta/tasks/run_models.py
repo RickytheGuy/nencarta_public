@@ -51,16 +51,16 @@ def run_arc_bathymetry(model_config: ModelConfig, workspace: Workspace) -> Model
 
 def run_mapper_bathymetry(model_config: ModelConfig, workspace: Workspace) -> ModelConfig:
     """
-    Run the flood mapper on ARC's config to make the DEM with bathymetry (FS_Bathy), which the flood maps use.
-    Skipped without bathymetry, or when it exists, unless overwrite.
+    Run the flood mapper on its bathymetry config to burn ARC's bathymetry into the DEM (FS_Bathy), which the flood
+    maps use. Skipped without bathymetry, or when it exists, unless overwrite.
     """
     if not model_config.rating_curves_exist or\
-          workspace.configs.disable_bathymetry or \
+          workspace.configs.disable_bathymetry or model_config.bathy_mapper_config is None or \
             (model_config.burned_dem_exists and not workspace.configs.overwrite):
         return model_config
     
     LOG.info("Running flood mapper to generate bathymetry...")
-    _run_mapper(model_config.arc_config, model_config)
+    _run_mapper(model_config.bathy_mapper_config, model_config)
 
     return model_config
 
@@ -143,24 +143,18 @@ def run_fldpln_library(model_config: ModelConfig, workspace: Workspace) -> Model
     LOG.info("Building FLDPLN library...")
     from curve2flood import build_fldpln_library
 
+    # Its settings are fldpln_library_args, which nencarta passes on
     build_fldpln_library(
         dem = dem,
         filled_dem = workspace.filled_dem,
         stream_info_file = workspace.stream_info_file,
         flow_direction_file = workspace.flowdir,
         library_file = workspace.fldpln_library,
-        dh = workspace.configs.fldpln_dh,
-        fldmn = workspace.configs.fldpln_min_depth,
-        fldmx = workspace.configs.fldpln_max_depth,
-        iterative_spill = workspace.configs.fldpln_keep_spilling,
         vdt_file = workspace.VDT_File_Bathy,
-        parallel = workspace.configs.fldpln_parallel,
         pbar = not workspace.configs.quiet,
         bg_mask=bg_mask,
-        solver=workspace.configs.fldpln_solver,
-        spill_decay=workspace.configs.fldpln_spill_decay,
-        max_cells_per_segment=workspace.configs.fldpln_max_cells_per_segment,
-        water_mask=water_mask
+        water_mask=water_mask,
+        **workspace.configs.fldpln_library_args,
     )
 
     return model_config

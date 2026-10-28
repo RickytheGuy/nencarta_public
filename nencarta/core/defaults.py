@@ -17,11 +17,8 @@ FLOW_FIELD_OPTIONS = (
     + ["rp2", "rp5", "rp10", "rp25", "rp50", "rp100", "rp100_premium"]
 )
 
-DEFAULT_BATHY_ARGS = {
+DEFAULT_ARC_ARGS = {
     "VDT_Database_NumIterations": 30,
-    "Make_Output_GPKG": True,
-    "TW_MultFact": 1.5,
-    "TopWidthPlausibleLimit": 2000,
     "Bathy_Trap_H": 0.2,
     "Degree_Manip": 6.1,
     "Degree_Interval": 1.5,
@@ -29,12 +26,71 @@ DEFAULT_BATHY_ARGS = {
     "Gen_Dir_Dist": 10,
     "Gen_Slope_Dist": 10,
     "Stream_Slope_Method": "local_average_corrected",
+    "FindBanksBasedOnLandCover": True,
+    "Slope_Low_Percentile": 25,
+    "Slope_High_Percentile": 75,
+    # The width's drainage-area power law (km2), for the channels whose banks the water doesn't show
+    "coefficient_width": 2.44,
+    "exponent_width": 0.34,
 }
 
-DEFAULT_FLOODMAP_ARGS = {
+DEFAULT_CURVE2FLOOD_ARGS = {
     "Make_Output_GPKG": True,
     "TW_MultFact": 1.5,
     "TopWidthPlausibleLimit": 6000,
+}
+
+DEFAULT_FLDPLN_LIBRARY_ARGS = {}
+
+# The models' keys nencarta sets itself, from the files it makes and its own options: the args can't give them.
+# By the models' field names (the keys in lower case, under their main names).
+RESERVED_ARC_KEYS = {
+    "dem_file", "stream_file", "strmshp_file", "flow_file", "flow_file_id", "flow_file_bf", "flow_file_qmax",
+    "lu_raster_sameres", "lu_manning_n", "bathywatermask", "reach_id", "downstream_reach_id", "drainage_area_field",
+    "lc_water_value", "print_vdt_database", "print_ap_database", "print_curve_file", "xs_out_file",
+    "build_representative_cross_section", "representative_cross_section_file", "bathy_out_file", "outlet_wse_file",
+}
+RESERVED_CURVE2FLOOD_KEYS = {
+    "dem_file", "stream_file", "print_vdt_database", "print_curve_file", "comid_flow_file", "lu_raster_sameres",
+    "lu_manning_n", "land_watervalue", "outfld", "outdep", "outwse", "outvel", "mapper", "set_depth",
+    "flow_direction_file", "stream_info_file", "fldpln_library", "bathywatermask", "bathy_out_file", "fsoutbathy",
+    "bathy_use_banks",
+}
+RESERVED_FLDPLN_LIBRARY_ARGS = {
+    "dem", "filled_dem", "stream_info_file", "flow_direction_file", "library_file", "vdt_file", "bg_mask",
+    "water_mask", "pbar",
+}
+
+# nencarta's options that were the models' own settings, and where each went
+MOVED_KEYS = {
+    "bathy_use_banks": "arc_args' Bathy_Use_Banks",
+    "find_banks_based_on_landcover": "arc_args' FindBanksBasedOnLandCover",
+    "use_power_laws_for_bathymetry": "arc_args' coefficient_depth and exponent_depth (ARC uses the depth's power law "
+                                     "when they are given)",
+    "coefficient_depth": "arc_args' coefficient_depth",
+    "exponent_depth": "arc_args' exponent_depth",
+    "coefficient_width": "arc_args' coefficient_width",
+    "exponent_width": "arc_args' exponent_width",
+    "slope_low_percentile": "arc_args' Slope_Low_Percentile",
+    "slope_high_percentile": "arc_args' Slope_High_Percentile",
+    "create_reach_average_curve_file": "arc_args' Reach_Average_Curve_File",
+    "standard_step": "arc_args' Standard_Step",
+    "valley_sections": "arc_args' Valley_Sections",
+    "valley_dir_widths": "arc_args' Valley_Dir_Widths",
+    "valley_dir_dist": "arc_args' Valley_Dir_Dist",
+    "drop_edge_sections": "arc_args' Drop_Edge_Sections",
+    "edge_margin": "arc_args' Edge_Margin",
+    "flood_waterlc_and_strm_cells": "curve2flood_args' Flood_WaterLC_and_STRM_Cells",
+    "flood_bathy_mask": "curve2flood_args' Flood_Bathy_Mask",
+    "fldpln_min_flood_depth": "curve2flood_args' FLDPLN_Min_Flood_Depth",
+    "fldpln_dh": "fldpln_library_args' dh",
+    "fldpln_min_depth": "fldpln_library_args' fldmn",
+    "fldpln_max_depth": "fldpln_library_args' fldmx",
+    "fldpln_spill_decay": "fldpln_library_args' spill_decay",
+    "fldpln_max_cells_per_segment": "fldpln_library_args' max_cells_per_segment",
+    "fldpln_keep_spilling": "fldpln_library_args' iterative_spill",
+    "fldpln_solver": "fldpln_library_args' solver",
+    "fldpln_parallel": "fldpln_library_args' parallel",
 }
 
 
@@ -121,6 +177,13 @@ CONFIG_SECTIONS = {
                                                                     "streams: when burning, smooth the water it "
                                                                     "flattens and leave the lines unlowered on it, "
                                                                     "and add the channel to the water mask."),
+        "dem_flattens_rivers": ConfigOption("auto", "text", "Whether the DEM flattens every river wide enough to "
+                                                            "show, as FABDEM and Copernicus do (yes: the low ground "
+                                                            "by a river it left unflattened isn't channel) or only "
+                                                            "some of its water, as USGS 3DEP (no). auto: yes when "
+                                                            "its flat water by the streams is mostly at whole half "
+                                                            "metres. Read with use_dem_derived_channel_mask.",
+                                            ("auto", "yes", "no")),
         "streams_as_parquet": ConfigOption(False, "bool", "Write stream networks as GeoParquet instead of GeoPackage."),
         "minimize_output_files": ConfigOption(False, "bool", "Delete the domain's source and relocated streams "
                                                              "once the moved stream network is written."),
@@ -187,70 +250,34 @@ CONFIG_SECTIONS = {
     "Bathymetry": {
         "disable_bathymetry": ConfigOption(False, "bool", "Skip bathymetry and map floods on the DEM as it is."),
         "clean_dem": ConfigOption(False, "bool", "Smooth the stream channels with the DEM cleaner first."),
-        "use_specified_depth_for_bathy_mask": ConfigOption(True, "bool", "Outline the DEM cleaner's channels by "
-                                                                         "flooding the streams to set depths "
-                                                                         "(specify_depths_for_bathy_mask) instead of "
-                                                                         "using the water mask, and have ARC find the "
-                                                                         "banks without the water mask."),
+        "use_specified_depth_for_bathy_mask": ConfigOption(False, "bool", "Give ARC, for its banks, the streams "
+                                                                          "flooded to a set depth "
+                                                                          "(specify_depths_for_bathy_mask) instead of "
+                                                                          "the water mask, and outline the DEM "
+                                                                          "cleaner's channels the same way."),
         "specify_depths_for_bathy_mask": ConfigOption([0.1], "float_list", "Flood depths (m): one, or two with "
                                                                            "clean_dem (the DEM cleaner's outline, then "
-                                                                           "the bathymetry's). Only the DEM cleaner's "
-                                                                           "has an effect: ARC's channel is burned in "
-                                                                           "clipped to no outline."),
-        "bathy_use_banks": ConfigOption(False, "bool", "Estimate bathymetry from the banks' elevation instead of the "
-                                                       "water surface."),
-        "find_banks_based_on_landcover": ConfigOption(True, "bool", "Put the banks where water land cover ends, for "
-                                                                    "streams in water."),
-        "use_power_laws_for_bathymetry": ConfigOption(False, "bool", "Size the channel from its drainage area with "
-                                                                     "power laws instead of from the baseflow."),
-        "coefficient_depth": ConfigOption(0.27, "float", "Power law: depth (m) = coefficient_depth * area "
-                                                         "(km2)^exponent_depth."),
-        "exponent_depth": ConfigOption(0.21, "float", "Power law exponent for depth."),
-        "coefficient_width": ConfigOption(2.44, "float", "Power law: width (m) = coefficient_width * area "
-                                                         "(km2)^exponent_width."),
-        "exponent_width": ConfigOption(0.34, "float", "Power law exponent for width."),
+                                                                           "ARC's water mask)."),
+        "depth_mask_distance": ConfigOption(2000.0, "float", "How far (m) the stream cells' water surfaces are "
+                                                             "averaged out to when the streams are flooded to the set "
+                                                             "depths: Curve2Flood's TopWidthPlausibleLimit for those "
+                                                             "floods."),
         "area_km2_field": ConfigOption("DSContArea_km2", "text", "Stream attribute with each reach's drainage area in "
-                                                                 "km2."),
+                                                                 "km2, for ARC's power laws."),
         "area_m2_field": ConfigOption("DSContArea", "text", "Stream attribute with drainage area in m2, used when "
                                                             "area_km2_field is missing."),
-        "slope_low_percentile": ConfigOption(25, "int", "Raise a stream cell's slope to at least this percentile of "
-                                                        "its reach's slopes."),
-        "slope_high_percentile": ConfigOption(75, "int", "Lower a stream cell's slope to at most this percentile of "
-                                                         "its reach's slopes."),
-        "create_reach_average_curve_file": ConfigOption(False, "bool", "Write one rating curve per reach instead of "
-                                                                       "one per stream cell."),
-        "standard_step": ConfigOption(False, "bool", "Link ARC's water surfaces along the stream network by the "
-                                                     "standard-step method, instead of each cross section's normal "
-                                                     "depth."),
-        "valley_sections": ConfigOption(False, "bool", "Take ARC's overbank flow on lines out from each cross "
-                                                       "section's banks square to the valley, at the valley's slope."),
-        "valley_dir_widths": ConfigOption(16.0, "float", "How far along the stream, in channel widths either way, ARC "
-                                                         "takes the valley's direction and the stream's sinuosity "
-                                                         "over, for valley_sections: about a meander's length, which "
-                                                         "is 10 to 14 widths. 0 uses valley_dir_dist everywhere."),
-        "valley_dir_dist": ConfigOption(40, "int", "How far along the stream, in cells either way, ARC takes the "
-                                                   "valley's direction and the stream's sinuosity over, for "
-                                                   "valley_sections, where a reach has no banks to give its width "
-                                                   "(or with valley_dir_widths 0). At least 2."),
-        "drop_edge_sections": ConfigOption(False, "bool", "Drop ARC's rating curves whose water, at their top flow, "
-                                                          "reaches the DEM's edge (or comes within edge_margin of "
-                                                          "it): the edge cuts their cross sections off, so tiles "
-                                                          "whose buffers overlap give the same cell different water, "
-                                                          "a seam where their maps meet."),
-        "edge_margin": ConfigOption(0.0, "float", "How close (m) the water's edge may come to the DEM's edge before "
-                                                  "drop_edge_sections drops the rating curve. 0 drops only those "
-                                                  "whose water reaches it."),
         "outlet_exchange": ConfigOption("off", "text", "Start ARC's rivers that leave a buffered DEM from the water "
                                                        "its neighbouring DEMs have there, instead of normal depth: "
                                                        "pass1 rates only the reaches the neighbours need and writes "
                                                        "their water to outlet_exchange_dir; pass2, once every DEM "
                                                        "has done pass1, maps each DEM from its neighbours' water. "
-                                                       "Needs buffer and standard_step.",
+                                                       "Needs buffer and arc_args' Standard_Step.",
                                         ("off", "pass1", "pass2")),
         "outlet_exchange_dir": ConfigOption(None, "path", "Folder the DEMs' outlet_exchange passes share. Empty: "
                                                           "output_dir/outlet_exchange."),
-        "bathy_args": ConfigOption(DEFAULT_BATHY_ARGS, "dict", "More ARC settings for the bathymetry run. Replaces "
-                                                               "the whole default set."),
+        "arc_args": ConfigOption(DEFAULT_ARC_ARGS, "dict", "ARC's own settings, by its input-file keys (see ARC's "
+                                                           "docs): a key set to null takes "
+                                                           "ARC's default. Not the files and fields nencarta sets."),
     },
     "Outputs": {
         "make_vdt": ConfigOption(True, "bool", "Write ARC's VDT database (velocity, depth and top width per stream "
@@ -267,12 +294,7 @@ CONFIG_SECTIONS = {
         "make_depth_maps": ConfigOption(True, "bool", "Write flood depth maps."),
         "make_velocity_maps": ConfigOption(True, "bool", "Write flood velocity maps."),
         "make_wse_maps": ConfigOption(True, "bool", "Write water surface elevation maps."),
-        "flood_waterlc_and_strm_cells": ConfigOption(False, "bool", "Show water land cover and stream cells as "
-                                                                    "flooded."),
-        "flood_bathy_mask": ConfigOption(False, "bool", "Show the bathymetry water mask's cells as flooded."),
         "floodmap_identifier": ConfigOption("", "text", "Text added to the flood map file names."),
-        "floodmap_args": ConfigOption(DEFAULT_FLOODMAP_ARGS, "dict", "More Curve2Flood settings for the flood maps. "
-                                                                     "Replaces the whole default set."),
         "overwrite_floodmaps": ConfigOption(True, "bool", "Remake flood maps that already exist."),
         "make_fist_inputs": ConfigOption(True, "bool", "Write FIST inputs (GeoJSON water surface points) for each "
                                                        "forecast or user flow file. Needs make_curvefile."),
@@ -292,33 +314,14 @@ CONFIG_SECTIONS = {
                                                                                  "floodspreader.py in the nencarta "
                                                                                  "package folder.",
                                tuple(Mapper.list_names())),
-        "fldpln_dh": ConfigOption(0.5, "float", "FLDPLN depth step (m). Used by the iterative solver."),
-        "fldpln_min_depth": ConfigOption(0.1, "float", "FLDPLN: least depth (m) the iterative solver counts a flooded "
-                                                       "cell as when it decides where a spill stops (FLDPLN's fldmn). "
-                                                       "The library stores each depth to flood as found, however "
-                                                       "small."),
-        "fldpln_min_flood_depth": ConfigOption(0.01, "float", "FLDPLN: shallowest water (m) that floods a cell on the "
-                                                              "flood maps (Curve2Flood's FLDPLN_Min_Flood_Depth). "
-                                                              "0 floods every cell the water reaches."),
-        "fldpln_max_depth": ConfigOption(25.0, "float", "FLDPLN: deepest flood (m) the library covers."),
-        "fldpln_spill_decay": ConfigOption(0.0, "float", "FLDPLN: head (m) water spilling over a divide loses per "
-                                                         "cell down its path, so a spill on flat ground ends where "
-                                                         "its water runs out. 0 for none; 0.005 is a good starting "
-                                                         "point. The exact solver takes it off on every step down, "
-                                                         "whichever neighbour that is, as a spill loses it down its "
-                                                         "path."),
-        "fldpln_max_cells_per_segment": ConfigOption(None, "int", "FLDPLN: most floodplain cells one stream segment "
-                                                                  "may flood. Saves memory on flat ground. Exact "
-                                                                  "solver only."),
-        "fldpln_keep_spilling": ConfigOption(False, "bool", "FLDPLN: keep routing water that spills over low divides. "
-                                                            "Suits DEMs of 10 m or finer."),
-        "fldpln_solver": ConfigOption("iterative", "text", "FLDPLN solver: iterative (steps up by fldpln_dh and "
-                                                           "spills once per step, as FLDPLN advises for 30 m DEMs) "
-                                                           "or exact (one sweep; spills as far as the water can run "
-                                                           "downhill, and ignores fldpln_dh).",
-                                      ("iterative", "exact")),
-        "fldpln_parallel": ConfigOption(False, "bool", "FLDPLN: build the library with several processes. Cannot be "
-                                                       "used with parallel."),
+        "curve2flood_args": ConfigOption(DEFAULT_CURVE2FLOOD_ARGS, "dict", "Curve2Flood's own settings for the flood "
+                                                                           "maps, by its input-file keys (see "
+                                                                           "Curve2Flood's docs): a key set to null takes "
+                                                                           "Curve2Flood's default."),
+        "fldpln_library_args": ConfigOption(DEFAULT_FLDPLN_LIBRARY_ARGS, "dict", "Arguments of Curve2Flood's "
+                                                                                 "build_fldpln_library, which builds "
+                                                                                 "the Curve2Flood-FLDPLNpy library "
+                                                                                 "(see Curve2Flood's docs)."),
     },
     "Running": {
         "overwrite": ConfigOption(False, "bool", "Remake intermediate files that already exist."),

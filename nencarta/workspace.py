@@ -18,7 +18,8 @@ FILE_BLURBS = (
     'ARC_Input_Bathy', 'ARC_Input_InitialFlood', 'ARC_Input_FloodForecast', 'ARC_Input',
     'VDT_Database_Initial', 'VDT_Database_Bathy', 'AP_Database_Bathy', 'CurveFile_Initial',
     'CurveFile_Bathy', 'XS', 'Representative_XS',
-    'water_mask', 'ARC_Bathy', 'FS_Bathy',
+    'Mapper_Input_Bathy', 'Mapper_Input_InitialFlood', 'Mapper_Input_DepthMask',
+    'water_mask', 'depth_mask', 'ARC_Bathy', 'FS_Bathy',
     'Reanalysis_Boundary', 'ARC_Input_Boundary', 'VDT_Database_Boundary', 'ARC_Bathy_Boundary', 'outlet_wse',
     'ARC_Flood', 'ARC_Flood_Initial', 'ARC_FloodDepth', 'ARC_FloodWSE', 'ARC_FloodVEL',
     'Seed', 'FIST',
@@ -145,6 +146,15 @@ class Workspace:
                                                                 'parquet' if vdt_ext == 'parquet' else 'csv', 'source')
 
         self.bathy_water_mask = self.file_path(self.bathy_file_folder, 'water_mask', 'tif', 'source')
+        # use_specified_depth_for_bathy_mask: ARC's water mask, the streams flooded to a set depth, and the Curve2Flood
+        # config that makes it
+        self.depth_mask = self.file_path(self.bathy_file_folder, 'depth_mask', 'tif', 'source')
+        self.Depth_Mask_Config = self.file_path(self.ARC_Folder, 'Mapper_Input_DepthMask', self.config_end, 'source')
+        # Curve2Flood's own configs beside ARC's: the run that burns ARC's bathymetry into the DEM (FS_Bathy), and the
+        # DEM cleaner's outline with use_specified_depth_for_bathy_mask (FloodMapFile_Initial)
+        self.Mapper_FileName_Bathy = self.file_path(self.ARC_Folder, 'Mapper_Input_Bathy', self.config_end, 'source')
+        self.Mapper_FileName_InitialFlood = self.file_path(self.ARC_Folder, 'Mapper_Input_InitialFlood',
+                                                           self.config_end, 'source')
         self.ARC_BathyFile = self.file_path(self.bathy_file_folder, 'ARC_Bathy', 'tif', 'source')
         self.FS_BathyFile = self.file_path(self.bathy_file_folder, 'FS_Bathy', 'tif', 'source')
 

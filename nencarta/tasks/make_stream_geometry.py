@@ -115,13 +115,13 @@ def make_stream_geometry(workspace: Workspace,) -> Path:
         kwargs['write_covering_bbox'] = True
         kwargs['geometry_encoding'] = 'geoarrow'
 
-    # ARC's drainage-area power laws take the area in km2: the width's always, the depth's with
-    # use_power_laws_for_bathymetry (see tasks.configs._drainage_area_power_laws)
+    # ARC's drainage-area power laws take the area in km2: the width's always, the depth's when arc_args give it
+    # (see tasks.configs._drainage_area_power_laws)
     if configs.area_km2_field and configs.area_km2_field not in gdf.columns:
         if configs.area_m2_field and configs.area_m2_field in gdf.columns:
             gdf[configs.area_km2_field] = gdf[configs.area_m2_field] * 1e-6
-        elif configs.use_power_laws_for_bathymetry:
-            raise ValueError(f"Area field '{configs.area_m2_field}' not found in stream geometry; cannot use power laws for bathymetry.")
+        elif configs.uses_depth_power_law:
+            raise ValueError(f"Area field '{configs.area_m2_field}' not found in stream geometry; cannot use the depth's power law (arc_args' coefficient_depth).")
 
     existing_river_ids = set(gdf[configs.stream_id_field])
     # Set the downstream id to -1 for any river that has a downstream id that is not in the existing river ids
