@@ -24,6 +24,12 @@ IGNORED_OUTPUT_FOLDERS = [
     "no_bathy_new",
 ]
 
+# These check outputs kept in the git-ignored ignore/ folder, so they only run where that folder is
+pytestmark = pytest.mark.skipif(
+    not any((IGNORE_DIR / folder_name).is_dir() for folder_name in IGNORED_OUTPUT_FOLDERS),
+    reason="needs the local outputs in ignore/",
+)
+
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()

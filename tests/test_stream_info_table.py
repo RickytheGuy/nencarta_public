@@ -10,7 +10,8 @@ import pandas as pd
 import pytest
 from osgeo import gdal
 
-from nencarta.tasks.move_streams import _D8_OFFSETS, _create_stream_info_table
+from nencarta.tasks.move_streams import _create_stream_info_table
+from nencarta.tasks.stream_conflation import D8_OFFSETS as _D8_OFFSETS
 
 
 def write_flowdir(path, array):

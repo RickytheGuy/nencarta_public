@@ -19,7 +19,7 @@ from nencarta.workspace import Workspace
 
 MODES = {
     "baseflow bathymetry": {},
-    "power-law bathymetry": {"use_power_laws_for_bathymetry": True},
+    "power-law bathymetry": {"arc_args": {"coefficient_depth": 0.27, "exponent_depth": 0.21}},
     "no bathymetry": {"disable_bathymetry": True},
 }
 

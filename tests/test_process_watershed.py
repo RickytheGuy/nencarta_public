@@ -1,7 +1,8 @@
 import importlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 main = importlib.import_module("nencarta.main")
 
@@ -72,18 +73,17 @@ def test_process_watershed_returns_without_pipeline_when_no_dem_source(workspace
     assert called is False
 
 
-def test_process_json_input_serial_calls_process_many_with_serial_override(workspace_tmp, monkeypatch):
+def test_process_json_input_arguments_override_the_file(workspace_tmp, monkeypatch):
     json_file = workspace_tmp / "input.json"
     watershed = base_config(workspace_tmp)
-    json_file.write_text(json.dumps({"parallel": True, "watersheds": [watershed]}), encoding="utf-8")
+    json_file.write_text(json.dumps({"parallel": True, "num_workers": 2, "watersheds": [watershed]}), encoding="utf-8")
     captured = []
 
     monkeypatch.setattr(main, "process_many_watersheds", lambda input_dicts: captured.extend(input_dicts))
 
-    result = main.process_json_input_serial(json_file)
+    main.process_json_input(json_file, parallel=False, num_workers=4)
 
-    assert result is None
-    assert captured == [dict(watershed, parallel=False)]
+    assert captured == [dict(watershed, parallel=False, num_workers=4)]
 
 
 def test_process_json_input_calls_process_many(workspace_tmp, monkeypatch):
@@ -118,27 +118,48 @@ def test_process_json_input_applies_top_level_run_settings(workspace_tmp, monkey
     ]
 
 
-def test_process_cli_arguments_uses_process_watershed_shape(workspace_tmp, monkeypatch):
+def run_cli(monkeypatch, *argv) -> dict:
+    """The watershed dictionary `flood-mapping cli <argv>` passes to process_watershed."""
     captured = []
-    args = SimpleNamespace(
-        command="cli",
-        watershed="cli_entrypoint",
-        flowline=str(workspace_tmp / "streams.parquet"),
-        dem_dir=str(workspace_tmp / "dems"),
-        output_dir=str(workspace_tmp / "out"),
-        overwrite=True,
+    monkeypatch.setattr(main, "process_watershed", lambda input_dict: captured.append(input_dict))
+    main.process_cli_arguments(main.build_parser().parse_args(["cli", *argv]))
+    return captured[0]
+
+
+def test_cli_passes_only_the_options_given(workspace_tmp, monkeypatch):
+    watershed = run_cli(
+        monkeypatch, "--name", "cli_entrypoint", "--output_dir", str(workspace_tmp / "out"),
+        "--flowline", str(workspace_tmp / "streams.parquet"), "--dem_dir", str(workspace_tmp / "dems"), "--overwrite",
     )
 
-    monkeypatch.setattr(main, "process_watershed", lambda input_dict: captured.append(input_dict))
+    assert watershed == {
+        "name": "cli_entrypoint",
+        "flowline": str(workspace_tmp / "streams.parquet"),
+        "dem_dir": str(workspace_tmp / "dems"),
+        "output_dir": str(workspace_tmp / "out"),
+        "overwrite": True,
+    }
 
-    main.process_cli_arguments(args)
 
-    assert captured == [
-        {
-            "name": "cli_entrypoint",
-            "flowline": str(workspace_tmp / "streams.parquet"),
-            "dem_dir": str(workspace_tmp / "dems"),
-            "output_dir": str(workspace_tmp / "out"),
-            "overwrite": True,
-        }
-    ]
+def test_cli_options_take_each_kind_of_value(monkeypatch):
+    watershed = run_cli(
+        monkeypatch, "--name", "x", "--output_dir", "out", "--dem", "dem.tif", "--flowline", "streams.gpkg",
+        "--no-relocate_misplaced_streams", "--return_periods", "2", "100", "--bbox", "-105", "40", "-104", "41",
+        "--depth_mask_distance", "12.5", "--age_of_forecast_days", "3", "--arc_args", '{"Gen_Slope_Dist": 20}',
+        "--mapper", "Curve2Flood-FLDPLNpy",
+    )
+
+    assert watershed["relocate_misplaced_streams"] is False
+    assert watershed["return_periods"] == [2, 100]
+    assert watershed["bbox"] == [-105.0, 40.0, -104.0, 41.0]
+    assert watershed["depth_mask_distance"] == 12.5
+    assert watershed["age_of_forecast_days"] == 3
+    assert watershed["arc_args"] == {"Gen_Slope_Dist": 20}
+    assert watershed["mapper"] == "Curve2Flood-FLDPLNpy"
+
+
+def test_cli_requires_a_name_and_an_output_folder(capsys):
+    with pytest.raises(SystemExit):
+        main.build_parser().parse_args(["cli", "--dem", "dem.tif"])
+
+    assert "--name" in capsys.readouterr().err
