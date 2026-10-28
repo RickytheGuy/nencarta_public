@@ -1,6 +1,7 @@
-from .dem_cleaner import *
+from nencarta.dem_cleaner import *
+from nencarta.download_usgs_dem import *
+
 from .download_forecasts import *
-from .download_usgs_dem import *
 from .logger import LOG, set_log_level
 from .main import *
 

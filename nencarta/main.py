@@ -28,7 +28,7 @@ def _resolve_workspace_dems(configs: NencartaConfig) -> list:
                 )
             return []
         
-        return list(Path(configs.dem_dir).glob(configs.dem_filter))
+        return sorted(Path(configs.dem_dir).glob(configs.dem_filter))
 
     if configs.dem:
         return [configs.dem]
