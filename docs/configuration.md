@@ -349,8 +349,7 @@ puts it into the DEM the flood maps are made on (see
     is compared with the stream cells' heights plus the depth, averaged out to
     `depth_mask_distance` away. If false, the water mask
     (the streams and the water along them) outlines the DEM cleaner's channels
-    and gives ARC its banks, which follows the river's water more closely on the
-    FIM benchmark sites (see [methods](methods.md#the-channels-outline)). Either way, the flood mapper
+    and gives ARC its banks (see [methods](methods.md#the-channels-outline)). Either way, the flood mapper
     burns ARC's channel into the DEM as ARC wrote it, clipped to no outline, and
     `use_dem_derived_channel_mask` still steers the burn.
 

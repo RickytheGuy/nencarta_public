@@ -7,7 +7,7 @@ flood maps are made, and how neighbouring DEMs' maps are made to meet.
 [Configuration reference](configuration.md) describes the settings named here.
 
 The maps and cross section come from a run on the Colorado River near Loma,
-Colorado (FABDEM tile N39W109), with GEOGLOWS streams and return period flows.
+Colorado, with GEOGLOWS streams and return period flows.
 
 ## Moving streams onto the DEM
 
@@ -132,12 +132,9 @@ Dashed steps are optional.
     cells have no water beside them) is a cell wide all along: patches of water
     that touch only such reaches' stream cells, and hold no lake water, are left
     out. A pond or a wet field beside a river the DEM and the imagery show no
-    wider than a cell, as beside reach 711012025 in Salt Lake City, would
+    wider than a cell, would
     otherwise be carved as the river. Water that also touches a wider reach is
-    that river's, though a narrow tributary's line runs into it, and stays. On
-    the FIM sites' masks, 4,694 of 6,857 reaches are mostly a cell wide, and
-    8.4% of the water is left out, nearly all of it on four sites of small
-    streams.
+    that river's, though a narrow tributary's line runs into it, and stays.
 
 Each moved reach keeps its ID, so its flows still apply, and is one unbroken
 flow path; its downstream reach is the one its flow path drains into. The moved
