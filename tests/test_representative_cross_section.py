@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from arc.config import Configs
 from osgeo import gdal, osr
 
-from arc.config import Configs
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.model_config import ModelConfig
 from nencarta.tasks.configs import define_arc_configs

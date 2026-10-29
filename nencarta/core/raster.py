@@ -189,7 +189,11 @@ class Raster(GISDataSource, LMDBCache):
         return list(output)
     
     def read_array(self) -> np.ndarray:
-        return self.ds.ReadAsArray()
+        array = self.ds.ReadAsArray()
+        # GDAL keeps the blocks it read cached while the file is open, as a Raster keeps it, up to 5% of the machine's
+        # memory by default: now that they're all in the array, they're let go
+        self.ds.FlushCache()
+        return array
     
     @classmethod
     def write_array_using_reference(cls, 

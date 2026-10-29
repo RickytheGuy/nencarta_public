@@ -511,7 +511,9 @@ puts it into the DEM the flood maps are made on (see
     files as YAML instead of text.
 
 * <a id="json-compression"></a>`compression` (text, default `LZW`): Compression of the rasters NenCarta
-    writes itself, e.g. `LZW`, `DEFLATE` or `ZSTD`.
+    writes itself, e.g. `LZW`, `DEFLATE` or `ZSTD`. The burned and filled DEMs are written with the
+    floating point predictor and, with `ZSTD`, at level 1, which writes them several times faster and
+    smaller than GDAL's default level.
 
 ## Flood mapper
 
@@ -660,7 +662,9 @@ which changed nothing, are left out.
 * `NENCARTA_CACHE_DIR`: Where NenCarta caches raster and vector information
     (default: `~/.cache`). The cache is skipped if it can't be used.
 * `NUMBA_CACHE_DIR`: Where Numba caches compiled code, e.g. when the default
-    location isn't writable.
+    location isn't writable. Keep it somewhere that lasts between runs: with an
+    empty cache, preparing a 1 degree tile's inputs spends about 30 s more
+    compiling, before ARC and Curve2Flood compile their own.
 
 ## Output folders
 

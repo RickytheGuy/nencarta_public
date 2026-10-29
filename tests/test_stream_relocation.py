@@ -7,8 +7,8 @@ the relocation takes for water the DEM levels.
 """
 import heapq
 
-import numpy as np
 import geopandas as gpd
+import numpy as np
 import pytest
 import shapely
 from osgeo import osr
@@ -16,7 +16,11 @@ from shapely.geometry import LineString
 
 from nencarta.tasks.move_streams import fill_and_flow_directions
 from nencarta.tasks.stream_conflation import D8_OFFSETS
-from nencarta.tasks.stream_relocation import RelocationSettings, breach_dammed_rivers, relocate_misplaced_reaches
+from nencarta.tasks.stream_relocation import (
+    RelocationSettings,
+    breach_dammed_rivers,
+    relocate_misplaced_reaches,
+)
 
 CELL = 30.0
 X0, Y0 = 500_000.0, 4_500_000.0

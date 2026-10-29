@@ -115,9 +115,40 @@ def _open_flows(source: str, dim: str, configs: NencartaConfig) -> xr.Dataset:
     storage_options = _storage_options(str(source), configs)
     return _open_flow_dataset(str(source), dim, configs.stream_id_field, json.dumps(storage_options, sort_keys=True))
 
+def _river_positions(ds: xr.Dataset, river_ids: np.ndarray) -> np.ndarray | None:
+    """
+    Where each of ``river_ids`` is along ``ds``'s river_id, -1 where it isn't there, or None if one of them is there
+    more than once (or ``river_ids`` repeat one). Found by looking the dataset's IDs up among the domain's few.
+    """
+    index = ds.indexes.get("river_id")
+    wanted = pd.Index(river_ids)
+    if index is None or not wanted.is_unique:
+        return None
+
+    found = wanted.get_indexer(index.to_numpy())
+    along = np.flatnonzero(found >= 0)
+    if np.bincount(found[along], minlength=len(wanted)).max(initial=0) > 1:
+        return None
+
+    positions = np.full(len(wanted), -1, np.int64)
+    positions[found[along]] = along
+    return positions
+
+def _select_rivers(ds: xr.Dataset | xr.DataArray, river_ids: np.ndarray, **others) -> xr.Dataset | xr.DataArray:
+    """``ds.sel(river_id=river_ids, **others)``, by position where it can be (see _river_positions)."""
+    positions = _river_positions(ds, river_ids)
+    if positions is None or (positions < 0).any():
+        return ds.sel(river_id=river_ids, **others)
+    return ds.sel(**others).isel(river_id=positions)
+
 def _river_ids_in(ds: xr.Dataset, river_ids: np.ndarray, source: str, configs: NencartaConfig) -> np.ndarray:
     """Return the river IDs that ``ds`` has, or raise if some are missing and raise_errors_if_river_ids_missing is set."""
-    found = np.isin(river_ids, ds["river_id"].values)
+    positions = _river_positions(ds, river_ids)
+    if positions is None:
+        found = np.isin(river_ids, ds["river_id"].values)
+    else:
+        found = positions >= 0
+        
     if found.all():
         return river_ids
 
@@ -143,7 +174,7 @@ def _return_period_flows(rp_ds: xr.Dataset, river_ids: np.ndarray, source: str, 
             f"set 'return_period_variables' to some of {_variables_with_dims(rp_ds, 'return_period')}."
         )
     
-    rp_df = rp_ds[variables].sel(river_id=river_ids).to_dataframe().reset_index()
+    rp_df = _select_rivers(rp_ds[variables], river_ids).to_dataframe().reset_index()
 
     # Where there are several variables, use the highest flow
     rp_df['return_period_flow'] = rp_df[variables].max(axis=1).round(3)
@@ -188,7 +219,7 @@ def _fdc_flows(fdc_ds: xr.Dataset, river_ids: np.ndarray, source: str, configs: 
     if missing:
         raise ValueError(f"Flow duration curve dataset {source} has no flows for exceedance(s) {', '.join(missing)}%.")
 
-    fdc_df = fdc_ds[variable].sel(p_exceed=FDC_EXCEEDANCES, river_id=river_ids).to_dataframe().reset_index()
+    fdc_df = _select_rivers(fdc_ds[variable], river_ids, p_exceed=FDC_EXCEEDANCES).to_dataframe().reset_index()
     fdc_df = fdc_df.pivot_table(
         index='river_id',
         columns='p_exceed',
@@ -198,7 +229,7 @@ def _fdc_flows(fdc_ds: xr.Dataset, river_ids: np.ndarray, source: str, configs: 
     return fdc_df.rename(columns={p: f"p_exceed_{p:g}" for p in fdc_df.columns})
 
 def _fdc_flows_from_daily(daily_ds: xr.Dataset, river_ids: np.ndarray) -> pd.DataFrame:
-    daily_df = daily_ds.sel(river_id=river_ids).to_dataframe().reset_index()
+    daily_df = _select_rivers(daily_ds, river_ids).to_dataframe().reset_index()
 
     # creating exceedance percentiles with the daily data
     quantiles = [1.0 - (p / 100.0) for p in FDC_EXCEEDANCES]

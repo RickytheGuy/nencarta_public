@@ -15,16 +15,21 @@ import pytest
 from osgeo import gdal, osr
 from shapely.geometry import LineString
 
-import nencarta.tasks.run_models as run_models
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.enumerations import Mapper
 from nencarta.core.inspect_config import inspect_config
 from nencarta.core.model_config import ModelConfig
 from nencarta.main import run_pipeline
 from nencarta.pipeline import build_pipeline
+from nencarta.tasks import run_models
 from nencarta.tasks.configs import _write_config, define_arc_configs
-from nencarta.tasks.outlet_exchange import (METADATA_KEY, boundary_reaches, buffer_lines, make_outlet_wse_file,
-                                            run_boundary_pass)
+from nencarta.tasks.outlet_exchange import (
+    METADATA_KEY,
+    boundary_reaches,
+    buffer_lines,
+    make_outlet_wse_file,
+    run_boundary_pass,
+)
 from nencarta.workspace import Workspace
 
 CELL = 0.001

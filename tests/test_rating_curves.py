@@ -6,7 +6,11 @@ import pytest
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.inspect_config import inspect_config
 from nencarta.core.model_config import ModelConfig
-from nencarta.tasks.configs import define_arc_configs, define_configs_for_dem_cleaning, define_mapper_configs
+from nencarta.tasks.configs import (
+    define_arc_configs,
+    define_configs_for_dem_cleaning,
+    define_mapper_configs,
+)
 from nencarta.workspace import Workspace
 
 

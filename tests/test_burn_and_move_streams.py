@@ -8,19 +8,24 @@ straight lines.
 import heapq
 from types import SimpleNamespace
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import pytest
 from osgeo import gdal, osr
 from shapely.geometry import LineString, MultiLineString, box
 
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.raster import Raster
-from nencarta.workspace import Workspace
-from nencarta.tasks.make_bathy_water_mask import (make_water_mask, near_the_rivers_level, one_cell_wide_where_mostly,
-                                                  water_mask)
+from nencarta.tasks.make_bathy_water_mask import (
+    make_water_mask,
+    near_the_rivers_level,
+    one_cell_wide_where_mostly,
+    water_mask,
+)
 from nencarta.tasks.move_streams import (
+    FLOWDIR_NODATA,
+    ROUTING_MAX_DROP_M,
     _burn_linestring,
     _cut_at_the_sea,
     _get_stream_raster,
@@ -29,18 +34,17 @@ from nencarta.tasks.move_streams import (
     _reaches_stuck_in_lakes,
     _trunks,
     _without_reaches,
-    FLOWDIR_NODATA,
-    ROUTING_MAX_DROP_M,
-    fill_and_flow_directions,
-    fill_depressions,
     burn_streams_and_move_streams,
     burn_streams_into_dem,
+    fill_and_flow_directions,
+    fill_depressions,
     load_ocean_array,
     restore_unfollowed_burns,
     routing_dem,
     smooth_burned_dem,
 )
 from nencarta.tasks.stream_conflation import D8_OFFSETS
+from nencarta.workspace import Workspace
 
 CELL = 30.0
 X0, Y0 = 500_000.0, 4_500_000.0
@@ -114,11 +118,11 @@ def flat_river():
     dem = np.full((30, 40), 150.0, np.float32)
     dem[10:21, :] = 141.2
     dem[14, 1] = 135.0
-    for r in range(0, 10):
+    for r in range(10):
         dem[r, 18:23] = 146.0 - 0.4 * r  # the tributary's valley
-    upper = LineString([centre(15, c) for c in range(0, 21)][::-1])   # drawn downstream to upstream, as TDX-Hydro
+    upper = LineString([centre(15, c) for c in range(21)][::-1])   # drawn downstream to upstream, as TDX-Hydro
     lower = LineString([centre(15, c) for c in range(20, 40)][::-1])
-    tributary = LineString([centre(r, 20) for r in range(0, 16)][::-1])
+    tributary = LineString([centre(r, 20) for r in range(16)][::-1])
     gdf = gpd.GeoDataFrame({"LINKNO": [3, 1, 2], "DSLINKNO": [-1, 3, 3], "strmOrder": [2, 2, 1],
                             "DSContArea": [900.0, 850.0, 20.0]},
                            geometry=[lower, upper, tributary], crs="EPSG:32615")
@@ -150,7 +154,7 @@ def test_a_burned_river_keeps_draining_through_a_confluence(flat_river):
     dem, gdf, channel_mask = flat_river
     burned, streams = burn(dem, gdf, channel_mask)
 
-    river = [(15, c) for c in range(0, 40)]
+    river = [(15, c) for c in range(40)]
     profile = np.array([burned[cell] for cell in river])
     assert (np.diff(profile[1:]) <= 0).all(), profile
     # Nothing along the river is a pit that filling would flatten
@@ -224,7 +228,7 @@ def tributary_below_the_river():
     dem, gdf, channel_mask = chain_on_flat_water(reaches=2, length=30)
     dem[0:6, 30] = 140.0 - 0.15 * np.arange(6)
     dem[0:6, 29] = dem[0:6, 31] = 145.0
-    tributary = LineString([centre(r, 30) for r in range(0, 11)][::-1])
+    tributary = LineString([centre(r, 30) for r in range(11)][::-1])
     gdf = pd.concat([gdf.assign(DSLINKNO=[2, -1]),
                      gpd.GeoDataFrame({"LINKNO": [3], "DSLINKNO": [2], "strmOrder": [1], "DSContArea": [5e6]},
                                       geometry=[tributary], crs="EPSG:32615")], ignore_index=True)
@@ -426,7 +430,7 @@ def test_a_reach_with_nothing_up_or_downstream_is_burned():
     dem = np.full((20, 20), 150.0, np.float32)
     dem[:, 10] = 140.3
     gdf = gpd.GeoDataFrame({"LINKNO": [7], "DSLINKNO": [-1]},
-                           geometry=[LineString([centre(r, 10) for r in range(0, 20)])], crs="EPSG:32615")
+                           geometry=[LineString([centre(r, 10) for r in range(20)])], crs="EPSG:32615")
     burned, _ = burn(dem, gdf, np.zeros(dem.shape, bool), order_col=None, area_col=None)
 
     assert (burned[1:19, 10] <= 140.0).all()
@@ -570,7 +574,7 @@ def test_other_mappers_leave_out_a_reach_ending_in_a_lake_before_the_burn(worksp
     lakes = np.zeros((10, 10), bool)
     lakes[3:8, 7:] = True
     source = gpd.GeoDataFrame({"LINKNO": [1, 2], "DSLINKNO": [2, -1], "strmOrder": [1, 2]},
-                              geometry=[LineString([centre(5, c) for c in range(0, 5)]),
+                              geometry=[LineString([centre(5, c) for c in range(5)]),
                                         LineString([centre(5, c) for c in range(4, 10)])], crs="EPSG:32615")
 
     workspace, dem = left_out_workspace(workspace_tmp / "other", fldpln=False, lakes=lakes)
@@ -590,7 +594,7 @@ def estuary():
     ocean[3:8, 6:] = True
     source = gpd.GeoDataFrame(
         {"LINKNO": [1, 2, 3, 4, 5], "DSLINKNO": [2, 3, 4, -1, 4], "strmOrder": [3, 3, 3, 3, 1]},
-        geometry=[LineString([centre(5, c) for c in range(0, 5)]), LineString([centre(5, c) for c in range(4, 8)]),
+        geometry=[LineString([centre(5, c) for c in range(5)]), LineString([centre(5, c) for c in range(4, 8)]),
                   LineString([centre(5, 7), centre(5, 8), centre(4, 9), centre(3, 9), centre(2, 9)][::-1]),
                   LineString([centre(r, 9) for r in (2, 1, 0)]), LineString([centre(0, 7), centre(1, 8), centre(2, 9)])],
         crs="EPSG:32615")
@@ -610,7 +614,7 @@ def test_a_line_ends_where_its_river_first_reaches_the_sea():
     ocean = np.zeros((10, 10), bool)
     ocean[:, 5:7] = True
     source = gpd.GeoDataFrame({"LINKNO": [1, 2], "DSLINKNO": [2, -1]},
-                              geometry=[LineString([centre(4, c) for c in range(0, 3)]),
+                              geometry=[LineString([centre(4, c) for c in range(3)]),
                                         LineString([centre(4, c) for c in range(2, 10)][::-1])], crs="EPSG:32615")
 
     cut = _cut_at_the_sea(source, ocean, GT, "LINKNO", "DSLINKNO").set_index("LINKNO").geometry
@@ -688,7 +692,7 @@ def synthetic_watershed(tmp, mapper="Curve2Flood-FLDPLNpy", with_lake=True):
     streams = gpd.GeoDataFrame(
         {"LINKNO": [11, 12, 13, 14, 15], "DSLINKNO": [13, 13, 14, 15, -1], "strmOrder": [2, 1, 2, 2, 2],
          "DSContArea": [2.0e6, 1.0e6, 3.5e6, 4.0e6, 4.2e6]},
-        geometry=[line([(40, c) for c in range(0, 41)]), line([(r, 40) for r in range(0, 41)]),
+        geometry=[line([(40, c) for c in range(41)]), line([(r, 40) for r in range(41)]),
                   line([(40, c) for c in range(40, 57)]), line([(40, c) for c in range(56, 73)]),
                   line([(40, c) for c in range(72, 80)])],
         crs="EPSG:32615")
@@ -764,7 +768,7 @@ def reach_in_pieces(tmp):
     workspace = synthetic_watershed(tmp, with_lake=False)
     workspace.configs.drop_multilinestrings = True
     source = gpd.read_file(workspace.DEM_StrmShp)
-    trunk = LineString(([centre(r, 44) for r in range(0, 37)] + [centre(39, 41)])[::-1])
+    trunk = LineString(([centre(r, 44) for r in range(37)] + [centre(39, 41)])[::-1])
     stub = LineString([centre(r, 30) for r in range(5, 10)][::-1])
     source.loc[source.LINKNO == 12, "geometry"] = MultiLineString([trunk, stub])
     source.to_file(workspace.DEM_StrmShp)
@@ -795,9 +799,9 @@ def test_kept_in_pieces_a_reach_is_burned_along_its_trunk_alone(workspace_tmp):
     def line(cells):
         return LineString([centre(r + 0.4, c - 0.3) for r, c in cells][::-1])
 
-    short = [(20 - k, 40 + k) for k in range(0, 7)]
+    short = [(20 - k, 40 + k) for k in range(7)]
     source.loc[source.LINKNO == 12, "geometry"] = MultiLineString(
-        [line([(r, 40) for r in range(20, 41)]), line([(r, 40) for r in range(0, 21)]), line(short)])
+        [line([(r, 40) for r in range(20, 41)]), line([(r, 40) for r in range(21)]), line(short)])
     source.to_file(workspace.DEM_StrmShp)
     burn_streams_and_move_streams(workspace)
 
@@ -817,7 +821,7 @@ def test_moving_again_on_an_older_burn_still_leaves_out_a_reach_in_pieces(worksp
     workspace, source = reach_in_pieces(workspace_tmp)
     burn_streams_and_move_streams(workspace)
     older = source.copy()
-    older.loc[older.LINKNO == 12, "geometry"] = LineString([centre(r, 40) for r in range(0, 41)][::-1])
+    older.loc[older.LINKNO == 12, "geometry"] = LineString([centre(r, 40) for r in range(41)][::-1])
     older.to_file(workspace.relocated_StrmShp)
     workspace.new_StrmShp_matched.unlink()
     burn_streams_and_move_streams(workspace)

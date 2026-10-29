@@ -108,6 +108,10 @@ class Workspace:
         self.stream_info_file = self.file_path(self.FLDPLN_Folder, 'stream_info', stream_info_ext)
         self.new_stream_raster = self.file_path(self.strm_folder, 'matched', 'tif')
         self.lake_raster = self.file_path(self.strm_folder, 'lakes', 'tif')
+        # Whether lake_raster was rasterized by this workspace, so that even with overwrite it is read back, not made again
+        self.lake_raster_made = False
+        # The ocean on a grid, as move_streams.load_ocean_array made it for this workspace: (grid, mask or None)
+        self.ocean_array = None
 
         # currently the land file will be the same regardless of the streamflow source
         self.LAND_File = self.file_path(self.land_folder, 'LAND_Raster', 'tif')

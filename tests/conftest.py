@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_CACHE = REPO_ROOT / "ignore" / "_pytest_cache"
 TEST_RUNS = REPO_ROOT / "ignore" / "_pytest_runs" / "unit"

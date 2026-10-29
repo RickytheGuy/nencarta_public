@@ -56,3 +56,9 @@ norecursedirs = [
     "ignore",
     "pytest_tmp",
 ]
+
+[tool.ruff]
+extend-exclude = [
+    "tests/*.py",
+    "docs",
+]

@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from nencarta.core.configs import NencartaConfig
-from nencarta.core.defaults import DEFAULT_ARC_ARGS, DEFAULT_CONFIG, DEFAULT_CURVE2FLOOD_ARGS
+from nencarta.core.defaults import (
+    DEFAULT_ARC_ARGS,
+    DEFAULT_CONFIG,
+    DEFAULT_CURVE2FLOOD_ARGS,
+)
 from nencarta.core.enumerations import FloodMapMode, Mapper, StreamflowSource
 from nencarta.workspace import Workspace
 

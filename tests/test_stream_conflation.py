@@ -9,10 +9,10 @@ few cells), and the stream raster is exactly those cells.
 """
 from collections import deque
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
-import geopandas as gpd
 from osgeo import osr
 from shapely.geometry import LineString, MultiLineString
 
@@ -672,7 +672,11 @@ def test_a_river_whose_line_crosses_the_edge_on_its_bank_comes_in_at_the_river(w
     # drains down into the river at (20, 0). The river's water comes in at the river, and the reach starts there, not
     # on the bank. The channel threshold is above what the hillslopes drain, so the only channel is the river's path
     # from where its water comes in.
-    from nencarta.tasks.stream_conflation import _inflow_cells, _sample_lines, prepare_source_network
+    from nencarta.tasks.stream_conflation import (
+        _inflow_cells,
+        _sample_lines,
+        prepare_source_network,
+    )
     flowdir, dem = river_from_the_west()
     dem = dem if with_dem else None
     src = source([(5, -1, LineString([centre((19, -8), (0.1, -0.5)), centre((19, 44), (0.1, 0.5))]))])

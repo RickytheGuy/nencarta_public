@@ -13,9 +13,10 @@ import argparse
 from collections import deque
 from pathlib import Path
 
-import numpy as np
 import geopandas as gpd
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LightSource
@@ -24,7 +25,11 @@ from matplotlib.patches import Patch
 from osgeo import gdal, osr
 from shapely.geometry import LineString
 
-from nencarta.tasks.stream_conflation import D8_OFFSETS, ConflationSettings, conflate_to_flow_directions
+from nencarta.tasks.stream_conflation import (
+    D8_OFFSETS,
+    ConflationSettings,
+    conflate_to_flow_directions,
+)
 
 gdal.UseExceptions()
 HERE = Path(__file__).resolve().parent

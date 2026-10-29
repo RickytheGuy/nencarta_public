@@ -158,6 +158,7 @@ def test_the_rivers_level_is_scipys_minimum_and_gaussian_filters_to_the_last_bit
     # reflected edges, on grids smaller than the kernel, and rounded to float32 between passes on a float32 DEM, unless
     # told to work in double precision, as on a float64 copy of it
     from scipy.ndimage import gaussian_filter, minimum_filter
+
     from nencarta.tasks.channel_detection import ChannelSettings, _stream_levels
 
     rng = np.random.default_rng(3)
@@ -184,6 +185,7 @@ def test_the_nearest_stream_cell_and_its_distance_are_scipys_to_the_last_bit():
     # The feature transform of scipy's distance_transform_edt, ties and all, on square and oblong cells, and the
     # distances it works out from it
     from scipy.ndimage import distance_transform_edt
+
     from nencarta.tasks.channel_detection import nearest_cell, within_distance
 
     rng = np.random.default_rng(4)
@@ -201,6 +203,7 @@ def test_the_nearest_stream_cell_and_its_distance_are_scipys_to_the_last_bit():
 
 def test_the_patches_touching_a_stream_are_scipys_labels_beside_one():
     from scipy.ndimage import binary_dilation, label
+
     from nencarta.tasks.channel_detection import touching
 
     rng = np.random.default_rng(5)

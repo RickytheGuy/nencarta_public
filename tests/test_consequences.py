@@ -8,9 +8,9 @@ import pytest
 from osgeo import gdal, osr
 from shapely.geometry import Point
 
-import nencarta.tasks.consequences as consequences
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.floodmapper_output import FloodMapperBulkOutput, FloodMapperOutput
+from nencarta.tasks import consequences
 from nencarta.workspace import Workspace
 
 NODATA = -9999.0

@@ -3,10 +3,10 @@ import numpy as np
 import pytest
 from osgeo import gdal, osr
 
-import nencarta.tasks.make_bathy_water_mask as make_bathy_water_mask
 from nencarta.core.configs import NencartaConfig
 from nencarta.core.inspect_config import inspect_config
 from nencarta.core.raster import Raster
+from nencarta.tasks import make_bathy_water_mask
 from nencarta.tasks.configs import define_arc_configs
 from nencarta.tasks.make_bathy_water_mask import make_depth_mask
 from nencarta.workspace import Workspace

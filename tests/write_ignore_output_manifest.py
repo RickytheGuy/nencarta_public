@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-from test_ignore_characterization import IGNORE_DIR, IGNORED_OUTPUT_FOLDERS, build_manifest
+from test_ignore_characterization import (
+    IGNORE_DIR,
+    IGNORED_OUTPUT_FOLDERS,
+    build_manifest,
+)
 
 
 def main() -> None:

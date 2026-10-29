@@ -102,22 +102,24 @@ def make_land_cover(workspace: Workspace,
     
     proj = dem_raster.projection
     xres, yres = dem_raster.resolution
-    if workspace.LAND_File.suffix.lower() == '.vrt':
-        options = gdal.BuildVRTOptions(outputBounds=bounds_crs,
-                            outputSRS=proj,
-                            xRes=xres,
-                            yRes=yres,
-                            resampleAlg='mode')
-        gdal.BuildVRT(workspace.LAND_File, landcover_files, options=options)
-    else:
-        options = gdal.WarpOptions(format='GTiff',
-                            outputBounds=bounds_crs,
-                            outputBoundsSRS=proj,
-                            dstSRS=proj,
-                            xRes=xres,
-                            yRes=yres,
-                            resampleAlg='mode',
-                            creationOptions=[f'COMPRESS={workspace.configs.compression}', 'PREDICTOR=2'])
-        gdal.Warp(workspace.LAND_File, landcover_files, options=options)
+    remote = all(path.startswith("/vsis3/") for path in landcover_files)
+    with gdal.config_options({"GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR"} if remote else {}):
+        if workspace.LAND_File.suffix.lower() == '.vrt':
+            options = gdal.BuildVRTOptions(outputBounds=bounds_crs,
+                                outputSRS=proj,
+                                xRes=xres,
+                                yRes=yres,
+                                resampleAlg='mode')
+            gdal.BuildVRT(workspace.LAND_File, landcover_files, options=options)
+        else:
+            options = gdal.WarpOptions(format='GTiff',
+                                outputBounds=bounds_crs,
+                                outputBoundsSRS=proj,
+                                dstSRS=proj,
+                                xRes=xres,
+                                yRes=yres,
+                                resampleAlg='mode',
+                                creationOptions=[f'COMPRESS={workspace.configs.compression}', 'PREDICTOR=2'])
+            gdal.Warp(workspace.LAND_File, landcover_files, options=options)
 
     return workspace.LAND_File

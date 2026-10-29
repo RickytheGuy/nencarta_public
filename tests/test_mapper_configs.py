@@ -17,6 +17,7 @@ def test_the_fldpln_library_is_built_with_fldpln_library_args(workspace_tmp, mon
     import inspect
 
     import curve2flood
+
     from nencarta.tasks.run_models import run_fldpln_library
 
     configs = NencartaConfig({
@@ -49,6 +50,7 @@ def test_the_fldpln_library_is_built_with_the_bathymetry_water_mask(workspace_tm
     import curve2flood
     import numpy as np
     from osgeo import gdal, osr
+
     from nencarta.tasks.run_models import run_fldpln_library
 
     configs = NencartaConfig({
